@@ -1,2 +1,37 @@
-# SCC-200
-This project is a response to a proposal from a local authority seeking to improve public transport usage in the Preston, Lancaster, Blackpool, and Wyre coast region. Our application aims to solve the problem of information fragmentation by integrating live data from multiple bus and rail operators into a single, user-friendly platform.
+# SCC-200: Regional Transport System
+
+An advanced integrated transport application for the Preston, Lancaster, Blackpool, and Wyre coast region, providing unified multi-operator route planning and live arrival/departure boards.
+
+## Overview
+
+This project addresses fragmented information across multiple transport operators (Archway Travel, Stagecoach, Blackpool Transport, etc.) by building a scalable, resilient multi-platform application that integrates:
+
+- **Live Bus Data:** REST API feeds with route information and GPS tracking
+- **Rail Data:** Network Rail TRUST and TD messages via STOMP protocol
+- **Static Infrastructure:** NaPTAN/NPTG database and BPLAN rail planning data
+- **Advanced Features:** Multi-leg route planning, historical delay prediction, and real-time tracking
+
+## Tech Stack
+
+- **Backend:** Python (FastAPI/Flask) or Node.js
+- **Frontend:** React/Vue with Leaflet.js for OpenStreetMap visualisations
+- **Database:** PostgreSQL/MySQL
+- **Container Engine:** Podman
+- **Real-time Protocol:** STOMP (`transport.scc.lancs.ac.uk:61613`)
+
+## Key Data Sources
+
+- **Bus Feeds:** REST API (XML/JSON) - `/bus/times/` and `/bus/live/`
+- **Rail (TRUST):** JSON batch messages (Activation, Cancellation, Movement)
+- **Rail (TD):** Train Describer movement data between signalled track sections
+- **Static Data:** NaPTAN/NPTG and BPLAN databases
+
+## Important Notes
+
+- Location codes require translation between TIPLOC, STANOX, and CRS formats
+- CI/CD pipeline mandatory
+- All AI-generated code must be clearly identified
+- Security audits against NCSC Software Security Code of Practice required
+- User testing requires SCC Ethics Committee approval
+
+For detailed project specifications, see [PROJECT_BRAIN.md](PROJECT_BRAIN.md).
