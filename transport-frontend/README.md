@@ -1,18 +1,27 @@
-# React + Vite
+# Transport App Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The frontend is a SPA built using React.
 
-Currently, two official plugins are available:
+Stack/Libraries:
+- Vite - bundler
+- React - UI Framework
+- React-Router - Client-side routing
+- (MUI) Material UI - Component & Styling
+- React-Leaflet/Leaflet - Map Components
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Routes:
+- / -> Home Page (possible Dashboard)
+- /map-view -> The primary map overview page
 
-## React Compiler
+## Running
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+First ensure dependencies are installed:
 
-Note: This will impact Vite dev & build performances.
+```bash
+npm install
+```
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Then open a local server via:
+```bash
+npm run dev
+```
