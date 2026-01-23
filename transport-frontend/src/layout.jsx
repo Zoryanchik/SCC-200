@@ -22,7 +22,7 @@ export default function AppLayout({ children }) {
 		<ThemeProvider theme={theme}>
 			{/* Baseline CSS (e.g. padding: 0) and enable automatic use of the user's color scheme */}
 			<CssBaseline enableColorScheme />
-			<nav>Navigation Bar Goes Here</nav>
+			<nav>Navigation Layout</nav>
 			<main>
 				{children}
 			</main>
