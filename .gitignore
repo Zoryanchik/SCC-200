@@ -1,0 +1,60 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node/Vite build outputs
+node_modules/
+dist/
+build/
+out/
+.vite/
+.cache/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Environment files (keep secrets local)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor/OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary files
+*.tmp
+*.temp
+
+# Frontend lockfiles (optional to ignore globally; project keeps its own)
+# Uncomment if you don't want lockfiles at root (kept under transport-frontend)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Python (if/when backend added)
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.tox/
+venv/
+.venv/
