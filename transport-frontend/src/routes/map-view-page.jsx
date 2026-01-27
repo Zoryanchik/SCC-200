@@ -70,8 +70,9 @@ export default function MapViewPage() {
 	const [openPopupId, setOpenPopupId] = useState(null);
 	const [apiError, setApiError] = useState(null);
 
-	// Fetch real data from API in background
-	const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('stagecoach', 30000);
+	// Fetch real data from API in background using correct operator codes
+	// SCCU = Stagecoach Cumbria & North Lancashire
+	const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('SCCU', 30000);
 	const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 30000);
 
 	// Update markers when real API data arrives
