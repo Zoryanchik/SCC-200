@@ -1,9 +1,30 @@
 /**
  * Transport API Service
  * Handles all API calls to the transport backend
+ * Based on Lancaster University transport API feeds
  */
 
-const API_BASE_URL = 'https://transport.scc.lancs.ac.uk';
+const API_BASE_URL = 'http://transport.scc.lancs.ac.uk';
+
+/**
+ * Fetch bus times for a specific stop
+ * @param {string} stopCode - The stop code (e.g., '2800S12345')
+ * @returns {Promise<Array>} Array of bus time data
+ */
+export const fetchBusTimes = async (stopCode) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/bus/times/${stopCode}`
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching bus times:', error);
+    throw error;
+  }
+};
 
 /**
  * Fetch live bus locations for a given operator
@@ -114,6 +135,27 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
     return await response.json();
   } catch (error) {
     console.error('Error getting journey plans:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get weather data for specific coordinates
+ * @param {number} lat - Latitude (e.g., 54.05)
+ * @param {number} lon - Longitude (e.g., -2.80)
+ * @returns {Promise<Object>} Weather data object
+ */
+export const fetchWeatherData = async (lat = 54.05, lon = -2.80) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/weather?lat=${lat}&lon=${lon}`
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching weather data:', error);
     throw error;
   }
 };
