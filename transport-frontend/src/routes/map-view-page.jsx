@@ -47,8 +47,22 @@ const createCustomIcon = (type, color) => {
 };
 
 
+// Mock data for instant display
+const MOCK_MARKERS = [
+	{ id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
+	{ id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
+	{ id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
+	{ id: 4, position: [54.045000, -2.810000], name: "Greyhound Bus Park", type: "bus", status: "Delayed 2 mins" },
+	{ id: 5, position: [53.995000, -2.700000], name: "Morecambe Station", type: "train", status: "On time" },
+	{ id: 6, position: [53.990000, -2.750000], name: "Morecambe Bus Station", type: "bus", status: "On time" },
+	{ id: 7, position: [53.760000, -2.700000], name: "Preston Bus Station", type: "bus", status: "On time" },
+	{ id: 8, position: [53.750000, -2.680000], name: "Preston Train Station", type: "train", status: "Delayed 5 mins" },
+	{ id: 9, position: [54.080000, -2.700000], name: "Carnforth Station", type: "train", status: "On time" },
+	{ id: 10, position: [54.120000, -2.650000], name: "Kendal Bus Station", type: "bus", status: "On time" },
+];
+
 export default function MapViewPage() {
-	const [markers, setMarkers] = useState([]);
+	const [markers, setMarkers] = useState(MOCK_MARKERS); // Start with mock data for instant display
 	const [filters, setFilters] = useState({
 		showBuses: true,
 		showTrains: true
@@ -56,69 +70,56 @@ export default function MapViewPage() {
 	const [openPopupId, setOpenPopupId] = useState(null);
 	const [apiError, setApiError] = useState(null);
 
-	// Fetch real data from API
+	// Fetch real data from API in background
 	const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('stagecoach', 30000);
 	const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 30000);
 
-	// Update markers when API data arrives
+	// Update markers when real API data arrives
 	useEffect(() => {
-		const newMarkers = [];
-		let id = 1;
+		// Only update if we have real data from the API
+		if ((Array.isArray(busLocations) && busLocations.length > 0) || 
+		    (Array.isArray(trainDepartures) && trainDepartures.length > 0)) {
+			
+			const newMarkers = [];
+			let id = 1;
 
-		// Add bus locations
-		if (Array.isArray(busLocations) && busLocations.length > 0) {
-			busLocations.forEach(bus => {
-				newMarkers.push({
-					id: id++,
-					position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
-					name: bus.name || `Bus ${bus.id}`,
-					type: 'bus',
-					status: bus.status || 'On time',
-					routeNumber: bus.routeNumber || bus.route
+			// Add bus locations
+			if (Array.isArray(busLocations) && busLocations.length > 0) {
+				busLocations.forEach(bus => {
+					newMarkers.push({
+						id: id++,
+						position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
+						name: bus.name || `Bus ${bus.id}`,
+						type: 'bus',
+						status: bus.status || 'On time',
+						routeNumber: bus.routeNumber || bus.route
+					});
 				});
-			});
-		}
-
-		// Add train departures
-		if (Array.isArray(trainDepartures) && trainDepartures.length > 0) {
-			trainDepartures.forEach(train => {
-				newMarkers.push({
-					id: id++,
-					position: [train.latitude || train.lat, train.longitude || train.lon],
-					name: train.station || train.name || 'Train Station',
-					type: 'train',
-					status: train.status || train.delayMinutes ? `Delayed ${train.delayMinutes} mins` : 'On time',
-					destination: train.destination,
-					departureTime: train.departureTime || train.scheduledTime
-				});
-			});
-		}
-
-		// If no data from API, use mock data as fallback
-		if (newMarkers.length === 0) {
-			const mockData = [
-				{ id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
-				{ id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
-				{ id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
-				{ id: 4, position: [54.045000, -2.810000], name: "Greyhound Bus Park", type: "bus", status: "Delayed 2 mins" },
-				{ id: 5, position: [53.995000, -2.700000], name: "Morecambe Station", type: "train", status: "On time" },
-				{ id: 6, position: [53.990000, -2.750000], name: "Morecambe Bus Station", type: "bus", status: "On time" },
-				{ id: 7, position: [53.760000, -2.700000], name: "Preston Bus Station", type: "bus", status: "On time" },
-				{ id: 8, position: [53.750000, -2.680000], name: "Preston Train Station", type: "train", status: "Delayed 5 mins" },
-				{ id: 9, position: [54.080000, -2.700000], name: "Carnforth Station", type: "train", status: "On time" },
-				{ id: 10, position: [54.120000, -2.650000], name: "Kendal Bus Station", type: "bus", status: "On time" },
-			];
-			setMarkers(mockData);
-			if (busError || trainError) {
-				setApiError('Using demo data - API temporarily unavailable');
 			}
-		} else {
+
+			// Add train departures
+			if (Array.isArray(trainDepartures) && trainDepartures.length > 0) {
+				trainDepartures.forEach(train => {
+					newMarkers.push({
+						id: id++,
+						position: [train.latitude || train.lat, train.longitude || train.lon],
+						name: train.station || train.name || 'Train Station',
+						type: 'train',
+						status: train.status || train.delayMinutes ? `Delayed ${train.delayMinutes} mins` : 'On time',
+						destination: train.destination,
+						departureTime: train.departureTime || train.scheduledTime
+					});
+				});
+			}
+
 			setMarkers(newMarkers);
 			setApiError(null);
+		} else if (busError || trainError) {
+			// Show error message but keep mock data
+			setApiError('Using demo data - API temporarily unavailable');
 		}
 	}, [busLocations, trainDepartures, busError, trainError]);
 
-	const isLoading = busLoading || trainLoading;
 	const filteredMarkers = markers.filter(m => 
 		(m.type === 'bus' && filters.showBuses) || 
 		(m.type === 'train' && filters.showTrains)
@@ -228,34 +229,15 @@ export default function MapViewPage() {
 						border: '1px solid',
 						borderColor: 'divider'
 					}}>
-					{isLoading ? (
-							<Box
-								sx={{
-									height: '100%',
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-									flexDirection: 'column',
-									gap: 2,
-									backgroundColor: '#f5f5f5',
-									borderRadius: 1
-								}}
-							>
-								<CircularProgress />
-								<Typography color="text.secondary">
-									Loading map and stations...
-								</Typography>
-							</Box>
-						) : (
-							<MapContainer 
-								center={[54.050556, -2.800556]} 
+						<MapContainer 
+							center={[54.050556, -2.800556]} 
 							zoom={10} 
-								scrollWheelZoom 
-								style={{ height: "100%", width: "100%" }}
-								className="leaflet-container-custom"
-							>
-								<TileLayer
-									attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+							scrollWheelZoom 
+							style={{ height: "100%", width: "100%" }}
+							className="leaflet-container-custom"
+						>
+							<TileLayer
+								attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 									url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 								/>
 								{filteredMarkers.map((marker) => (
@@ -297,7 +279,6 @@ export default function MapViewPage() {
 									</Marker>
 								))}
 							</MapContainer>
-						)}
 					</Box>
 
 					{/* Weather Widget - Separate box on the right */}
