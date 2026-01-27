@@ -1,0 +1,173 @@
+/**
+ * Custom styles for transport app
+ */
+
+/* Marker fade-in animation */
+@keyframes fadeInMarker {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Custom Marker Styles */
+.custom-marker {
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+  animation: fadeInMarker 0.5s ease-out forwards;
+}
+
+.custom-marker:nth-child(1) { animation-delay: 0.1s; }
+.custom-marker:nth-child(2) { animation-delay: 0.2s; }
+.custom-marker:nth-child(3) { animation-delay: 0.3s; }
+.custom-marker:nth-child(4) { animation-delay: 0.4s; }
+.custom-marker:nth-child(5) { animation-delay: 0.5s; }
+.custom-marker:nth-child(6) { animation-delay: 0.6s; }
+.custom-marker:nth-child(7) { animation-delay: 0.7s; }
+.custom-marker:nth-child(8) { animation-delay: 0.8s; }
+.custom-marker:nth-child(9) { animation-delay: 0.9s; }
+.custom-marker:nth-child(10) { animation-delay: 1s; }
+
+.custom-marker:hover {
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.4));
+  transform: scale(1.1);
+  transition: transform 0.2s ease;
+}
+
+/* Leaflet overrides */
+.leaflet-container {
+  font-family: inherit;
+}
+
+.leaflet-container-custom {
+	border-radius: 12px;
+}
+
+.leaflet-popup-content {
+	margin: 12px;
+	font-size: 14px;
+	max-width: 220px;
+}
+
+.leaflet-popup-tip {
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.leaflet-popup {
+	border-radius: 12px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+.leaflet-popup-content-wrapper {
+	border-radius: 12px;
+	box-shadow: none;
+	background: white;
+}
+
+.leaflet-control {
+  border-radius: 8px;
+}
+
+/* Accessibility improvements */
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Responsive typography */
+@media (max-width: 600px) {
+  body {
+    font-size: 14px;
+  }
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background-color: white;
+    color: black;
+  }
+}
+
+/* Loading skeleton animation */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.skeleton-loading {
+  animation: shimmer 2s infinite;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.1) 8%,
+    rgba(255, 255, 255, 0.3) 18%,
+    rgba(255, 255, 255, 0.1) 33%
+  );
+  background-size: 1000px 100%;
+}
+
+/* Responsive grid adjustments */
+@media (max-width: 960px) {
+  .grid-full-width {
+    width: 100%;
+  }
+}
+
+/* Improve touch targets for mobile */
+@media (max-width: 600px) {
+  button,
+  [role="button"],
+  a {
+    min-height: 48px;
+    min-width: 48px;
+  }
+}
+
+/* Dark mode specific styles */
+@media (prefers-color-scheme: dark) {
+  .custom-marker {
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: more) {
+  * {
+    border-width: 2px !important;
+  }
+
+  button,
+  [role="button"] {
+    font-weight: 700;
+  }
+}
