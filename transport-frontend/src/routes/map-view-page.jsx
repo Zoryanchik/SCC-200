@@ -77,10 +77,14 @@ export default function MapViewPage() {
 
 	// Update markers when real API data arrives
 	useEffect(() => {
+		console.log('🚌 Bus API Response:', { busLocations, busError });
+		console.log('🚂 Train API Response:', { trainDepartures, trainError });
+		
 		// Only update if we have real data from the API
 		if ((Array.isArray(busLocations) && busLocations.length > 0) || 
 		    (Array.isArray(trainDepartures) && trainDepartures.length > 0)) {
 			
+			console.log('✅ Received real data from API, updating markers...');
 			const newMarkers = [];
 			let id = 1;
 
