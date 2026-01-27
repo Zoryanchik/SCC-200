@@ -26,6 +26,29 @@ const MOCK_STOPS = [
   { id: 5, name: "Blackpool North Station", code: "BLK001" }
 ];
 
+const MOCK_ROUTES = [
+  {
+    id: 1,
+    duration: "45 mins",
+    transfers: 1,
+    steps: [
+      { type: "walk", duration: "5 mins", to: "Lancaster Station" },
+      { type: "train", route: "Northern", duration: "30 mins", from: "Lancaster", to: "Preston" },
+      { type: "walk", duration: "10 mins", to: "Destination" }
+    ],
+    price: "£5.20"
+  },
+  {
+    id: 2,
+    duration: "38 mins",
+    transfers: 0,
+    steps: [
+      { type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }
+    ],
+    price: "£3.80"
+  }
+];
+
 export default function HomePage() {
   const [fromLocation, setFromLocation] = useState("");
   const [toLocation, setToLocation] = useState("");
@@ -39,7 +62,7 @@ export default function HomePage() {
   // Fetch real data from API
   const { data: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: departures, loading: departuresLoading } = useLiveDepartures('LAN');
-  const [routes, setRoutes] = useState([]);
+  const [routes, setRoutes] = useState(MOCK_ROUTES); // Start with mock routes for instant display
 
   // Transform departures data
   const liveDepartures = useMemo(() => {
@@ -104,54 +127,12 @@ export default function HomePage() {
         setRoutes(Array.isArray(journeys) ? journeys : []);
       } else {
         // Fallback to mock data
-        setRoutes([
-          {
-            id: 1,
-            duration: "45 mins",
-            transfers: 1,
-            steps: [
-              { type: "walk", duration: "5 mins", to: "Lancaster Station" },
-              { type: "train", route: "Northern", duration: "30 mins", from: "Lancaster", to: "Preston" },
-              { type: "walk", duration: "10 mins", to: "Destination" }
-            ],
-            price: "£5.20"
-          },
-          {
-            id: 2,
-            duration: "38 mins",
-            transfers: 0,
-            steps: [
-              { type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }
-            ],
-            price: "£3.80"
-          }
-        ]);
+        setRoutes(MOCK_ROUTES);
       }
     } catch (error) {
       console.error('Journey search error:', error);
       // Fallback to mock data on error
-      setRoutes([
-        {
-          id: 1,
-          duration: "45 mins",
-          transfers: 1,
-          steps: [
-            { type: "walk", duration: "5 mins", to: "Lancaster Station" },
-            { type: "train", route: "Northern", duration: "30 mins", from: "Lancaster", to: "Preston" },
-            { type: "walk", duration: "10 mins", to: "Destination" }
-          ],
-          price: "£5.20"
-        },
-        {
-          id: 2,
-          duration: "38 mins",
-          transfers: 0,
-          steps: [
-            { type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }
-          ],
-          price: "£3.80"
-        }
-      ]);
+      setRoutes(MOCK_ROUTES);
     } finally {
       setIsSearching(false);
     }
