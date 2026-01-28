@@ -4,7 +4,7 @@ from timetable import Timetable
 
 class RaptorRouter:
 
-    def route( self, n_transfer_limit, timetable: Timetable, start_time, start_point, destination ):
+    def route( self, n_transfer_limit: int, timetable: Timetable, start_time: int, start_point: str, destination: str ) -> dict:
         #creat a dict of dicts of stops storing earliest arrival time, previous stop,
         #type of transport from previous stop, and journey id 
         inf = math.inf
@@ -15,27 +15,27 @@ class RaptorRouter:
                                     "arrival_time": inf,
                                     "type": "",
                                     "journey": "" }
-        now = datetime.now()
         improved = True
-        n_tranfer = -1
-        reach_stops[ start_point ][ "arrival_time" ] = now.hour * 3600 + now.minute * 60 + now.second
+        n_transfer = -1
+        reach_stops[ start_point ][ "arrival_time" ] = start_time
         switch_a = [ start_point ]
         switch_b = []
-        self.recursive_raptor( self, improved, n_tranfer, n_transfer_limit, reach_stops, timetable, switch_a, switch_b )
+        self.recursive_raptor( self, improved, n_transfer, n_transfer_limit, reach_stops, timetable, switch_a, switch_b )
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
         track = destination
-        while track != start_point:
+        while reach_stops[ track ][ "prev_stop" ] is not None and track != start_point:
             fastest_route[ track ] = reach_stops[ track ]
             track = fastest_route[ track ][ "prev_stop" ]
         return fastest_route
 
 
-    def recurcive_raptor( self, improved, n_transfer, transfer_limit, reach_stops, timetable: Timetable, switch_a: list, switch_b: list):
+    def recursive_raptor( self, improved: bool, n_transfer: int, transfer_limit: int, reach_stops: list, timetable: Timetable, switch_a: list, switch_b: list):
         if not improved or n_transfer == transfer_limit:
             return
         else:
             improved = False
+            n_transfer += 1
             switch_b = []
             for stop in switch_a:
                 routes = timetable.get_routes( stop )
@@ -50,4 +50,4 @@ class RaptorRouter:
                             reach_stops[ point ][ "journey" ] = first_journey[0]
                             improved = True
                             switch_b.append( point )
-            self.recurcive_raptor( improved, n_transfer, transfer_limit, reach_stops, timetable, switch_b, switch_a )
+            self.recursive_raptor( improved, n_transfer, transfer_limit, reach_stops, timetable, switch_b, switch_a )
