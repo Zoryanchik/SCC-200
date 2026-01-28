@@ -1,3 +1,4 @@
+from datetime import datetime
 class Timetable:
     #type: bus, train, combined
     type: str

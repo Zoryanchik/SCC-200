@@ -1,4 +1,3 @@
-from datetime import datetime
 import math
 from timetable import Timetable
 
