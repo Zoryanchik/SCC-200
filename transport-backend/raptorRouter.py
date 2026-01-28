@@ -20,7 +20,7 @@ class RaptorRouter:
         reach_stops[ start_point ][ "arrival_time" ] = start_time
         switch_a = [ start_point ]
         switch_b = []
-        self.recursive_raptor( self, improved, n_transfer, n_transfer_limit, reach_stops, timetable, switch_a, switch_b )
+        self.recursive_raptor( improved, n_transfer, n_transfer_limit, reach_stops, timetable, switch_a, switch_b )
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
         track = destination
