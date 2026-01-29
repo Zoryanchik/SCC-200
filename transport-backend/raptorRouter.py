@@ -1,9 +1,10 @@
 import math
 from timetable import Timetable
+from walking import Walking
 
 class RaptorRouter:
 
-    def route( self, n_transfer_limit: int, timetable: Timetable, start_time: int, start_point: str, destination: str ) -> dict:
+    def route( self, n_transfer_limit: int, timetable: Timetable, walking: Walking, start_time: int, start_point: str, destination: str ) -> dict:
         #creat a dict of dicts of stops storing earliest arrival time, previous stop,
         #type of transport from previous stop, and journey id 
         inf = math.inf
@@ -12,28 +13,37 @@ class RaptorRouter:
         for stop in all_stops:
             reach_stops[ stop ] = {"prev_stop": None,
                                     "arrival_time": inf,
-                                    "type": "",
-                                    "journey": "" }
-        improved = True
+                                    "type": None,
+                                    "journey": None }
         n_transfer = -1
-        reach_stops[ start_point ][ "arrival_time" ] = start_time
-        switch_a = [ start_point ]
+        initial_stops = walking.reachable_stops( start_point )
+        switch_a = []
         switch_b = []
-        self.recursive_raptor( improved, n_transfer, n_transfer_limit, reach_stops, timetable, switch_a, switch_b )
+        for stop, walk_time in initial_stops.items():
+            reach_stops[ stop ][ "arrival_time" ] = start_time + walk_time
+            reach_stops[ stop ][ "type" ] = "walking"
+            switch_a.append( stop )
+        self.recursive_raptor( n_transfer, n_transfer_limit, reach_stops, timetable, walking, switch_a, switch_b )
+        final_stops = walking.reachable_stops( destination )
+        final_stop = next( iter( final_stops ) )
+        arrival_time = reach_stops[ final_stop ][ "arrival_time" ]
+        for stop, walk_time in final_stops.items():
+            if walk_time + reach_stops[ stop ][ "arrival_time" ] < arrival_time:
+                final_stop = stop
+                arrival_time = walk_time + reach_stops[ stop ][ "arrival_time" ]
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
-        track = destination
-        while reach_stops[ track ][ "prev_stop" ] is not None and track != start_point:
+        track = final_stop
+        while track is not None:
             fastest_route[ track ] = reach_stops[ track ]
             track = fastest_route[ track ][ "prev_stop" ]
         return fastest_route
 
 
-    def recursive_raptor( self, improved: bool, n_transfer: int, transfer_limit: int, reach_stops: list, timetable: Timetable, switch_a: list, switch_b: list):
-        if not improved or n_transfer == transfer_limit:
+    def recursive_raptor( self, n_transfer: int, transfer_limit: int, reach_stops: list, timetable: Timetable, walking: Walking, switch_a: list, switch_b: list):
+        if len( switch_a ) == 0 or n_transfer == transfer_limit:
             return
         else:
-            improved = False
             n_transfer += 1
             switch_b = []
             for stop in switch_a:
@@ -47,6 +57,12 @@ class RaptorRouter:
                             reach_stops[ point ][ "arrival_time" ] = time
                             reach_stops[ point ][ "type" ] = first_journey[1]
                             reach_stops[ point ][ "journey" ] = first_journey[0]
-                            improved = True
                             switch_b.append( point )
-            self.recursive_raptor( improved, n_transfer, transfer_limit, reach_stops, timetable, switch_b, switch_a )
+            #process walking for switch_b
+            for stop in switch_b:
+                walk_stops = walking.inter_walk( stop )
+                for walk_stop in walk_stops:
+                    reach_stops[ walk_stop ][ "arrival_time" ] = reach_stops[ stop ][ "arrival_time" ] + walk_stops[ walk_stop ]
+                    reach_stops[ walk_stop ][ "prev_stop" ] = stop
+                    reach_stops[ walk_stop ][ "type" ] = "walking"
+            self.recursive_raptor( n_transfer, transfer_limit, reach_stops, timetable, walking, switch_b, switch_a )
