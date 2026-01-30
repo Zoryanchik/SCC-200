@@ -41,9 +41,13 @@ class RaptorRouter:
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
         track = final_stop
+        visited = set()
         while track is not None:
+            if track in visited:
+                break
+            visited.add(track)
             fastest_route[ track ] = reach_stops[ track ]
-            track = fastest_route[ track ][ "prev_stop" ]
+            track = reach_stops[ track ][ "prev_stop" ]
         return fastest_route
 
 
@@ -74,13 +78,17 @@ class RaptorRouter:
                             reach_stops[ point ][ "journey" ] = first_journey[0]
                             switch_b.add( point )
             #process walking for switch_b
+            walking_additions = set()
             for stop in switch_b:
                 walk_stops = walking.inter_walk( stop )
                 for walk_stop in walk_stops:
-                    reach_stops[ walk_stop ][ "arrival_time" ] = reach_stops[ stop ][ "arrival_time" ] + walk_stops[ walk_stop ]
-                    reach_stops[ walk_stop ][ "prev_stop" ] = stop
-                    reach_stops[ walk_stop ][ "type" ] = "walking"
-                    switch_b.add( walk_stop )
+                    walk_arrival = reach_stops[ stop ][ "arrival_time" ] + walk_stops[ walk_stop ]
+                    if reach_stops[ walk_stop ][ "arrival_time" ] > walk_arrival:
+                        reach_stops[ walk_stop ][ "arrival_time" ] = walk_arrival
+                        reach_stops[ walk_stop ][ "prev_stop" ] = stop
+                        reach_stops[ walk_stop ][ "type" ] = "walking"
+                        walking_additions.add( walk_stop )
+            switch_b = switch_b.union( walking_additions )
             self.recursive_raptor( start_date,
                                    n_transfer,
                                    transfer_limit,
