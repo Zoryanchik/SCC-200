@@ -25,10 +25,13 @@ class Timetable:
         return [ route1, route2 ]
 
     #get the first journey passing by the stoppoint on the route after the time
+    #deal with holidays exceptions
+    #handle delays and cancellations
     def get_journey( self, route, time, point) -> tuple:
         return ( journey, "bus"/"train" )
 
     #get arrivalTime for each stopPoint on the journey after the given stopPoint
+    #handle delays and cancellations
     def arrival_time( self, journey, point ) -> dict:
         return { point: arrivalTime }
 
