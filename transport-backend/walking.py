@@ -1,6 +1,6 @@
 class Walking:
     #return dict of walkable stops and walking time in seconds from start_point
-    #use precomputed database
+    #use precomputed database( which should include walking / transfer in the same station as 3 min )
     def inter_walk( start_point ) -> dict:
         return {  point, walking_time }
     

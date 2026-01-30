@@ -26,7 +26,7 @@ class RaptorRouter:
         self.recursive_raptor( start_date, n_transfer, n_transfer_limit, reach_stops, timetable, walking, switch_a, switch_b )
         final_stops = walking.reachable_stops( destination )
         final_stop = next( iter( final_stops ) )
-        arrival_time = reach_stops[ final_stop ][ "arrival_time" ]
+        arrival_time = reach_stops[ final_stop ][ "arrival_time" ] + final_stops[ final_stop ]
         for stop, walk_time in final_stops.items():
             if walk_time + reach_stops[ stop ][ "arrival_time" ] < arrival_time:
                 final_stop = stop
@@ -49,8 +49,7 @@ class RaptorRouter:
             for stop in switch_a:
                 routes = timetable.get_routes( stop )
                 for route in routes:
-                    #arbitrarily set transfer wait time to 3 minutes = 180 seconds
-                    first_journey = timetable.get_journey( route, start_date, reach_stops[ stop ][ "arrival_time" ] + 180, stop )
+                    first_journey = timetable.get_journey( route, start_date, reach_stops[ stop ][ "arrival_time" ], stop )
                     arrival_times = timetable.arrival_time( start_date, first_journey, stop )
                     for point, time in arrival_times.items():
                         if reach_stops[ point ][ "arrival_time"] > time:
