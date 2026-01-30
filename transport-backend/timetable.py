@@ -1,4 +1,5 @@
 from datetime import datetime
+
 class Timetable:
     #type: bus, train, combined
     type: str
@@ -27,12 +28,14 @@ class Timetable:
     #get the first journey passing by the stoppoint on the route after the time
     #deal with holidays exceptions
     #handle delays and cancellations
-    def get_journey( self, route, time, point) -> tuple:
+    #if time > 86400s, date += 1
+    def get_journey( self, route, date, time, point) -> tuple:
         return ( journey, "bus"/"train" )
 
-    #get arrivalTime for each stopPoint on the journey after the given stopPoint
+    #get arrivalTime in seconds from midnight of start_date 
+    #for each stopPoint on the journey after the given stopPoint
     #handle delays and cancellations
-    def arrival_time( self, journey, point ) -> dict:
+    def arrival_time( self, date, journey, point ) -> dict:
         return { point: arrivalTime }
 
     #get journey details for a specific journey
