@@ -49,12 +49,13 @@ class RaptorRouter:
             for stop in switch_a:
                 routes = timetable.get_routes( stop )
                 for route in routes:
-                    first_journey = timetable.get_journey( route, reach_stops[ stop ][ "arrival_time" ], stop )
+                    #arbitrarily set transfer wait time to 3 minutes = 180 seconds
+                    first_journey = timetable.get_journey( route, reach_stops[ stop ][ "arrival_time" ] + 180, stop )
                     arrival_times = timetable.arrival_time( first_journey, stop )
                     for point, time in arrival_times.items():
                         if reach_stops[ point ][ "arrival_time"] > time:
                             reach_stops[ point ][ "prev_stop" ] = stop
-                            reach_stops[ point ][ "arrival_time" ] = time
+                            reach_stops[ point ][ "arrival_time" ] = time 
                             reach_stops[ point ][ "type" ] = first_journey[1]
                             reach_stops[ point ][ "journey" ] = first_journey[0]
                             switch_b.append( point )
