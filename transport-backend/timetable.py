@@ -1,28 +1,27 @@
-from datetime import datetime
+from atco import Atco
 
 class Timetable:
     #type: bus, train, combined
-    type: str
+    bus:bool
+    train:bool
 
-    def __init__( self, type ):
-        self.type = type
-
-    def time_to_seconds( time_str: str ) -> int:
-        h, m, s = map( int, time_str.split( ":" ) )
-        return h * 3600 + m * 60 + s
-    
-    def seconds_to_time( seconds: int ) -> str:
-        h = seconds // 3600
-        m = ( seconds % 3600 ) // 60
-        s = seconds % 60
-        return f"{h:02}:{m:02}:{s:02}"
+    def __init__( self, bus:bool, train:bool ):
+        self.bus = bus
+        self.train = train
+        self.atco = Atco()
 
     #get a list of all stops in the timetable in AtcoCode( platform specific )
     def get_stops( self ) -> list:
-        return []
+        if self.type == "bus":
+            return self.atco.get_bus_stops()
+        elif self.type == "train":
+            return self.atco.get_train_stops()
+        else:
+            return self.atco.get_all_stops()
 
     #get a list of routes passing by the point
     def get_routes( self, point ) -> list:
+        
         return [ route1, route2 ]
 
     #get the first journey passing by the stoppoint on the route after the time
@@ -44,4 +43,5 @@ class Timetable:
 
     #given an atco_code, return the gazetteer id
     def get_gazetteer_id( self, atco_code: str ) -> str:
+        gazetteer_id = self.atco.get_gazetteer_id( atco_code )
         return gazetteer_id
