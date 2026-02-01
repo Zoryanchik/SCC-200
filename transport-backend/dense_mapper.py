@@ -1,4 +1,4 @@
-class Dense_mapper:
+class DenseMapper:
     def __init__( self ):
         self.code_to_int = {}
         self.int_to_code = []
