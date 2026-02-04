@@ -10,6 +10,10 @@ export default defineConfig({
       },
     }),
   ],
+  test: {
+    environment: 'jsdom',
+    setupFiles: [],
+  },
   build: {
     rollupOptions: {
       output: {
