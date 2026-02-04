@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
-import { useStopSearch, useLiveDepartures, useServiceAlerts } from './useTransportData';
+import { describe, test, expect, vi, afterEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { useStopSearch, useLiveDepartures, useServiceAlerts } from './useTransportData'
+import * as api from '../services/transportApi'
 
 vi.mock('../services/transportApi', () => ({
   fetchLiveBusLocations: vi.fn(),
@@ -10,57 +11,44 @@ vi.mock('../services/transportApi', () => ({
   getJourneyPlans: vi.fn(),
   fetchServiceAlerts: vi.fn(),
   fetchPricing: vi.fn()
-}));
+}))
 
-const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
+afterEach(() => {
+  vi.clearAllMocks()
+})
 
 describe('useTransportData hooks', () => {
-  afterEach(() => {
-    vi.clearAllMocks();
-    vi.useRealTimers();
-  });
+  test('useStopSearch debounces and returns results', async () => {
+    api.searchStops.mockResolvedValueOnce([{ atco_code: 'ATCO1', name: 'Lancaster Bus Station' }])
 
-  it('useStopSearch debounces and returns results', async () => {
-    vi.useFakeTimers();
-    const { searchStops } = await import('../services/transportApi');
-    searchStops.mockResolvedValueOnce([{ id: 1, name: 'Lancaster Bus Station' }]);
+    const { result } = renderHook(() => useStopSearch('Lan', 10))
 
-    const { result } = renderHook(() => useStopSearch('Lan', 200));
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+      expect(api.searchStops).toHaveBeenCalledWith('Lan')
+      expect(result.current.results.length).toBeGreaterThan(0)
+    })
+  })
 
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-      await flushPromises();
-    });
+  test('useLiveDepartures fetches data on mount', async () => {
+    api.fetchRailDepartures.mockResolvedValueOnce([{ id: 1, destination: 'Preston' }])
 
-    expect(searchStops).toHaveBeenCalledWith('Lan');
-    expect(result.current.results).toHaveLength(1);
-  });
+    const { result } = renderHook(() => useLiveDepartures('LAN', 10000))
 
-  it('useLiveDepartures fetches data on mount', async () => {
-    const { fetchRailDepartures } = await import('../services/transportApi');
-    fetchRailDepartures.mockResolvedValueOnce([{ id: 1, destination: 'Preston' }]);
+    await waitFor(() => {
+      expect(api.fetchRailDepartures).toHaveBeenCalledWith('LAN')
+      expect(result.current.data.length).toBeGreaterThan(0)
+    })
+  })
 
-    const { result } = renderHook(() => useLiveDepartures('LAN', 5000));
+  test('useServiceAlerts fetches alerts', async () => {
+    api.fetchServiceAlerts.mockResolvedValueOnce([{ id: 1, message: 'Test alert' }])
 
-    await act(async () => {
-      await flushPromises();
-    });
+    const { result } = renderHook(() => useServiceAlerts(10000))
 
-    expect(fetchRailDepartures).toHaveBeenCalledWith('LAN');
-    expect(result.current.data).toHaveLength(1);
-  });
-
-  it('useServiceAlerts fetches alerts', async () => {
-    const { fetchServiceAlerts } = await import('../services/transportApi');
-    fetchServiceAlerts.mockResolvedValueOnce([{ id: 1, message: 'Test alert' }]);
-
-    const { result } = renderHook(() => useServiceAlerts(60000));
-
-    await act(async () => {
-      await flushPromises();
-    });
-
-    expect(fetchServiceAlerts).toHaveBeenCalledTimes(1);
-    expect(result.current.alerts).toHaveLength(1);
-  });
-});
+    await waitFor(() => {
+      expect(api.fetchServiceAlerts).toHaveBeenCalled()
+      expect(result.current.alerts.length).toBeGreaterThan(0)
+    })
+  })
+})

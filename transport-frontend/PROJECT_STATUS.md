@@ -226,7 +226,7 @@
   - [ ] Offline mode
   
 - [ ] **Testing**
-  - [ ] Unit tests for hooks
+  - [x] Unit tests for hooks
   - [ ] Integration tests for pages
   - [ ] E2E tests with Cypress
   - [ ] Visual regression testing
