@@ -14,6 +14,22 @@ import {
 } from '../services/transportApi';
 import { liveUpdatesManager } from '../services/liveUpdates';
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= retries) throw error;
+      const wait = baseDelay * (2 ** attempt);
+      attempt += 1;
+      await delay(wait);
+    }
+  }
+};
+
 /**
  * Hook for fetching and managing live bus locations
  * @param {string} operatorCode - Bus operator code
@@ -24,30 +40,31 @@ export const useLiveBusLocations = (operatorCode, refreshInterval = 30000) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
+  const fetchData = useCallback(async () => {
     if (!operatorCode) return;
+    try {
+      setLoading(true);
+      const result = await withRetry(
+        () => fetchLiveBusLocations(operatorCode),
+        { retries: 2, baseDelay: 500 }
+      );
+      setData(result);
+      setError(null);
+    } catch (err) {
+      setError(err);
+      console.error('Error fetching bus locations:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [operatorCode]);
 
-    const fetchData = async () => {
-      try {
-        setLoading(true);
-        const result = await fetchLiveBusLocations(operatorCode);
-        setData(result);
-        setError(null);
-      } catch (err) {
-        setError(err);
-        console.error('Error fetching bus locations:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
+  useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, refreshInterval);
-
     return () => clearInterval(interval);
-  }, [operatorCode, refreshInterval]);
+  }, [fetchData, refreshInterval]);
 
-  return { data, loading, error, refetch: () => fetchData() };
+  return { data, loading, error, refetch: fetchData };
 };
 
 /**
@@ -64,7 +81,10 @@ export const useLiveDepartures = (stationCode, refreshInterval = 30000) => {
     if (!stationCode) return;
     try {
       setLoading(true);
-      const result = await fetchRailDepartures(stationCode);
+      const result = await withRetry(
+        () => fetchRailDepartures(stationCode),
+        { retries: 2, baseDelay: 500 }
+      );
       setData(result);
       setError(null);
     } catch (err) {
@@ -100,7 +120,10 @@ export const useBusArrivals = (stopCode, refreshInterval = 20000) => {
     const fetchData = async () => {
       try {
         setLoading(true);
-        const result = await fetchBusArrivals(stopCode);
+        const result = await withRetry(
+          () => fetchBusArrivals(stopCode),
+          { retries: 2, baseDelay: 500 }
+        );
         setData(result);
         setError(null);
       } catch (err) {
@@ -137,7 +160,10 @@ export const useStopSearch = (query, debounceDelay = 500) => {
     const timeoutId = setTimeout(async () => {
       try {
         setLoading(true);
-        const result = await searchStops(query);
+        const result = await withRetry(
+          () => searchStops(query),
+          { retries: 1, baseDelay: 400 }
+        );
         setResults(result);
         setError(null);
       } catch (err) {
@@ -167,10 +193,13 @@ export const useJourneyPlans = (fromStop, toStop, departureTime) => {
 
     try {
       setLoading(true);
-      const result = await getJourneyPlans(
-        fromStop,
-        toStop,
-        departureTime || new Date().toISOString()
+      const result = await withRetry(
+        () => getJourneyPlans(
+          fromStop,
+          toStop,
+          departureTime || new Date().toISOString()
+        ),
+        { retries: 1, baseDelay: 600 }
       );
       setRoutes(result);
       setError(null);
@@ -198,7 +227,10 @@ export const useServiceAlerts = (refreshInterval = 60000) => {
     const fetchAlerts = async () => {
       try {
         setLoading(true);
-        const result = await fetchServiceAlerts();
+        const result = await withRetry(
+          () => fetchServiceAlerts(),
+          { retries: 2, baseDelay: 500 }
+        );
         setAlerts(result);
         setError(null);
       } catch (err) {
@@ -232,7 +264,10 @@ export const usePricing = (fromStop, toStop) => {
     const fetchPrice = async () => {
       try {
         setLoading(true);
-        const result = await fetchPricing(fromStop, toStop);
+        const result = await withRetry(
+          () => fetchPricing(fromStop, toStop),
+          { retries: 1, baseDelay: 600 }
+        );
         setPricing(result);
         setError(null);
       } catch (err) {

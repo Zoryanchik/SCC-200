@@ -2,49 +2,16 @@ import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import Skeleton from "@mui/material/Skeleton";
 import CircularProgress from "@mui/material/CircularProgress";
 import Alert from "@mui/material/Alert";
+import Button from "@mui/material/Button";
+import Chip from "@mui/material/Chip";
+import Skeleton from "@mui/material/Skeleton";
 import { MapPin, Bus, Train } from "lucide-react";
-import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet';
-import L from 'leaflet';
-import icon from 'leaflet/dist/images/marker-icon.png';
-import iconShadow from 'leaflet/dist/images/marker-shadow.png';
-import "leaflet/dist/leaflet.css";
-import { useState, useEffect } from "react";
-import { renderToStaticMarkup } from 'react-dom/server';
-import WeatherWidget from "../components/common/WeatherWidget";
-import { useLiveBusLocations, useLiveDepartures } from "../hooks/useTransportData";
+import { lazy, Suspense, useMemo, useState, useEffect } from "react";
+import { useLiveBusLocations, useLiveDepartures, useLiveUpdates } from "../hooks/useTransportData";
 
-// Fix Leaflet marker icons issue with Vite
-let DefaultIcon = L.icon({
-	iconUrl: icon,
-	shadowUrl: iconShadow,
-	iconSize: [25, 41],
-	iconAnchor: [12, 41],
-	shadowSize: [41, 41],
-	shadowAnchor: [12, 41]
-});
-
-L.Marker.prototype.options.icon = DefaultIcon;
-
-// Create custom icons for buses and trains
-const createCustomIcon = (type, color) => {
-	const svg = `<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-		<circle cx="20" cy="20" r="18" fill="white" stroke="${color}" stroke-width="3"/>
-		${type === 'bus' 
-			? '<path d="M12 14h16v8H12z" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="2" fill="' + color + '"/><circle cx="24" cy="24" r="2" fill="' + color + '"/>' 
-			: '<path d="M20 12l-6 4v8h12v-8z" fill="none" stroke="' + color + '" stroke-width="2"/><line x1="14" y1="24" x2="26" y2="24" stroke="' + color + '" stroke-width="2"/>'}
-	</svg>`;
-	
-	return L.divIcon({
-		html: svg,
-		className: 'custom-marker-icon',
-		iconSize: [40, 40],
-		iconAnchor: [20, 20],
-		popupAnchor: [0, -20]
-	});
-};
+const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
 
 // Mock data for instant display
@@ -69,11 +36,17 @@ export default function MapViewPage() {
 	});
 	const [openPopupId, setOpenPopupId] = useState(null);
 	const [apiError, setApiError] = useState(null);
+	const [userLocation, setUserLocation] = useState(null);
+	const [locationStatus, setLocationStatus] = useState('idle');
+	const [locationError, setLocationError] = useState(null);
+	const [mapInstance, setMapInstance] = useState(null);
 
 	// Fetch real data from API in background using correct operator codes
 	// SCCU = Stagecoach Cumbria & North Lancashire
 	const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('SCCU', 30000);
 	const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 30000);
+	const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
+	const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 
 	// Update markers when real API data arrives
 	useEffect(() => {
@@ -125,9 +98,134 @@ export default function MapViewPage() {
 		}
 	}, [busLocations, trainDepartures, busError, trainError]);
 
-	const filteredMarkers = markers.filter(m => 
-		(m.type === 'bus' && filters.showBuses) || 
-		(m.type === 'train' && filters.showTrains)
+	const filteredMarkers = useMemo(() => (
+		markers.filter(m => 
+			(m.type === 'bus' && filters.showBuses) || 
+			(m.type === 'train' && filters.showTrains)
+		)
+	), [markers, filters.showBuses, filters.showTrains]);
+
+	const distanceMeters = useMemo(() => {
+		const toRadians = (deg) => (deg * Math.PI) / 180;
+		return (a, b) => {
+			const R = 6371000;
+			const dLat = toRadians(b[0] - a[0]);
+			const dLon = toRadians(b[1] - a[1]);
+			const lat1 = toRadians(a[0]);
+			const lat2 = toRadians(b[0]);
+			const x = Math.sin(dLat / 2) ** 2 + Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+			const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+			return R * c;
+		};
+	}, []);
+
+	const nearestStop = useMemo(() => {
+		if (!userLocation || !markers.length) return null;
+		let nearest = null;
+		for (const marker of markers) {
+			const distance = distanceMeters(userLocation, marker.position);
+			if (!nearest || distance < nearest.distance) {
+				nearest = { ...marker, distance };
+			}
+		}
+		return nearest;
+	}, [userLocation, markers, distanceMeters]);
+
+	const closestStops = useMemo(() => {
+		if (!userLocation || !markers.length) return [];
+		const withDistance = markers.map((marker) => ({
+			...marker,
+			distance: distanceMeters(userLocation, marker.position)
+		}));
+		return withDistance.sort((a, b) => a.distance - b.distance).slice(0, 3);
+	}, [userLocation, markers, distanceMeters]);
+
+	const formatWalkTime = (distance) => {
+		const minutes = Math.max(1, Math.round(distance / 84)); // ~1.4 m/s walking speed
+		return `${minutes} min walk`;
+	};
+
+	const normalizeLiveMarker = (item, type) => {
+		const lat = item?.latitude ?? item?.lat;
+		const lon = item?.longitude ?? item?.lon;
+		if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+		return {
+			id: item?.vehicleId || item?.id || `${type}-${lat}-${lon}`,
+			position: [lat, lon],
+			name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
+			type,
+			status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins` : 'On time'),
+			routeNumber: item?.routeNumber || item?.route,
+			destination: item?.destination,
+			departureTime: item?.departureTime || item?.scheduledTime
+		};
+	};
+
+	useEffect(() => {
+		const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : (liveBusUpdate ? [liveBusUpdate] : []);
+		const normalized = updates.map((item) => normalizeLiveMarker(item, 'bus')).filter(Boolean);
+		if (normalized.length === 0) return;
+
+		setMarkers((prev) => {
+			const next = new Map(prev.map((m) => [m.id, m]));
+			for (const item of normalized) {
+				next.set(item.id, { ...next.get(item.id), ...item });
+			}
+			return Array.from(next.values());
+		});
+	}, [liveBusUpdate]);
+
+	useEffect(() => {
+		const updates = Array.isArray(liveTrainUpdate) ? liveTrainUpdate : (liveTrainUpdate ? [liveTrainUpdate] : []);
+		const normalized = updates.map((item) => normalizeLiveMarker(item, 'train')).filter(Boolean);
+		if (normalized.length === 0) return;
+
+		setMarkers((prev) => {
+			const next = new Map(prev.map((m) => [m.id, m]));
+			for (const item of normalized) {
+				next.set(item.id, { ...next.get(item.id), ...item });
+			}
+			return Array.from(next.values());
+		});
+	}, [liveTrainUpdate]);
+
+	const requestLocation = () => {
+		if (!navigator.geolocation) {
+			setLocationStatus('error');
+			setLocationError('Geolocation is not supported by this browser.');
+			return;
+		}
+
+		setLocationStatus('loading');
+		setLocationError(null);
+			navigator.geolocation.getCurrentPosition(
+			(position) => {
+				const coords = [position.coords.latitude, position.coords.longitude];
+				setUserLocation(coords);
+				setLocationStatus('granted');
+				if (mapInstance) {
+					mapInstance.flyTo(coords, Math.max(mapInstance.getZoom(), 12), { duration: 1.2 });
+				}
+			},
+			(error) => {
+				setLocationStatus('error');
+				setLocationError(error?.message || 'Location permission denied.');
+			},
+			{ enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+		);
+	};
+
+	const handleCenterOnUser = () => {
+		if (userLocation && mapInstance) {
+			mapInstance.flyTo(userLocation, Math.max(mapInstance.getZoom(), 12), { duration: 1.2 });
+		}
+	};
+
+	const MapFallback = () => (
+		<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
+			<Skeleton variant="rounded" sx={{ flex: 1, height: { xs: 420, sm: 520, md: 750 } }} />
+			<Skeleton variant="rounded" sx={{ minWidth: { xs: '100%', md: 320 }, height: { xs: 220, md: 320 } }} />
+		</Stack>
 	);
 
 	return (
@@ -158,12 +256,12 @@ export default function MapViewPage() {
 			)}
 
 			<Paper elevation={0} sx={{ 
-				p: 3, 
+				p: { xs: 2, md: 3 }, 
 				borderRadius: '16px',
 				border: '1px solid',
 				borderColor: 'divider'
 			}}>
-				<Stack direction="row" spacing={1.5} mb={3}>
+				<Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} mb={2} flexWrap="wrap" alignItems={{ xs: "stretch", sm: "center" }}>
 					<Box
 						onClick={() => setFilters(f => ({ ...f, showBuses: !f.showBuses }))}
 						sx={{
@@ -220,77 +318,123 @@ export default function MapViewPage() {
 						<Train size={20} />
 						Trains {filteredMarkers.filter(m => m.type === 'train').length}
 					</Box>
-				</Stack>
 
-				{/* Map and Weather Widget side by side */}
-				<Stack direction="row" spacing={3} sx={{ height: 750 }}>
-					{/* Map Container */}
-					<Box sx={{ 
-						flex: 1,
-						position: 'relative',
-						borderRadius: '12px',
-						overflow: 'hidden',
-						boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
-						border: '1px solid',
-						borderColor: 'divider'
-					}}>
-						<MapContainer 
-							center={[54.050556, -2.800556]} 
-							zoom={10} 
-							scrollWheelZoom 
-							style={{ height: "100%", width: "100%" }}
-							className="leaflet-container-custom"
+					<Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
+					<Button
+						variant="outlined"
+						size="small"
+						onClick={requestLocation}
+						disabled={locationStatus === 'loading'}
+						sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+					>
+						{locationStatus === 'loading' ? (
+							<Stack direction="row" spacing={1} alignItems="center">
+								<CircularProgress size={16} />
+								<Typography variant="caption">Locating…</Typography>
+							</Stack>
+						) : (
+							'Use my location'
+						)}
+					</Button>
+					{userLocation && (
+						<Button
+							variant="contained"
+							size="small"
+							onClick={handleCenterOnUser}
+							sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
 						>
-							<TileLayer
-								attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-									url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-								/>
-								{filteredMarkers.map((marker) => (
-									<Marker 
-										key={marker.id} 
-										position={marker.position}
-										icon={createCustomIcon(marker.type, marker.type === 'bus' ? '#1976d2' : '#2e7d32')}
-										eventHandlers={{
-											click: () => setOpenPopupId(marker.id)
-										}}
-									>
-										{openPopupId === marker.id && (
-											<Popup 
-												onClose={() => setOpenPopupId(null)}
-												autoClose={false}
-											>
-												<Box sx={{ minWidth: '200px', pb: 1 }}>
-													<Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
-														{marker.name}
-													</Typography>
-													<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-														{marker.type === 'bus' ? '🚌 Bus Station' : '🚂 Train Station'}
-													</Typography>
-													<Box sx={{
-														display: 'inline-block',
-														padding: '4px 12px',
-														borderRadius: '12px',
-														backgroundColor: marker.status === 'On time' ? '#e8f5e9' : '#ffebee',
-														color: marker.status === 'On time' ? '#2e7d32' : '#c62828',
-														fontSize: '12px',
-														fontWeight: '600',
-														marginBottom: '8px'
-													}}>
-														{marker.status === 'On time' ? '✓' : '⚠'} {marker.status}
-													</Box>
-												</Box>
-											</Popup>
-										)}
-									</Marker>
-								))}
-							</MapContainer>
-					</Box>
-
-					{/* Weather Widget - Separate box on the right */}
-					<Box sx={{ minWidth: 320 }}>
-						<WeatherWidget />
-					</Box>
+							Center on me
+						</Button>
+					)}
 				</Stack>
+
+				{locationError && (
+					<Alert severity="warning" sx={{ borderRadius: '10px', mb: 2 }}>
+						<Typography variant="body2">{locationError}</Typography>
+					</Alert>
+				)}
+
+				{userLocation && nearestStop && (
+					<Stack direction="row" spacing={1.5} alignItems="center" mb={2} flexWrap="wrap">
+						<Chip
+							label={`Nearest: ${nearestStop.name}`}
+							variant="outlined"
+							sx={{ borderRadius: '10px' }}
+						/>
+						<Chip
+							label={`${(nearestStop.distance / 1000).toFixed(1)} km away`}
+							color="warning"
+							variant="outlined"
+							sx={{ borderRadius: '10px' }}
+						/>
+						{locationStatus === 'watching' && (
+							<Chip
+								label="Following your location"
+								color="success"
+								variant="outlined"
+								sx={{ borderRadius: '10px' }}
+							/>
+						)}
+						{(busLiveConnected || trainLiveConnected) && (
+							<Chip
+								label="Live updates connected"
+								color="primary"
+								variant="outlined"
+								sx={{ borderRadius: '10px' }}
+							/>
+						)}
+					</Stack>
+				)}
+
+				{userLocation && closestStops.length > 0 && (
+					<Paper elevation={0} sx={{
+						p: 2,
+						mb: 2,
+						borderRadius: '12px',
+						border: '1px solid',
+						borderColor: 'divider',
+						backgroundColor: 'rgba(99,102,241,0.04)'
+					}}>
+						<Stack spacing={1}>
+							<Typography variant="subtitle2" fontWeight={700}>
+								Closest stops
+							</Typography>
+							{closestStops.map((stop) => (
+								<Stack key={stop.id} direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between">
+									<Stack direction="row" spacing={1} alignItems="center">
+										<Chip
+											label={stop.type === 'bus' ? 'Bus' : 'Train'}
+											size="small"
+											color={stop.type === 'bus' ? 'primary' : 'success'}
+											variant="outlined"
+											sx={{ borderRadius: '10px' }}
+										/>
+										<Typography variant="body2" fontWeight={600}>
+											{stop.name}
+										</Typography>
+									</Stack>
+									<Typography variant="caption" color="text.secondary">
+										{(stop.distance / 1000).toFixed(1)} km · {formatWalkTime(stop.distance)}
+									</Typography>
+								</Stack>
+							))}
+						</Stack>
+					</Paper>
+				)}
+
+				<Suspense fallback={<MapFallback />}>
+					<MapViewMap
+						filteredMarkers={filteredMarkers}
+						openPopupId={openPopupId}
+						onOpenPopup={setOpenPopupId}
+						onClosePopup={() => setOpenPopupId(null)}
+						userLocation={userLocation}
+						nearestStop={nearestStop}
+						busLoading={busLoading}
+						trainLoading={trainLoading}
+						onMapReady={setMapInstance}
+					/>
+				</Suspense>
 			</Paper>
 		</Stack>
 	)

@@ -4,7 +4,7 @@
  * Based on Lancaster University transport API feeds
  */
 
-const API_BASE_URL = 'http://transport.scc.lancs.ac.uk';
+const API_BASE_URL = 'https://transport.scc.lancs.ac.uk';
 
 /**
  * Fetch bus times for a specific stop
