@@ -2,17 +2,17 @@ import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import Skeleton from "@mui/material/Skeleton";
 import CircularProgress from "@mui/material/CircularProgress";
 import Alert from "@mui/material/Alert";
+import Button from "@mui/material/Button";
+import Chip from "@mui/material/Chip";
 import { MapPin, Bus, Train } from "lucide-react";
-import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet';
+import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
-import { useState, useEffect } from "react";
-import { renderToStaticMarkup } from 'react-dom/server';
+import { useMemo, useState, useEffect } from "react";
 import WeatherWidget from "../components/common/WeatherWidget";
 import { useLiveBusLocations, useLiveDepartures } from "../hooks/useTransportData";
 
@@ -46,6 +46,21 @@ const createCustomIcon = (type, color) => {
 	});
 };
 
+const createUserIcon = () => {
+	const svg = `<svg width="36" height="36" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+		<circle cx="18" cy="18" r="16" fill="white" stroke="#F59E0B" stroke-width="3"/>
+		<circle cx="18" cy="18" r="6" fill="#F59E0B"/>
+	</svg>`;
+
+	return L.divIcon({
+		html: svg,
+		className: 'custom-user-marker-icon',
+		iconSize: [36, 36],
+		iconAnchor: [18, 18],
+		popupAnchor: [0, -18]
+	});
+};
+
 
 // Mock data for instant display
 const MOCK_MARKERS = [
@@ -69,6 +84,10 @@ export default function MapViewPage() {
 	});
 	const [openPopupId, setOpenPopupId] = useState(null);
 	const [apiError, setApiError] = useState(null);
+	const [userLocation, setUserLocation] = useState(null);
+	const [locationStatus, setLocationStatus] = useState('idle');
+	const [locationError, setLocationError] = useState(null);
+	const [mapInstance, setMapInstance] = useState(null);
 
 	// Fetch real data from API in background using correct operator codes
 	// SCCU = Stagecoach Cumbria & North Lancashire
@@ -130,6 +149,86 @@ export default function MapViewPage() {
 		(m.type === 'train' && filters.showTrains)
 	);
 
+	const distanceMeters = useMemo(() => {
+		const toRadians = (deg) => (deg * Math.PI) / 180;
+		return (a, b) => {
+			const R = 6371000;
+			const dLat = toRadians(b[0] - a[0]);
+			const dLon = toRadians(b[1] - a[1]);
+			const lat1 = toRadians(a[0]);
+			const lat2 = toRadians(b[0]);
+			const x = Math.sin(dLat / 2) ** 2 + Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+			const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+			return R * c;
+		};
+	}, []);
+
+	const nearestStop = useMemo(() => {
+		if (!userLocation || !markers.length) return null;
+		let nearest = null;
+		for (const marker of markers) {
+			const distance = distanceMeters(userLocation, marker.position);
+			if (!nearest || distance < nearest.distance) {
+				nearest = { ...marker, distance };
+			}
+		}
+		return nearest;
+	}, [userLocation, markers, distanceMeters]);
+
+	const closestStops = useMemo(() => {
+		if (!userLocation || !markers.length) return [];
+		const withDistance = markers.map((marker) => ({
+			...marker,
+			distance: distanceMeters(userLocation, marker.position)
+		}));
+		return withDistance.sort((a, b) => a.distance - b.distance).slice(0, 3);
+	}, [userLocation, markers, distanceMeters]);
+
+	const formatWalkTime = (distance) => {
+		const minutes = Math.max(1, Math.round(distance / 84)); // ~1.4 m/s walking speed
+		return `${minutes} min walk`;
+	};
+
+	const requestLocation = () => {
+		if (!navigator.geolocation) {
+			setLocationStatus('error');
+			setLocationError('Geolocation is not supported by this browser.');
+			return;
+		}
+
+		setLocationStatus('loading');
+		setLocationError(null);
+			navigator.geolocation.getCurrentPosition(
+			(position) => {
+				const coords = [position.coords.latitude, position.coords.longitude];
+				setUserLocation(coords);
+				setLocationStatus('granted');
+				if (mapInstance) {
+					mapInstance.flyTo(coords, Math.max(mapInstance.getZoom(), 12), { duration: 1.2 });
+				}
+			},
+			(error) => {
+				setLocationStatus('error');
+				setLocationError(error?.message || 'Location permission denied.');
+			},
+			{ enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+		);
+	};
+
+	const handleCenterOnUser = () => {
+		if (userLocation && mapInstance) {
+			mapInstance.flyTo(userLocation, Math.max(mapInstance.getZoom(), 12), { duration: 1.2 });
+		}
+	};
+
+	const MapController = ({ onReady }) => {
+		const map = useMap();
+		useEffect(() => {
+			onReady(map);
+		}, [map, onReady]);
+		return null;
+	};
+
 	return (
 		<Stack spacing={2} sx={{ height: '100%', mb: 2 }}>
 			<Paper elevation={0} sx={{ 
@@ -163,7 +262,7 @@ export default function MapViewPage() {
 				border: '1px solid',
 				borderColor: 'divider'
 			}}>
-				<Stack direction="row" spacing={1.5} mb={3}>
+				<Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
 					<Box
 						onClick={() => setFilters(f => ({ ...f, showBuses: !f.showBuses }))}
 						sx={{
@@ -220,7 +319,101 @@ export default function MapViewPage() {
 						<Train size={20} />
 						Trains {filteredMarkers.filter(m => m.type === 'train').length}
 					</Box>
+
+					<Box sx={{ flex: 1 }} />
+					<Button
+						variant="outlined"
+						size="small"
+						onClick={requestLocation}
+						disabled={locationStatus === 'loading'}
+						sx={{ borderRadius: '10px', textTransform: 'none' }}
+					>
+						{locationStatus === 'loading' ? (
+							<Stack direction="row" spacing={1} alignItems="center">
+								<CircularProgress size={16} />
+								<Typography variant="caption">Locating…</Typography>
+							</Stack>
+						) : (
+							'Use my location'
+						)}
+					</Button>
+					{userLocation && (
+						<Button
+							variant="contained"
+							size="small"
+							onClick={handleCenterOnUser}
+							sx={{ borderRadius: '10px', textTransform: 'none' }}
+						>
+							Center on me
+						</Button>
+					)}
 				</Stack>
+
+				{locationError && (
+					<Alert severity="warning" sx={{ borderRadius: '10px', mb: 2 }}>
+						<Typography variant="body2">{locationError}</Typography>
+					</Alert>
+				)}
+
+				{userLocation && nearestStop && (
+					<Stack direction="row" spacing={1.5} alignItems="center" mb={2} flexWrap="wrap">
+						<Chip
+							label={`Nearest: ${nearestStop.name}`}
+							variant="outlined"
+							sx={{ borderRadius: '10px' }}
+						/>
+						<Chip
+							label={`${(nearestStop.distance / 1000).toFixed(1)} km away`}
+							color="warning"
+							variant="outlined"
+							sx={{ borderRadius: '10px' }}
+						/>
+						{locationStatus === 'watching' && (
+							<Chip
+								label="Following your location"
+								color="success"
+								variant="outlined"
+								sx={{ borderRadius: '10px' }}
+							/>
+						)}
+					</Stack>
+				)}
+
+				{userLocation && closestStops.length > 0 && (
+					<Paper elevation={0} sx={{
+						p: 2,
+						mb: 2,
+						borderRadius: '12px',
+						border: '1px solid',
+						borderColor: 'divider',
+						backgroundColor: 'rgba(99,102,241,0.04)'
+					}}>
+						<Stack spacing={1}>
+							<Typography variant="subtitle2" fontWeight={700}>
+								Closest stops
+							</Typography>
+							{closestStops.map((stop) => (
+								<Stack key={stop.id} direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+									<Stack direction="row" spacing={1} alignItems="center">
+										<Chip
+											label={stop.type === 'bus' ? 'Bus' : 'Train'}
+											size="small"
+											color={stop.type === 'bus' ? 'primary' : 'success'}
+											variant="outlined"
+											sx={{ borderRadius: '10px' }}
+										/>
+										<Typography variant="body2" fontWeight={600}>
+											{stop.name}
+										</Typography>
+									</Stack>
+									<Typography variant="caption" color="text.secondary">
+										{(stop.distance / 1000).toFixed(1)} km · {formatWalkTime(stop.distance)}
+									</Typography>
+								</Stack>
+							))}
+						</Stack>
+					</Paper>
+				)}
 
 				{/* Map and Weather Widget side by side */}
 				<Stack direction="row" spacing={3} sx={{ height: 750 }}>
@@ -234,6 +427,37 @@ export default function MapViewPage() {
 						border: '1px solid',
 						borderColor: 'divider'
 					}}>
+						{(busLoading || trainLoading) && (
+							<Box sx={{
+								position: 'absolute',
+								inset: 0,
+								zIndex: 1000,
+								backgroundColor: 'rgba(255,255,255,0.7)',
+								display: 'flex',
+								alignItems: 'center',
+								justifyContent: 'center'
+							}}>
+								<Stack spacing={1} alignItems="center">
+									<CircularProgress size={28} />
+									<Typography variant="caption" fontWeight={600}>Loading live locations…</Typography>
+								</Stack>
+							</Box>
+						)}
+						{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
+							<Box sx={{
+								position: 'absolute',
+								inset: 0,
+								zIndex: 1000,
+								backgroundColor: 'rgba(255,255,255,0.7)',
+								display: 'flex',
+								alignItems: 'center',
+								justifyContent: 'center'
+							}}>
+								<Typography variant="body2" fontWeight={600} color="text.secondary">
+									No vehicles found with current filters.
+								</Typography>
+							</Box>
+						)}
 						<MapContainer 
 							center={[54.050556, -2.800556]} 
 							zoom={10} 
@@ -241,6 +465,7 @@ export default function MapViewPage() {
 							style={{ height: "100%", width: "100%" }}
 							className="leaflet-container-custom"
 						>
+							<MapController onReady={setMapInstance} />
 							<TileLayer
 								attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 									url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -283,6 +508,22 @@ export default function MapViewPage() {
 										)}
 									</Marker>
 								))}
+
+								{userLocation && (
+									<Marker
+										position={userLocation}
+										icon={createUserIcon()}
+									>
+										<Popup>
+											<Typography variant="subtitle2" fontWeight={700}>Your location</Typography>
+											{nearestStop && (
+												<Typography variant="caption" display="block" color="text.secondary">
+													Nearest stop: {nearestStop.name} ({(nearestStop.distance / 1000).toFixed(1)} km)
+												</Typography>
+											)}
+										</Popup>
+									</Marker>
+								)}
 							</MapContainer>
 					</Box>
 
