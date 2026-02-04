@@ -14,7 +14,7 @@ import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
 import { useMemo, useState, useEffect } from "react";
 import WeatherWidget from "../components/common/WeatherWidget";
-import { useLiveBusLocations, useLiveDepartures } from "../hooks/useTransportData";
+import { useLiveBusLocations, useLiveDepartures, useLiveUpdates } from "../hooks/useTransportData";
 
 // Fix Leaflet marker icons issue with Vite
 let DefaultIcon = L.icon({
@@ -93,6 +93,8 @@ export default function MapViewPage() {
 	// SCCU = Stagecoach Cumbria & North Lancashire
 	const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('SCCU', 30000);
 	const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 30000);
+	const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
+	const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 
 	// Update markers when real API data arrives
 	useEffect(() => {
@@ -189,6 +191,50 @@ export default function MapViewPage() {
 		return `${minutes} min walk`;
 	};
 
+	const normalizeLiveMarker = (item, type) => {
+		const lat = item?.latitude ?? item?.lat;
+		const lon = item?.longitude ?? item?.lon;
+		if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+		return {
+			id: item?.vehicleId || item?.id || `${type}-${lat}-${lon}`,
+			position: [lat, lon],
+			name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
+			type,
+			status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins` : 'On time'),
+			routeNumber: item?.routeNumber || item?.route,
+			destination: item?.destination,
+			departureTime: item?.departureTime || item?.scheduledTime
+		};
+	};
+
+	useEffect(() => {
+		const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : (liveBusUpdate ? [liveBusUpdate] : []);
+		const normalized = updates.map((item) => normalizeLiveMarker(item, 'bus')).filter(Boolean);
+		if (normalized.length === 0) return;
+
+		setMarkers((prev) => {
+			const next = new Map(prev.map((m) => [m.id, m]));
+			for (const item of normalized) {
+				next.set(item.id, { ...next.get(item.id), ...item });
+			}
+			return Array.from(next.values());
+		});
+	}, [liveBusUpdate]);
+
+	useEffect(() => {
+		const updates = Array.isArray(liveTrainUpdate) ? liveTrainUpdate : (liveTrainUpdate ? [liveTrainUpdate] : []);
+		const normalized = updates.map((item) => normalizeLiveMarker(item, 'train')).filter(Boolean);
+		if (normalized.length === 0) return;
+
+		setMarkers((prev) => {
+			const next = new Map(prev.map((m) => [m.id, m]));
+			for (const item of normalized) {
+				next.set(item.id, { ...next.get(item.id), ...item });
+			}
+			return Array.from(next.values());
+		});
+	}, [liveTrainUpdate]);
+
 	const requestLocation = () => {
 		if (!navigator.geolocation) {
 			setLocationStatus('error');
@@ -257,12 +303,12 @@ export default function MapViewPage() {
 			)}
 
 			<Paper elevation={0} sx={{ 
-				p: 3, 
+				p: { xs: 2, md: 3 }, 
 				borderRadius: '16px',
 				border: '1px solid',
 				borderColor: 'divider'
 			}}>
-				<Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
+				<Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} mb={2} flexWrap="wrap" alignItems={{ xs: "stretch", sm: "center" }}>
 					<Box
 						onClick={() => setFilters(f => ({ ...f, showBuses: !f.showBuses }))}
 						sx={{
@@ -320,13 +366,13 @@ export default function MapViewPage() {
 						Trains {filteredMarkers.filter(m => m.type === 'train').length}
 					</Box>
 
-					<Box sx={{ flex: 1 }} />
+					<Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
 					<Button
 						variant="outlined"
 						size="small"
 						onClick={requestLocation}
 						disabled={locationStatus === 'loading'}
-						sx={{ borderRadius: '10px', textTransform: 'none' }}
+						sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
 					>
 						{locationStatus === 'loading' ? (
 							<Stack direction="row" spacing={1} alignItems="center">
@@ -342,7 +388,7 @@ export default function MapViewPage() {
 							variant="contained"
 							size="small"
 							onClick={handleCenterOnUser}
-							sx={{ borderRadius: '10px', textTransform: 'none' }}
+							sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
 						>
 							Center on me
 						</Button>
@@ -376,6 +422,14 @@ export default function MapViewPage() {
 								sx={{ borderRadius: '10px' }}
 							/>
 						)}
+						{(busLiveConnected || trainLiveConnected) && (
+							<Chip
+								label="Live updates connected"
+								color="primary"
+								variant="outlined"
+								sx={{ borderRadius: '10px' }}
+							/>
+						)}
 					</Stack>
 				)}
 
@@ -393,7 +447,7 @@ export default function MapViewPage() {
 								Closest stops
 							</Typography>
 							{closestStops.map((stop) => (
-								<Stack key={stop.id} direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+								<Stack key={stop.id} direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between">
 									<Stack direction="row" spacing={1} alignItems="center">
 										<Chip
 											label={stop.type === 'bus' ? 'Bus' : 'Train'}
@@ -416,7 +470,7 @@ export default function MapViewPage() {
 				)}
 
 				{/* Map and Weather Widget side by side */}
-				<Stack direction="row" spacing={3} sx={{ height: 750 }}>
+				<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
 					{/* Map Container */}
 					<Box sx={{ 
 						flex: 1,
@@ -425,7 +479,8 @@ export default function MapViewPage() {
 						overflow: 'hidden',
 						boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
 						border: '1px solid',
-						borderColor: 'divider'
+						borderColor: 'divider',
+						height: { xs: 420, sm: 520, md: '100%' }
 					}}>
 						{(busLoading || trainLoading) && (
 							<Box sx={{
@@ -528,7 +583,7 @@ export default function MapViewPage() {
 					</Box>
 
 					{/* Weather Widget - Separate box on the right */}
-					<Box sx={{ minWidth: 320 }}>
+					<Box sx={{ minWidth: { xs: '100%', md: 320 } }}>
 						<WeatherWidget />
 					</Box>
 				</Stack>
