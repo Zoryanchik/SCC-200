@@ -9,9 +9,10 @@ import Typography from "@mui/material/Typography";
 import Divider from "@mui/material/Divider";
 import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
+import { memo } from "react";
 import { Bus, Train, MapPin, Heart } from "lucide-react";
 
-export function RouteCard({ route, onSave, isSaved = false }) {
+export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false }) {
   const parseDurationToMinutes = (value) => {
     if (!value) return 0;
     if (typeof value === 'number') return value;
@@ -91,6 +92,6 @@ export function RouteCard({ route, onSave, isSaved = false }) {
       </Stack>
     </Paper>
   );
-}
+});
 
 export default RouteCard;
