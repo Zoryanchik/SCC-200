@@ -12,6 +12,27 @@ import IconButton from "@mui/material/IconButton";
 import { Bus, Train, MapPin, Heart } from "lucide-react";
 
 export function RouteCard({ route, onSave, isSaved = false }) {
+  const parseDurationToMinutes = (value) => {
+    if (!value) return 0;
+    if (typeof value === 'number') return value;
+    const text = String(value).toLowerCase();
+    const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*h/);
+    const minutesMatch = text.match(/(\d+(?:\.\d+)?)\s*m/);
+    const hours = hoursMatch ? parseFloat(hoursMatch[1]) : 0;
+    const minutes = minutesMatch ? parseFloat(minutesMatch[1]) : 0;
+    return Math.round(hours * 60 + minutes);
+  };
+
+  const totalWalkMinutes = (() => {
+    if (typeof route.walkMinutes === 'number') return route.walkMinutes;
+    if (typeof route.walkTime === 'number') return route.walkTime;
+    if (typeof route.walkTime === 'string') return parseDurationToMinutes(route.walkTime);
+    if (!Array.isArray(route.steps)) return 0;
+    return route.steps
+      .filter((step) => step.type === 'walk')
+      .reduce((sum, step) => sum + parseDurationToMinutes(step.duration), 0);
+  })();
+
   return (
     <Paper variant="outlined" sx={{ p: 2, transition: 'all 0.3s', '&:hover': { elevation: 2 } }}>
       <Stack spacing={1.5}>
@@ -23,6 +44,11 @@ export function RouteCard({ route, onSave, isSaved = false }) {
             <Typography variant="caption" color="text.secondary">
               {route.transfers || 0} transfer{(route.transfers || 0) !== 1 ? 's' : ''}
             </Typography>
+            {totalWalkMinutes > 0 && (
+              <Typography variant="caption" color="text.secondary">
+                Walk time: {totalWalkMinutes} min
+              </Typography>
+            )}
           </Stack>
           <Stack alignItems="flex-end" spacing={0.5}>
             <Typography fontWeight={700} color="success.main">
