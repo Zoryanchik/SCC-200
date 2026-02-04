@@ -159,7 +159,7 @@
 - [ ] **Retry strategy** - Add retry/backoff for failed requests in hooks
   
 - [ ] **WebSocket/STOMP** - Activate real-time updates
-  - [ ] Wire useLiveUpdates() into UI
+  - [x] Wire useLiveUpdates() into UI
   - [ ] Validate broker credentials & topics (BUS_MVT_ALL, TRAIN_MVT_ALL_TOC, SERVICE_ALERTS)
   - [ ] Handle connection drops and reconnection
   - [ ] Update markers in real-time (replace polling)
@@ -214,15 +214,15 @@
   - [ ] Network request batching
   
 - [ ] **UX Improvements**
-  - [ ] Loading skeletons for all data
-  - [ ] Empty states with helpful messages
+  - [x] Loading skeletons for all data
+  - [x] Empty states with helpful messages
   - [ ] Toast notifications for errors
   - [ ] Confirm dialogs for destructive actions
   
 - [ ] **Mobile Optimization**
-  - [ ] Responsive design tweaks
+  - [x] Responsive design tweaks
   - [ ] Touch-friendly interactions
-  - [ ] Mobile-specific layouts
+  - [x] Mobile-specific layouts
   - [ ] Offline mode
   
 - [ ] **Testing**
