@@ -209,7 +209,7 @@
 ### Priority 4: Polish & Optimization
 - [ ] **Performance**
   - [ ] Optimize bundle further (currently 200KB max chunk)
-  - [ ] Lazy load map on route change
+  - [x] Lazy load map on route change
   - [ ] Image optimization
   - [ ] Network request batching
   
