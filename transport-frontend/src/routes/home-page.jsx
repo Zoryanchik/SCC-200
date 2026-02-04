@@ -15,6 +15,7 @@ import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts } from "../hooks/useTransportData";
+import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 
@@ -60,7 +61,7 @@ export default function HomePage() {
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation);
   
   // Fetch real data from API
-  const { data: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
+  const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: departures, loading: departuresLoading } = useLiveDepartures('LAN');
   const [routes, setRoutes] = useState(MOCK_ROUTES); // Start with mock routes for instant display
 
@@ -108,30 +109,14 @@ export default function HomePage() {
     if (!selectedFromStop || !selectedToStop) return;
     setIsSearching(true);
     try {
-      // Call real journey planner API
-      const response = await fetch(
-        `https://transport.scc.lancs.ac.uk/journey/plan`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fromStop: selectedFromStop?.code,
-            toStop: selectedToStop?.code,
-            departureTime: new Date().toISOString()
-          })
-        }
+      const journeys = await getJourneyPlans(
+        selectedFromStop?.code,
+        selectedToStop?.code,
+        new Date().toISOString()
       );
-      
-      if (response.ok) {
-        const journeys = await response.json();
-        setRoutes(Array.isArray(journeys) ? journeys : []);
-      } else {
-        // Fallback to mock data
-        setRoutes(MOCK_ROUTES);
-      }
+      setRoutes(Array.isArray(journeys) ? journeys : []);
     } catch (error) {
       console.error('Journey search error:', error);
-      // Fallback to mock data on error
       setRoutes(MOCK_ROUTES);
     } finally {
       setIsSearching(false);
@@ -193,21 +178,33 @@ export default function HomePage() {
           <Typography variant="subtitle1" fontWeight={700}>Service alerts</Typography>
         </Stack>
         <Stack spacing={1.5}>
-          {alerts.map(alert => (
-            <Alert 
-              key={alert.id} 
-              severity={alert.severity === "warning" ? "warning" : "info"} 
-              variant="outlined"
-              sx={{ 
-                borderRadius: '8px',
-                backgroundColor: alert.severity === "warning" 
-                  ? 'rgba(245, 158, 11, 0.05)'
-                  : 'rgba(59, 130, 246, 0.05)'
-              }}
-            >
-              {alert.message}
-            </Alert>
-          ))}
+          {alertsLoading ? (
+            <Stack spacing={1}>
+              {[1, 2].map((i) => (
+                <Skeleton key={i} height={44} variant="rounded" />
+              ))}
+            </Stack>
+          ) : alerts.length > 0 ? (
+            alerts.map(alert => (
+              <Alert 
+                key={alert.id} 
+                severity={alert.severity === "warning" ? "warning" : "info"} 
+                variant="outlined"
+                sx={{ 
+                  borderRadius: '8px',
+                  backgroundColor: alert.severity === "warning" 
+                    ? 'rgba(245, 158, 11, 0.05)'
+                    : 'rgba(59, 130, 246, 0.05)'
+                }}
+              >
+                {alert.message}
+              </Alert>
+            ))
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No service alerts right now.
+            </Typography>
+          )}
         </Stack>
       </Paper>
 
@@ -332,9 +329,17 @@ export default function HomePage() {
                 <Typography variant="h6" fontWeight={700}>Nearby departures</Typography>
               </Stack>
               <Stack spacing={1.5}>
-                {liveDepartures.map(dep => (
-                  <DepartureCard key={dep.id} departure={dep} />
-                ))}
+                {departuresLoading ? (
+                  <Stack spacing={1}>
+                    {[1, 2, 3].map((i) => (
+                      <Skeleton key={i} height={80} variant="rounded" />
+                    ))}
+                  </Stack>
+                ) : (
+                  liveDepartures.map(dep => (
+                    <DepartureCard key={dep.id} departure={dep} />
+                  ))
+                )}
               </Stack>
             </Stack>
           </Paper>
@@ -350,7 +355,7 @@ export default function HomePage() {
                 <Skeleton key={i} height={120} variant="rounded" />
               ))}
             </Stack>
-          ) : (
+          ) : routes.length > 0 ? (
             <Stack spacing={2}>
               {routes.map(route => (
                 <RouteCard 
@@ -361,6 +366,10 @@ export default function HomePage() {
                 />
               ))}
             </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No routes found. Try adjusting your search.
+            </Typography>
           )}
         </Stack>
       </Paper>
