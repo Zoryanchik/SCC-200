@@ -14,7 +14,8 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
-import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts } from "../hooks/useTransportData";
+import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates } from "../hooks/useTransportData";
+import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 
@@ -60,9 +61,38 @@ export default function HomePage() {
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation);
   
   // Fetch real data from API
-  const { data: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
+  const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: departures, loading: departuresLoading } = useLiveDepartures('LAN');
+  const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates('alerts');
+  const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState(MOCK_ROUTES); // Start with mock routes for instant display
+
+  useEffect(() => {
+    if (!liveAlertUpdate) return;
+    const updates = Array.isArray(liveAlertUpdate) ? liveAlertUpdate : [liveAlertUpdate];
+    const normalized = updates
+      .map((alert, idx) => ({
+        id: alert?.id || alert?.alertId || `${Date.now()}-${idx}`,
+        severity: alert?.severity || alert?.level || "info",
+        message: alert?.message || alert?.description || alert?.text || "Service update"
+      }))
+      .filter((alert) => alert.message);
+
+    if (normalized.length === 0) return;
+
+    setLiveAlerts((prev) => {
+      const merged = [...normalized, ...prev];
+      const seen = new Set();
+      const deduped = [];
+      for (const item of merged) {
+        const key = `${item.severity}-${item.message}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+      }
+      return deduped.slice(0, 5);
+    });
+  }, [liveAlertUpdate]);
 
   // Transform departures data
   const liveDepartures = useMemo(() => {
@@ -85,18 +115,24 @@ export default function HomePage() {
 
   // Transform alerts data
   const alerts = useMemo(() => {
-    if (!Array.isArray(serviceAlerts) || serviceAlerts.length === 0) {
-      return [
-        { id: 1, severity: "warning", message: "M6 delays between J33-J36: 15 mins" },
-        { id: 2, severity: "info", message: "Bus route 2 diversion via King Street" },
-      ];
+    const apiAlerts = Array.isArray(serviceAlerts) && serviceAlerts.length > 0
+      ? serviceAlerts.slice(0, 3).map((alert, idx) => ({
+          id: alert?.id || idx + 1,
+          severity: alert?.severity || "info",
+          message: alert?.message || alert?.description || "Service update"
+        }))
+      : [];
+
+    const combined = [...liveAlerts, ...apiAlerts];
+    if (combined.length > 0) {
+      return combined.slice(0, 3);
     }
-    return serviceAlerts.slice(0, 2).map((alert, idx) => ({
-      id: idx + 1,
-      severity: alert.severity || "info",
-      message: alert.message || alert.description || "Service update"
-    }));
-  }, [serviceAlerts]);
+
+    return [
+      { id: 1, severity: "warning", message: "M6 delays between J33-J36: 15 mins" },
+      { id: 2, severity: "info", message: "Bus route 2 diversion via King Street" },
+    ];
+  }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
     const fromResults = fromLoading ? [] : (fromStopResults?.length ? fromStopResults : MOCK_STOPS);
@@ -108,30 +144,14 @@ export default function HomePage() {
     if (!selectedFromStop || !selectedToStop) return;
     setIsSearching(true);
     try {
-      // Call real journey planner API
-      const response = await fetch(
-        `https://transport.scc.lancs.ac.uk/journey/plan`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fromStop: selectedFromStop?.code,
-            toStop: selectedToStop?.code,
-            departureTime: new Date().toISOString()
-          })
-        }
+      const journeys = await getJourneyPlans(
+        selectedFromStop?.code,
+        selectedToStop?.code,
+        new Date().toISOString()
       );
-      
-      if (response.ok) {
-        const journeys = await response.json();
-        setRoutes(Array.isArray(journeys) ? journeys : []);
-      } else {
-        // Fallback to mock data
-        setRoutes(MOCK_ROUTES);
-      }
+      setRoutes(Array.isArray(journeys) ? journeys : []);
     } catch (error) {
       console.error('Journey search error:', error);
-      // Fallback to mock data on error
       setRoutes(MOCK_ROUTES);
     } finally {
       setIsSearching(false);
@@ -157,9 +177,9 @@ export default function HomePage() {
   };
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={{ xs: 2, md: 3 }}>
       <Paper elevation={0} sx={{ 
-        p: 3.5, 
+        p: { xs: 2.5, md: 3.5 }, 
         background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
         color: 'white',
         borderRadius: '16px'
@@ -182,7 +202,7 @@ export default function HomePage() {
       </Paper>
 
       <Paper elevation={0} sx={{ 
-        p: 3, 
+        p: { xs: 2, md: 3 }, 
         borderRadius: '16px',
         border: '1px solid',
         borderColor: 'divider',
@@ -191,30 +211,51 @@ export default function HomePage() {
         <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
           <AlertCircle size={20} color="#EC4899" />
           <Typography variant="subtitle1" fontWeight={700}>Service alerts</Typography>
+          {alertsConnected && (
+            <Chip
+              label="Live"
+              size="small"
+              color="primary"
+              variant="outlined"
+              sx={{ ml: 1 }}
+            />
+          )}
         </Stack>
         <Stack spacing={1.5}>
-          {alerts.map(alert => (
-            <Alert 
-              key={alert.id} 
-              severity={alert.severity === "warning" ? "warning" : "info"} 
-              variant="outlined"
-              sx={{ 
-                borderRadius: '8px',
-                backgroundColor: alert.severity === "warning" 
-                  ? 'rgba(245, 158, 11, 0.05)'
-                  : 'rgba(59, 130, 246, 0.05)'
-              }}
-            >
-              {alert.message}
-            </Alert>
-          ))}
+          {alertsLoading ? (
+            <Stack spacing={1}>
+              {[1, 2].map((i) => (
+                <Skeleton key={i} height={44} variant="rounded" />
+              ))}
+            </Stack>
+          ) : alerts.length > 0 ? (
+            alerts.map(alert => (
+              <Alert 
+                key={alert.id} 
+                severity={alert.severity === "warning" ? "warning" : "info"} 
+                variant="outlined"
+                sx={{ 
+                  borderRadius: '8px',
+                  backgroundColor: alert.severity === "warning" 
+                    ? 'rgba(245, 158, 11, 0.05)'
+                    : 'rgba(59, 130, 246, 0.05)'
+                }}
+              >
+                {alert.message}
+              </Alert>
+            ))
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No service alerts right now.
+            </Typography>
+          )}
         </Stack>
       </Paper>
 
-      <Grid container spacing={3}>
+      <Grid container spacing={{ xs: 2, md: 3 }}>
         <Grid item xs={12} md={6}>
           <Paper elevation={0} sx={{ 
-            p: 3.5, 
+            p: { xs: 2.5, md: 3.5 }, 
             height: "100%",
             borderRadius: '16px',
             border: '1px solid',
@@ -325,23 +366,31 @@ export default function HomePage() {
         </Grid>
 
         <Grid item xs={12} md={6}>
-          <Paper elevation={1} sx={{ p: 3, height: "100%" }}>
+          <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, height: "100%" }}>
             <Stack spacing={2}>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Clock size={18} />
                 <Typography variant="h6" fontWeight={700}>Nearby departures</Typography>
               </Stack>
               <Stack spacing={1.5}>
-                {liveDepartures.map(dep => (
-                  <DepartureCard key={dep.id} departure={dep} />
-                ))}
+                {departuresLoading ? (
+                  <Stack spacing={1}>
+                    {[1, 2, 3].map((i) => (
+                      <Skeleton key={i} height={80} variant="rounded" />
+                    ))}
+                  </Stack>
+                ) : (
+                  liveDepartures.map(dep => (
+                    <DepartureCard key={dep.id} departure={dep} />
+                  ))
+                )}
               </Stack>
             </Stack>
           </Paper>
         </Grid>
       </Grid>
 
-      <Paper elevation={1} sx={{ p: 3 }}>
+      <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
         <Stack spacing={2}>
           <Typography variant="h6" fontWeight={700}>Suggested routes</Typography>
           {isSearching ? (
@@ -350,7 +399,7 @@ export default function HomePage() {
                 <Skeleton key={i} height={120} variant="rounded" />
               ))}
             </Stack>
-          ) : (
+          ) : routes.length > 0 ? (
             <Stack spacing={2}>
               {routes.map(route => (
                 <RouteCard 
@@ -361,6 +410,10 @@ export default function HomePage() {
                 />
               ))}
             </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No routes found. Try adjusting your search.
+            </Typography>
           )}
         </Stack>
       </Paper>

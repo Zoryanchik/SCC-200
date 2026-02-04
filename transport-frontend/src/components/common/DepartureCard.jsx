@@ -8,9 +8,10 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import Chip from "@mui/material/Chip";
 import Box from "@mui/material/Box";
+import { memo } from "react";
 import { Bus, Train, Clock } from "lucide-react";
 
-export function DepartureCard({ departure }) {
+export const DepartureCard = memo(function DepartureCard({ departure }) {
   const isDelayed = departure.status?.toLowerCase().includes('delayed');
   const isCancelled = departure.status?.toLowerCase().includes('cancel');
 
@@ -57,6 +58,6 @@ export function DepartureCard({ departure }) {
       </Stack>
     </Paper>
   );
-}
+});
 
 export default DepartureCard;
