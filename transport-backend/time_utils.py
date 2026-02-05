@@ -186,6 +186,63 @@ def is_operational_day(date: str, operational_days: str) -> bool:
     return python_day in operational_days
 
 
+def three_day_window(date: str, mode: str = 'center') -> list:
+    """
+    Return a list of three ISO date strings representing a 3-day window.
+
+    Args:
+        date: center (or start) date in YYYY-MM-DD
+        mode: 'center' (D-1, D, D+1) or 'start' (D, D+1, D+2)
+
+    Returns:
+        List of three dates as strings in YYYY-MM-DD order.
+
+    Examples:
+        >>> three_day_window('2026-02-05')
+        ['2026-02-04', '2026-02-05', '2026-02-06']
+        >>> three_day_window('2026-02-05', mode='start')
+        ['2026-02-05', '2026-02-06', '2026-02-07']
+    """
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d").date()
+    except Exception:
+        raise ValueError("date must be YYYY-MM-DD")
+
+    if mode not in ('center', 'start'):
+        raise ValueError("mode must be 'center' or 'start'")
+
+    if mode == 'center':
+        days = [d + timedelta(days=offset) for offset in (-1, 0, 1)]
+    else:
+        days = [d + timedelta(days=offset) for offset in (0, 1, 2)]
+
+    return [day.strftime("%Y-%m-%d") for day in days]
+
+
+def operates_in_3day_window(date: str, operational_days: str, mode: str = 'center') -> bool:
+    """
+    Return True if a service operating pattern (operational_days) is active on any of the
+    three days in the window around `date`.
+
+    Args:
+        date: date string YYYY-MM-DD
+        operational_days: pattern string like 'MTWRFXS' (see is_operational_day)
+        mode: 'center' or 'start' (see three_day_window)
+
+    Returns:
+        True if service operates on at least one of the three days.
+
+    Examples:
+        >>> operates_in_3day_window('2026-02-05', 'MTWRF')
+        True
+    """
+    window = three_day_window(date, mode=mode)
+    for d in window:
+        if is_operational_day(d, operational_days):
+            return True
+    return False
+
+
 def time_between_stops(arrival_time: int, departure_time: int) -> int:
     """
     Calculate dwell time between arrival and departure
@@ -299,29 +356,3 @@ class TimeRange:
     
     def __str__(self):
         return f"{seconds_to_time(self.start)} - {seconds_to_time(self.end)}"
-
-
-if __name__ == "__main__":
-    # Test cases
-    print("Testing time_utils.py:")
-    print()
-    
-    # Test seconds_since_midnight
-    print("seconds_since_midnight('12:30:45'):", seconds_since_midnight("12:30:45"))
-    
-    # Test seconds_to_time
-    print("seconds_to_time(45045):", seconds_to_time(45045))
-    
-    # Test ISO 8601 parsing
-    print("parse_iso8601_duration('PT1H30M45S'):", parse_iso8601_duration("PT1H30M45S"))
-    
-    # Test operational days
-    print("is_operational_day('2026-02-02', 'MTWRF'):", is_operational_day("2026-02-02", "MTWRF"))
-    
-    # Test duration formatting
-    print("format_duration(5445):", format_duration(5445))
-    
-    # Test TimeRange
-    tr = TimeRange(seconds_since_midnight("09:00:00"), seconds_since_midnight("17:00:00"))
-    print(f"TimeRange: {tr}")
-    print(f"Contains 12:00:00:", tr.contains(seconds_since_midnight("12:00:00")))

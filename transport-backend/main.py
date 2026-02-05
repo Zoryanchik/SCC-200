@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# main is to be implemented, currently possibly only tests, please ignore
 """
 Transport Backend - Main Entry Point
 Initializes the transit routing system and provides access to all components
@@ -7,7 +7,7 @@ Initializes the transit routing system and provides access to all components
 from atco import Atco
 from timetable import Timetable
 from walking import Walking
-from raptorRouter import RaptorRouter
+from raptor_router import RaptorRouter
 
 
 def initialize_system():
@@ -111,4 +111,21 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run ATCO demo (moved from atco.py)
+    atco_demo = Atco()
+    atco_demo.load_naptan()
+
+    count = atco_demo.get_stop_count()
+    print(f"\n✓ Total stops in database: {count}")
+
+    # Show some examples
+    print("\nExample stops:")
+    stops = atco_demo.get_all_stops(limit=5)
+    for stop in stops:
+        # some rows may not include the same keys across DB variants; guard access
+        name = stop.get('name') if isinstance(stop, dict) else getattr(stop, 'name', None)
+        code = stop.get('atco_code') if isinstance(stop, dict) else getattr(stop, 'atco_code', None)
+        print(f"  • {name} ({code})")
+
+    # Then run the interactive main
     main()
