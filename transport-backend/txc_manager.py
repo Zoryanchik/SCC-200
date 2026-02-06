@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""TransXChange dataset manager
+"""Minimal TransXChange dataset downloader and DB creator
 
-Features:
-- ensure database exists (no tables created)
-- download all XML files linked from a dataset index URL into a local folder
-- provide parsing helpers to turn XML files into in-memory BusData objects
+This script does exactly two things (and nothing more):
+ - optionally create the Postgres database (no tables)
+ - download all .xml files linked from the provided dataset index URL into a local folder
 
-Usage examples:
-  python txc_manager.py download https://transport.scc.lancs.ac.uk/timetable/dataset/18047/download/ --out data/18047
-  python txc_manager.py parse data/18047 --date 2026-01-20
+It intentionally does not parse XMLs, create tables, or persist any parsed data.
 """
 
 from html.parser import HTMLParser
@@ -17,13 +14,15 @@ import urllib.request
 import os
 import argparse
 import shutil
-import xml.etree.ElementTree as ET
-import zipfile
 from typing import List
 
 
 def ensure_database(db_name: str, user: str = '', password: str = '', host: str = 'localhost') -> bool:
-    """Create database `db_name` using the postgres database if it doesn't exist."""
+    """Create database `db_name` using the postgres database if it doesn't exist.
+
+    This creates the empty database only; it does not create any tables.
+    Returns True on success, False otherwise.
+    """
     try:
         import psycopg2
         conn = psycopg2.connect(host=host, user=user, password=password, database='postgres')
@@ -81,35 +80,138 @@ def download_file(url: str, out_path: str) -> None:
         shutil.copyfileobj(r, w)
 
 
-def _download_zip(url: str, out_dir: str) -> List[str]:
-    os.makedirs(out_dir, exist_ok=True)
-    zip_path = os.path.join(out_dir, "dataset.zip")
-    print(f"Downloading {url} -> {zip_path}")
-    with urllib.request.urlopen(url) as r, open(zip_path, 'wb') as w:
-        shutil.copyfileobj(r, w)
+def download_dataset(index_url: str, out_dir: str) -> List[str]:
+    """Download all XML files linked from index_url into out_dir.
 
-    extracted = []
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        for name in zf.namelist():
-            if name.lower().endswith('.xml'):
-                target = os.path.join(out_dir, os.path.basename(name))
-                with zf.open(name) as src, open(target, 'wb') as dst:
-                    shutil.copyfileobj(src, dst)
-                extracted.append(target)
-    return extracted
+    Returns list of local file paths downloaded.
+    """
+    links = list_index_xml_links(index_url)
+    files = []
+    for link in links:
+        name = os.path.basename(urlparse(link).path)
+        out_path = os.path.join(out_dir, name)
+        download_file(link, out_path)
+        files.append(out_path)
+    return files
+
+
+def main():
+    p = argparse.ArgumentParser(description='Minimal TXC downloader and DB creator')
+    p.add_argument('index_url', help='dataset index URL that lists .xml files')
+    p.add_argument('--out', required=True, help='local output directory for XML files')
+    p.add_argument('--db', help='create database name (optional)')
+    p.add_argument('--user', default='', help='DB user')
+    p.add_argument('--password', default='', help='DB password')
+    p.add_argument('--host', default='localhost', help='DB host')
+    args = p.parse_args()
+
+    if args.db:
+        ok = ensure_database(args.db, user=args.user, password=args.password, host=args.host)
+        if not ok:
+            print('Warning: database creation failed (see message above); continuing to download files')
+
+    files = download_dataset(args.index_url, args.out)
+    print(f"Downloaded {len(files)} files to {args.out}")
+
+
+if __name__ == '__main__':
+    main()
+#!/usr/bin/env python3
+"""TransXChange dataset manager
+
+Features:
+- ensure database exists (no tables created)
+- download all XML files linked from a dataset index URL into a local folder
+- provide parsing helpers to turn XML files into in-memory BusData objects
+
+Usage examples:
+  # create DB (no tables) and download files
+  python3 txc_manager.py download https://transport.scc.lancs.ac.uk/timetable/dataset/18047/download/ --out data/18047 --db bus
+
+  # parse local files into BusData objects (in-memory only)
+  python3 txc_manager.py parse data/18047 --date 2026-01-20
+
+This module purposely does not create any schema/tables. It prepares the environment
+and provides a framework you can extend to persist parsed data later.
+"""
+
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
+import urllib.request
+import os
+import argparse
+import shutil
+from typing import List
+
+
+def ensure_database(db_name: str, user: str = '', password: str = '', host: str = 'localhost') -> bool:
+    """Create database `db_name` using the postgres database if it doesn't exist.
+
+    This only creates the empty database; it does not create any tables.
+    Returns True on success, False otherwise.
+    """
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host=host, user=user, password=password, database='postgres')
+        conn.autocommit = True
+        cur = conn.cursor()
+        try:
+            cur.execute(f"CREATE DATABASE {db_name}")
+            print(f"Created database '{db_name}'")
+        except psycopg2.errors.DuplicateDatabase:
+            print(f"Database '{db_name}' already exists")
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Could not create/connect to postgres: {e}")
+        return False
+
+
+class LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == 'a':
+            href = None
+            for k, v in attrs:
+                if k.lower() == 'href':
+                    href = v
+                    break
+            if href:
+                self.links.append(href)
+
+
+def list_index_xml_links(index_url: str) -> List[str]:
+    """Fetch an index page and return absolute URLs for anchors ending in .xml."""
+    resp = urllib.request.urlopen(index_url)
+    text = resp.read().decode('utf-8', errors='ignore')
+    p = LinkParser()
+    p.feed(text)
+    abs_links = []
+    for href in p.links:
+        if href.lower().endswith('.xml'):
+            abs_links.append(urljoin(index_url, href))
+    return abs_links
+
+
+def download_file(url: str, out_path: str) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    if os.path.exists(out_path):
+        print(f"Skip (exists): {out_path}")
+        return
+    print(f"Downloading {url} -> {out_path}")
+    with urllib.request.urlopen(url) as r, open(out_path, 'wb') as w:
+        shutil.copyfileobj(r, w)
 
 
 def download_dataset(index_url: str, out_dir: str) -> List[str]:
-    """Download XML files from an index page or a ZIP endpoint."""
-    try:
-        with urllib.request.urlopen(index_url) as resp:
-            content_type = resp.headers.get('Content-Type', '')
-    except Exception:
-        content_type = ''
+    """Download all XML files linked from index_url into out_dir.
 
-    if 'zip' in content_type.lower():
-        return _download_zip(index_url, out_dir)
-
+    Returns list of local file paths downloaded.
+    """
     links = list_index_xml_links(index_url)
     files = []
     for link in links:
@@ -121,6 +223,8 @@ def download_dataset(index_url: str, out_dir: str) -> List[str]:
 
 
 # Lightweight TXC parser (adapted from previous loader implementation)
+import xml.etree.ElementTree as ET
+
 
 def local_name(tag: str) -> str:
     if '}' in tag:
@@ -129,7 +233,11 @@ def local_name(tag: str) -> str:
 
 
 def parse_transxchange(xml_path: str, service_date: str = None):
-    """Parse TXC and return a list of journeys (journey_id, route_id, stops[])."""
+    """Parse TXC and return a list of journeys (journey_id, route_id, stops[]).
+
+    This is intentionally lightweight: it resolves JourneyPattern -> JourneyPatternSection -> StopPointRef
+    and returns stop codes (often ATCO codes) but does not attempt to normalize them.
+    """
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
@@ -258,7 +366,10 @@ def parse_transxchange(xml_path: str, service_date: str = None):
 
 
 def build_busdata_from_journeys(journeys):
-    """Return a BusData object built from parsed journeys (in-memory)."""
+    """Return a BusData object built from parsed journeys (in-memory).
+
+    This does not persist anything to the DB; it's a convenience wrapper.
+    """
     try:
         from bus_data import BusData
     except Exception as e:
@@ -325,10 +436,8 @@ def main():
         print(f"Found {len(files)} XML files in {args.dir}")
         for f in files:
             journeys = parse_transxchange(f, service_date=args.date)
-            print(
-                f"{os.path.basename(f)} -> routes approx {len(set(j['route_id'] for j in journeys))}, "
-                f"journeys {len(journeys)}, stops {len({s for j in journeys for (s, _) in j['stops'] if s})}"
-            )
+            bd = build_busdata_from_journeys(journeys)
+            print(f"{os.path.basename(f)} -> routes approx {len(set(j['route_id'] for j in journeys))}, journeys {len(journeys)}, stops {len({s for j in journeys for (s,_) in j['stops'] if s})}")
     else:
         p.print_help()
 
