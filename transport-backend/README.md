@@ -8,6 +8,7 @@ Router:
 Bus Live:
 - Run bus_live.py in terminal
 - Waiting to be connected to front-end
-- Should add function of updating every 5 seconds after connected to front-end
+- Input lat, lon should be the mid-point of the map-window 
+- Should add function of getting mid-point and updating every 5 seconds after connected to front-end
 
 Router and Bus Live should be concurrent, maybe using thread.
