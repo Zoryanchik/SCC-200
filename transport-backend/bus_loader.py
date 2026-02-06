@@ -221,6 +221,25 @@ class BusLoader:
         root = tree.getroot()
         ns = '{http://www.transxchange.org.uk/}'
 
+        # Attempt to determine the operator / organisation code for this file.
+        # TransXChange files may include this under several elements; try a few
+        # common locations and fall back to empty string if not found.
+        org_code = ''
+        # Preferred: ServiceOrganisations/ServiceOrganisation/OrganisationCode
+        so_el = root.find(f'{ns}ServiceOrganisations/{ns}ServiceOrganisation')
+        if so_el is not None:
+            org_code = so_el.findtext(f'{ns}OrganisationCode', '').strip()
+        # Fallback: ServicedOrganisations/ServicedOrganisation/OrganisationCode
+        if not org_code:
+            sdel = root.find(f'{ns}ServicedOrganisations/{ns}ServicedOrganisation')
+            if sdel is not None:
+                org_code = sdel.findtext(f'{ns}OrganisationCode', '').strip()
+        # Another possible location: ServiceOperator/OperatorCode
+        if not org_code:
+            op_el = root.find(f'{ns}ServiceOperator/{ns}OperatorCode')
+            if op_el is not None:
+                org_code = (op_el.text or '').strip()
+
         # ── 0. StopPoints — AtcoCode → CommonName mapping ────────
         stop_names_rows = []
         for sp in root.findall(f'{ns}StopPoints/{ns}AnnotatedStopPointRef'):
@@ -319,8 +338,13 @@ class BusLoader:
 
         route_stops_rows = []
         for route_id, stops in route_stop_lists.items():
+            # Prefix route_id with organisation code if available so that
+            # route identifiers are namespaced per operator. This ensures
+            # uniqueness across multiple operator datasets loaded into the
+            # same DB.
+            rkey = f"{org_code}:{route_id}" if org_code else route_id
             for idx, atco in enumerate(stops):
-                route_stops_rows.append((route_id, atco, idx))
+                route_stops_rows.append((rkey, atco, idx))
 
         # ── 4. VehicleJourneys → journey_routes + journey_times ──
         journey_routes_rows = []
@@ -346,7 +370,11 @@ class BusLoader:
 
             info = jp_map[jp_ref]
             route_ref = info['route_ref']
-            journey_routes_rows.append((vj_code, route_ref, line_name))
+            # Namespace journey and route IDs with the organisation code
+            # so they're unique across multiple operators.
+            jkey = f"{org_code}:{vj_code}" if org_code and vj_code else (vj_code or '')
+            rkey = f"{org_code}:{route_ref}" if org_code and route_ref else (route_ref or '')
+            journey_routes_rows.append((jkey, rkey, line_name))
 
             # ── Parse OperatingProfile ────────────────────────────
             op = vj.find(f'{ns}OperatingProfile')
@@ -400,7 +428,8 @@ class BusLoader:
                     if org_ref_el is not None:
                         org_ref = org_ref_el.text or ''
 
-            journey_op_rows.append((vj_code, service_code, dow_mask, op_start, op_end, org_ref, org_working))
+            # Store journey operating profile keyed by the namespaced journey id
+            journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working))
 
             # Build per-JPTL RunTime overrides from VehicleJourneyTimingLinks
             overrides = {}
@@ -417,7 +446,7 @@ class BusLoader:
                 for jptl_id, from_stop, to_stop, base_run, to_day_shift in jps_data[sid]:
                     if first:
                         # arrival at the first stop is the departure time
-                        journey_times_rows.append((vj_code, from_stop, cum))
+                        journey_times_rows.append((jkey, from_stop, cum))
                         first = False
                     run = overrides.get(jptl_id, base_run)
                     cum += run
@@ -427,7 +456,7 @@ class BusLoader:
                         min_time = dep_sec + to_day_shift * 86400
                         if cum < min_time:
                             cum = min_time
-                    journey_times_rows.append((vj_code, to_stop, cum))
+                    journey_times_rows.append((jkey, to_stop, cum))
 
         # ── 5. Persist ───────────────────────────────────────────
         self.populate(route_stops_rows, journey_routes_rows, journey_times_rows, stop_names_rows,
