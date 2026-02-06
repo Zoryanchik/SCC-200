@@ -14,5 +14,8 @@ class DenseMapper:
             self.next_code += 1
             return i
         
+    def __len__(self):
+        return self.next_code
+
     def get_code( self, i:int ) -> str:
         return self.int_to_code[ i ]
