@@ -93,9 +93,36 @@ class MergedData:
 
             self.stop_metadata.append(entry)
 
-        # to be implemented
+        # build route and journey metadata in merged space
         self.route_metadata = []
+        for i in range(len(self.route_stops)):
+            if i < route_offset:
+                try:
+                    code = self.bus_data.map_routes.get_code(i)
+                except Exception:
+                    code = ""
+            else:
+                train_idx = i - route_offset
+                try:
+                    code = self.train_data.map_routes.get_code(train_idx)
+                except Exception:
+                    code = ""
+            self.route_metadata.append(code or "")
+
         self.journey_metadata = []
+        for i in range(len(self.journey_times)):
+            if i < journey_offset:
+                try:
+                    code = self.bus_data.map_journeys.get_code(i)
+                except Exception:
+                    code = ""
+            else:
+                train_idx = i - journey_offset
+                try:
+                    code = self.train_data.map_journeys.get_code(train_idx)
+                except Exception:
+                    code = ""
+            self.journey_metadata.append(code or "")
 
 
     def _empty( self ):
