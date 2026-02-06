@@ -1,9 +1,20 @@
 from bus_data import BusData
 from train_data import TrainData
-from atco import Atco
 
 class MergedData:
-    def __init__( self, bus_data: BusData, train_data: TrainData ):
+    def __init__( self, bus_data: BusData, train_data: TrainData, stop_name_fn=None, time_offset=0 ):
+        """
+        Args:
+            bus_data:      BusData instance (or None).
+            train_data:    TrainData instance (or None).
+            stop_name_fn:  callable(set_of_atco_codes) -> dict{code: name}.
+                           Used to resolve human-readable stop names.
+                           If None, raw ATCO codes are used as names.
+            time_offset:   seconds to add to every arrival/departure time.
+                           Use -86400 for yesterday, 0 for today, +86400
+                           for tomorrow so all three days share one timeline.
+        """
+        self.time_offset = time_offset
         self.bus_data = bus_data if bus_data is not None else self._empty()
         self.train_data = train_data if train_data is not None else self._empty()
         # To merge two datasets that use local integer ids we must remap
@@ -42,9 +53,18 @@ class MergedData:
         # remap train journey_times: increment stop ids inside journeys by stop_offset
         train_journey_times_remapped = []
         for journey in train_journey_times:
-            remapped = [ (stop_id + stop_offset, atime) for (stop_id, atime) in journey ]
+            remapped = [ (stop_id + stop_offset, atime + time_offset, dtime + time_offset) for (stop_id, atime, dtime) in journey ]
             train_journey_times_remapped.append(remapped)
-        self.journey_times = list(bus_journey_times) + train_journey_times_remapped
+
+        # Apply time_offset to bus journey times as well
+        if time_offset != 0:
+            bus_journey_times_shifted = []
+            for journey in bus_journey_times:
+                shifted = [ (stop_id, atime + time_offset, dtime + time_offset) for (stop_id, atime, dtime) in journey ]
+                bus_journey_times_shifted.append(shifted)
+            self.journey_times = bus_journey_times_shifted + train_journey_times_remapped
+        else:
+            self.journey_times = list(bus_journey_times) + train_journey_times_remapped
 
         # remap train stop_to_routes: increment route ids by route_offset
         train_stop_to_routes_remapped = [ [ rid + route_offset for rid in lst ] for lst in train_stop_to_routes ]
@@ -55,47 +75,81 @@ class MergedData:
         self.journey_to_route = list(bus_journey_to_route) + train_journey_to_route_remapped
         # --- build stop metadata in merged space -------------------------
         # For each merged stop index, convert back to the external ATCO code
-        # using the appropriate mapper (bus or train) and query the Atco
-        # database for the stop name. Store a small metadata dict indexed by
-        # the merged stop int.
-        atco = Atco()
+        # using the appropriate mapper (bus or train), then use the provided
+        # stop_name_fn to resolve human-readable names.
         total_stops = len(self.stop_to_routes)
-        self.stop_metadata = []
+
+        # Step 1: collect all ATCO codes
+        codes_by_index = {}
         for i in range(total_stops):
             code = None
             if i < stop_offset:
-                # bus-side: internal id maps directly to bus mapper index
                 try:
                     code = self.bus_data.map_stops.get_code(i)
                 except Exception:
                     code = None
             else:
-                # train-side: compute train-local index
                 train_idx = i - stop_offset
                 try:
                     code = self.train_data.map_stops.get_code(train_idx)
                 except Exception:
                     code = None
+            codes_by_index[i] = code
 
-            name = None
-            if code is not None:
-                stop_row = atco.get_stop(code)
-                if stop_row:
-                    name = stop_row.get('name') if isinstance(stop_row, dict) else None
+        # Step 2: bulk lookup all codes at once
+        all_codes = {c for c in codes_by_index.values() if c is not None}
+        name_map = stop_name_fn(all_codes) if stop_name_fn and all_codes else {}
 
-            # store only strings: name if available, else code if present, else empty string
+        # Step 3: build the metadata list
+        self.stop_metadata = []
+        for i in range(total_stops):
+            code = codes_by_index[i]
+            name = name_map.get(code) if code else None
             if name:
-                entry = name
+                self.stop_metadata.append(name)
             elif code is not None:
-                entry = code
+                self.stop_metadata.append(code)
             else:
-                entry = ""
+                self.stop_metadata.append("")
 
-            self.stop_metadata.append(entry)
+        # --- build route metadata in merged space -------------------------
+        # Bus routes keep their original indices; train routes are offset.
+        bus_route_meta = getattr(self.bus_data, 'route_metadata', [])
+        train_route_meta = getattr(self.train_data, 'route_metadata', [])
+        self.route_metadata = list(bus_route_meta) + list(train_route_meta)
 
-        # to be implemented
-        self.route_metadata = []
-        self.journey_metadata = []
+        # --- build journey metadata in merged space ----------------------
+        bus_journey_meta = getattr(self.bus_data, 'journey_metadata', [])
+        train_journey_meta = getattr(self.train_data, 'journey_metadata', [])
+        self.journey_metadata = list(bus_journey_meta) + list(train_journey_meta)
+
+        # --- precompute journey stop-position index for fast lookup ------
+        # journey_stop_index[j] = { stop_int: position_in_journey }
+        self.journey_stop_index = []
+        for jt in self.journey_times:
+            idx = {}
+            for pos, (stop_id, _a, _d) in enumerate(jt):
+                if stop_id not in idx:          # keep first occurrence
+                    idx[stop_id] = pos
+            self.journey_stop_index.append(idx)
+
+        # --- precompute sorted departure time per (route, stop) ----------
+        # route_stop_departures[route][stop] = sorted list of
+        #   (departure_time_at_stop, journey_id)
+        # Allows binary-search in first_journey.
+        self.route_stop_departures = []
+        for r_idx, journey_ids in enumerate(self.route_journeys):
+            stop_map = {}                       # stop -> [(dep_time, journey_id)]
+            for j_id in journey_ids:
+                jt = self.journey_times[j_id]
+                jsi = self.journey_stop_index[j_id]
+                for stop_id, pos in jsi.items():  # only iterate unique stops
+                    dep_time = jt[pos][2]         # departure_time
+                    stop_map.setdefault(stop_id, []).append((dep_time, j_id))
+            # sort each list by departure time
+            for s in stop_map:
+                stop_map[s].sort()
+            self.route_stop_departures.append(stop_map)
 
 
     def _empty( self ):
@@ -108,6 +162,8 @@ class MergedData:
             stop_metadata = []
             route_metadata = []
             journey_metadata = []
+            journey_stop_index = []
+            route_stop_departures = []
         return Empty()
 
     def journey_type( self, journey_id_int: int ) -> str:

@@ -6,7 +6,7 @@ class BusData:
         self.route_stops = [ [] for _ in range( num_routes ) ]
         #indexed by route_id_int, store lists of journey_id_ints
         self.route_journeys = [ [] for _ in range( num_routes ) ]
-        #indexed by journey_id_int, store lists of ( atco_code_int, arrival_time )
+        #indexed by journey_id_int, store lists of ( atco_code_int, arrival_time, departure_time )
         self.journey_times = [ [] for _ in range( num_journeys ) ]
         #indexed by atco_code_int, store lists of route_id_int passing by each atco_code_int
         self.stop_to_routes = [ [] for _ in range( num_stops ) ]
@@ -16,6 +16,10 @@ class BusData:
         self.map_stops = DenseMapper()
         self.map_routes = DenseMapper()
         self.map_journeys = DenseMapper()
+        #indexed by route_id_int, store metadata dicts { route_id, line_name }
+        self.route_metadata = [ None for _ in range( num_routes ) ]
+        #indexed by journey_id_int, store metadata dicts { journey_id, route_id, line_name }
+        self.journey_metadata = [ None for _ in range( num_journeys ) ]
     # metadata is maintained only in MergedData
 
     # --- auto-resize helpers -----------------------------------------------
@@ -24,75 +28,66 @@ class BusData:
         while route_id_int >= len(self.route_stops):
             self.route_stops.append([])
             self.route_journeys.append([])
+            self.route_metadata.append(None)
 
     def _ensure_journey_capacity(self, journey_id_int):
         """Ensure journey-based lists can hold index journey_id_int."""
         while journey_id_int >= len(self.journey_times):
             self.journey_times.append([])
             self.journey_to_route.append(-1)
+            self.journey_metadata.append(None)
 
     def _ensure_stop_capacity(self, atco_code_int):
         """Ensure stop-based lists can hold index atco_code_int."""
         while atco_code_int >= len(self.stop_to_routes):
             self.stop_to_routes.append([])
 
-    def add_stop( self, atco_code, route_id ):
-        atco_code_int = self.map_stops.get_int(atco_code)
-        route_id_int = self.map_routes.get_int(route_id)
-        # auto-resize storage to accept these ids
-        self._ensure_route_capacity(route_id_int)
-        self._ensure_stop_capacity(atco_code_int)
-        # append to route stops if not already present (preserve order)
-        if atco_code_int not in self.route_stops[route_id_int]:
-            self.route_stops[route_id_int].append(atco_code_int)
-        # update stop -> routes mapping
-        if route_id_int not in self.stop_to_routes[atco_code_int]:
-            self.stop_to_routes[atco_code_int].append(route_id_int)
-
-    def add_route( self, route_id, atco_codes, journey_id ):
+    def add_route_stop( self, route_id, atco_codes ):
         atco_code_ints = [ self.map_stops.get_int(code) for code in atco_codes ]
         route_id_int = self.map_routes.get_int(route_id)
-        journey_id_int = self.map_journeys.get_int(journey_id) if journey_id is not None else None
         # auto-resize to hold route and stops
         self._ensure_route_capacity(route_id_int)
         for atco in atco_code_ints:
             self._ensure_stop_capacity(atco)
-
         # set the ordered list of stops for this route
         self.route_stops[route_id_int] = list(atco_code_ints)
         # ensure each stop knows about this route
         for atco in self.route_stops[route_id_int]:
             if route_id_int not in self.stop_to_routes[atco]:
                 self.stop_to_routes[atco].append(route_id_int)
-        # associate journey to route
-        if journey_id_int is not None:
-            self._ensure_journey_capacity(journey_id_int)
-            # add to route_journeys if not already present
-            if journey_id_int not in self.route_journeys[route_id_int]:
-                self.route_journeys[route_id_int].append(journey_id_int)
-            # set reverse mapping
-            self.journey_to_route[journey_id_int] = route_id_int
 
-
-    def add_journey( self, journey_id, route_id, arrival_times ): 
-        journey_id_int = self.map_journeys.get_int(journey_id)
+    def add_route_journeys( self, route_id, journey_ids ):
+        """Set the list of journeys that belong to a route and update reverse mappings."""
         route_id_int = self.map_routes.get_int(route_id)
-        # auto-resize storage to accept these ids
-        self._ensure_journey_capacity(journey_id_int)
         self._ensure_route_capacity(route_id_int)
-        # Basic validation of arrival_times entries
+        journey_id_ints = []
+        for jid in journey_ids:
+            j_int = self.map_journeys.get_int(jid)
+            self._ensure_journey_capacity(j_int)
+            journey_id_ints.append(j_int)
+        self.route_journeys[route_id_int] = journey_id_ints
+        # update reverse mapping: journey -> route
+        for j_int in journey_id_ints:
+            self.journey_to_route[j_int] = route_id_int
+
+    def add_journey_times( self, journey_id, arrival_times, departure_times=None ):
+        """Set per-stop arrival (and optionally departure) times for a journey.
+        arrival_times:   list of (atco_code, arrival_seconds) tuples
+        departure_times: optional parallel list of departure seconds;
+                         if omitted each departure defaults to the arrival time.
+        """
+        journey_id_int = self.map_journeys.get_int(journey_id)
+        self._ensure_journey_capacity(journey_id_int)
         validated = []
-        for item in arrival_times:
+        for i, item in enumerate(arrival_times):
             if not (isinstance(item, (list, tuple)) and len(item) >= 2):
-                raise ValueError("arrival_times must be an iterable of (stop_code, arrival_time)")
+                raise ValueError("arrival_times must be an iterable of (atco_code, arrival_time)")
             atco_code, atime = item[0], item[1]
+            if departure_times is not None:
+                dtime = departure_times[i]
+            else:
+                dtime = atime
             atco = self.map_stops.get_int(atco_code)
             self._ensure_stop_capacity(atco)
-            validated.append((atco, atime))
-        # set journey times
+            validated.append((atco, atime, dtime))
         self.journey_times[journey_id_int] = validated
-        # set mapping to route
-        self.journey_to_route[journey_id_int] = route_id_int
-        # add journey to route_journeys if missing
-        if journey_id_int not in self.route_journeys[route_id_int]:
-            self.route_journeys[route_id_int].append(journey_id_int)
