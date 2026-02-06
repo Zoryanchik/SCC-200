@@ -1,0 +1,3 @@
+- Currently a program which runs in terminal, waiting to be connected to front-end
+- Lacking train data
+- Deals with bus and walking, including overnight buses, operational days, etc.
