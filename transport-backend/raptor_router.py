@@ -56,20 +56,9 @@ class RaptorRouter:
             visited.add(track)
             fastest_route[ track ] = reach_stops[ track ]
             track = reach_stops[ track ][ "prev_stop" ]
-        if final_stop in fastest_route:
-            fastest_route[ final_stop ][ "is_destination" ] = True
         for stop, info in fastest_route.items():
-            if info.get("prev_stop") is None:
-                info["is_origin"] = True
-        for stop, info in fastest_route.items():
-            day = info.get("day")
-            if day:
-                info["stop_name"] = day.stop_metadata[stop]
-                journey_id = info.get("journey")
-                if journey_id is not None:
-                    info["journey"] = day.journey_metadata[journey_id]
-            else:
-                info["stop_name"] = ""
+            info['prev_stop'] = info['day'].stop_metadata[ stop ]
+            info['journey'] = info['day'].journey_metadata[ info['journey'] ]
         return fastest_route
 
 
@@ -117,7 +106,7 @@ class RaptorRouter:
                                                                 stop,
                                                                 reach_stops,
                                                                 switch_b )
-            # process walking for switch_b
+            #process walking for switch_b
             walking_additions = set()
             for stop in switch_b:
                 walk_stops = walking.inter_walk( stop )
@@ -137,27 +126,27 @@ class RaptorRouter:
                                    switch_b,
                                    switch_a )
             
-    def first_journey( self, network, route, stop, reach_stops, switch_b ):
-        journeys = network.route_journeys[ route ]
-        first_journey = None
-        # get first journey after arrival_time at stop
-        for journey in journeys:
-            # a list of ( atco_code_int, arrival_time )
-            journey_times = network.journey_times[ journey ]
-            for i, ( point, arrival_time ) in enumerate( journey_times ):
-                if point == stop and arrival_time >= reach_stops[ stop ][ "arrival_time" ]:
-                    # found the first journey
-                    first_journey = journey
-                    for subsequent_point, subsequent_time in journey_times[ i: ]:
-                        if subsequent_time < reach_stops[ subsequent_point ][ "arrival_time" ]:
-                            reach_stops[ subsequent_point ][ "arrival_time" ] = subsequent_time
-                            reach_stops[ subsequent_point ][ "prev_stop" ] = stop
-                            reach_stops[ subsequent_point ][ "type" ] = network.journey_type( first_journey )
-                            reach_stops[ subsequent_point ][ "journey" ] = first_journey
-                            reach_stops[ subsequent_point ][ "day" ] = network
-                            switch_b.add( subsequent_point )
-                    break
-            else:
-                continue
-            break
-        return first_journey
+def first_journey( self, network, route, stop, reach_stops, switch_b ):
+    journeys = network.route_journeys[ route ]
+    first_journey = None
+    #get first journey after arrival_time at stop
+    for journey in journeys:
+        #a list of ( atco_code_int, arrival_time )
+        journey_times = network.journey_times[ journey ]
+        for i, ( point, arrival_time ) in enumerate( journey_times ):
+            if point == stop & arrival_time >= reach_stops[ stop ][ "arrival_time" ]:
+                #found the first journey
+                first_journey = journey
+                for subsequent_point, subsequent_time in journey_times[ i: ]:
+                    if subsequent_time < reach_stops[ subsequent_point ][ "arrival_time" ]:
+                        reach_stops[ subsequent_point ][ "arrival_time" ] = subsequent_time
+                        reach_stops[ subsequent_point ][ "prev_stop" ] = stop
+                        reach_stops[ subsequent_point ][ "type" ] = network.journey_type( first_journey )
+                        reach_stops[ subsequent_point ][ "journey" ] = first_journey
+                        reach_stops[ subsequent_point ][ "day" ] = network
+                        switch_b.add( subsequent_point )
+                break
+        else:
+            continue
+        break
+    return first_journey
