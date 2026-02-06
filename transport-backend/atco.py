@@ -7,23 +7,25 @@ providing standardized stop information including names, types, and coordinates.
 Data source: https://transport.scc.lancs.ac.uk/nptg/naptan.xml
 """
 
-import psycopg2
-import psycopg2.extras
-import xml.etree.ElementTree as ET
 import os
 import hashlib
 from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import psycopg2
+import psycopg2.extras
 
 
 class Atco:
     """Load and manage ATCO NaPTAN stop data"""
     
-    def __init__(self, db_name='atco', user='', password='', host='localhost'):
+    def __init__(self, db_name=None, user=None, password=None, host=None, port=None):
         """Initialize ATCO database connection"""
-        self.db_name = db_name
-        self.user = user
-        self.password = password
-        self.host = host
+        self.db_name = db_name or os.getenv("DB_NAME", "transport")
+        self.user = user or os.getenv("DB_USER", "postgres")
+        self.password = password or os.getenv("DB_PASSWORD", "")
+        self.host = host or os.getenv("DB_HOST", "localhost")
+        self.port = int(port or os.getenv("DB_PORT", "5432"))
         self.naptan_url = "https://transport.scc.lancs.ac.uk/nptg/naptan.xml"
         self.naptan_file = "naptan.xml"
         self.hash_file = ".naptan_hash"
@@ -32,9 +34,10 @@ class Atco:
         """Get database connection"""
         conn = psycopg2.connect(
             host=self.host,
+            port=self.port,
             user=self.user,
             password=self.password,
-            database=self.db_name
+            database=self.db_name,
         )
         return conn
     
@@ -43,9 +46,10 @@ class Atco:
         # Connect to default postgres database
         conn = psycopg2.connect(
             host=self.host,
+            port=self.port,
             user=self.user,
             password=self.password,
-            database='postgres'
+            database='postgres',
         )
         conn.autocommit = True
         cur = conn.cursor()
@@ -173,7 +177,8 @@ class Atco:
                 locality = stop_elem.findtext('{http://www.naptan.org.uk/}LocalityRef')
                 
                 if atco_code:
-                    stops.append((atco_code, name, stop_type, latitude, longitude, locality))
+                    safe_name = name if name else atco_code
+                    stops.append((atco_code, safe_name, stop_type, latitude, longitude, locality))
             except Exception as e:
                 continue
         
@@ -181,6 +186,7 @@ class Atco:
         
         # Insert into database
         inserted = 0
+        errors = 0
         for stop in stops:
             try:
                 cur.execute("""
@@ -195,6 +201,11 @@ class Atco:
                 """, stop)
                 inserted += 1
             except Exception as e:
+                errors += 1
+                # rollback to clear failed transaction state
+                conn.rollback()
+                if errors <= 3:
+                    print(f"Insert error ({errors}): {e}")
                 continue
         
         conn.commit()
@@ -202,6 +213,8 @@ class Atco:
         conn.close()
         
         print(f"✓ Inserted {inserted} stops into database")
+        if errors:
+            print(f"✗ Insert errors: {errors}")
         return True
     
     def get_stop(self, atco_code):
