@@ -1,3 +1,4 @@
+- Real output seems not correct, need to identify bugs
 - Currently a program which runs in terminal, waiting to be connected to front-end
 - Lacking train data
-- Deals with bus and walking, including overnight buses, operational days, etc.
+- Assumes to deals with bus and walking, including overnight buses, operational days, etc.
