@@ -1,4 +1,5 @@
 import json
+import math
 import urllib.request
 
 
@@ -71,7 +72,17 @@ class Walking:
             data = json.loads(resp.read())
             resp.close()
         except Exception:
-            return {}
+            # OSRM not available, fall back to distance-based estimate
+            result = {}
+            for stop_int in candidates:
+                slat, slon = self._coords[stop_int]
+                # Rough walking time estimate: 1 m/s = 60 seconds per 60 meters
+                dist_m = math.sqrt((slat - lat)**2 + (slon - lon)**2) * 111000
+                walk_time = int(dist_m / 1.0)  # 1 m/s walking speed
+                if walk_time <= self._max:
+                    result[stop_int] = walk_time
+            sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
+            return sorted_result
 
         if data.get("code") != "Ok":
             return {}
@@ -84,5 +95,7 @@ class Walking:
             if dur is not None and dur <= self._max:
                 result[candidates[i - 1]] = int(dur)
 
-        return result
+        # Sort by walk_seconds ascending
+        sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
+        return sorted_result
     

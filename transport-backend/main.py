@@ -243,6 +243,9 @@ def print_route(route_result, merged):
                 # Build a journey description line
                 jinfo = info.get("journey_info")
                 line_name = jinfo.get("line_name", "") if jinfo else ""
+                # Strip prefix to show only the actual line name (e.g., "1" instead of "PC0002407:417:1")
+                if line_name and ":" in line_name:
+                    line_name = line_name.split(":")[-1]
                 j_origin = info.get("journey_origin", "")
                 j_dest   = info.get("journey_destination", "")
                 board_dep = info.get("board_departure")
