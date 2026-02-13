@@ -144,7 +144,8 @@ class BusLoader:
             CREATE TABLE IF NOT EXISTS journey_routes (
                 journey_id CHAR(12) PRIMARY KEY,
                 route_id   TEXT NOT NULL,
-                line_name  TEXT
+                line_name  TEXT,
+                destination_display TEXT
             );
             CREATE TABLE IF NOT EXISTS journey_times (
                 journey_id     CHAR(12),
@@ -181,10 +182,10 @@ class BusLoader:
                 PRIMARY KEY (service_code)
             );
             CREATE TABLE IF NOT EXISTS serviced_org_working_days (
-                org_code     TEXT NOT NULL,
+                service_code     TEXT NOT NULL,
                 start_date   TEXT NOT NULL,
                 end_date     TEXT NOT NULL,
-                PRIMARY KEY (org_code, start_date, end_date)
+                PRIMARY KEY (service_code, start_date, end_date)
             );
             CREATE TABLE IF NOT EXISTS journey_operating_profile (
                 journey_id   CHAR(12) NOT NULL,
@@ -224,21 +225,26 @@ class BusLoader:
         # Attempt to determine the operator / organisation code for this file.
         # TransXChange files may include this under several elements; try a few
         # common locations and fall back to empty string if not found.
-        org_code = ''
-        # Preferred: ServiceOrganisations/ServiceOrganisation/OrganisationCode
-        so_el = root.find(f'{ns}ServiceOrganisations/{ns}ServiceOrganisation')
-        if so_el is not None:
-            org_code = so_el.findtext(f'{ns}OrganisationCode', '').strip()
+        service_code = ''
+        # Preferred: Services/Service/ServiceCode
+        svc_el = root.find(f'{ns}Services/{ns}Service')
+        if svc_el is not None:
+            service_code = svc_el.findtext(f'{ns}ServiceCode', '').strip()
+        # Fallback: ServiceOrganisations/ServiceOrganisation/OrganisationCode
+        if not service_code:
+            so_el = root.find(f'{ns}ServiceOrganisations/{ns}ServiceOrganisation')
+            if so_el is not None:
+                service_code = so_el.findtext(f'{ns}OrganisationCode', '').strip()
         # Fallback: ServicedOrganisations/ServicedOrganisation/OrganisationCode
-        if not org_code:
+        if not service_code:
             sdel = root.find(f'{ns}ServicedOrganisations/{ns}ServicedOrganisation')
             if sdel is not None:
-                org_code = sdel.findtext(f'{ns}OrganisationCode', '').strip()
+                service_code = sdel.findtext(f'{ns}OrganisationCode', '').strip()
         # Another possible location: ServiceOperator/OperatorCode
-        if not org_code:
+        if not service_code:
             op_el = root.find(f'{ns}ServiceOperator/{ns}OperatorCode')
             if op_el is not None:
-                org_code = (op_el.text or '').strip()
+                service_code = (op_el.text or '').strip()
 
         # ── 0. StopPoints — AtcoCode → CommonName mapping ────────
         stop_names_rows = []
@@ -289,21 +295,16 @@ class BusLoader:
         svc_end   = op_period.findtext(f'{ns}EndDate', '')   if op_period is not None else ''
         service_op_rows = [(service_code, svc_start, svc_end)]
 
-        # ── 2b. ServicedOrganisations ─────────────────────────────
+        # ── 2b. Services OperatingPeriod ─────────────────────────────
         serviced_org_rows = []
-        org_working_map = {}  # org_code -> list of (start, end)
-        for so in root.findall(f'{ns}ServicedOrganisations/{ns}ServicedOrganisation'):
-            org_code = so.findtext(f'{ns}OrganisationCode', '')
-            if not org_code:
-                continue
-            wd = so.find(f'{ns}WorkingDays')
-            if wd is not None:
-                for dr in wd.findall(f'{ns}DateRange'):
-                    sd = dr.findtext(f'{ns}StartDate', '')
-                    ed = dr.findtext(f'{ns}EndDate', '')
-                    if sd and ed:
-                        serviced_org_rows.append((org_code, sd, ed))
-                        org_working_map.setdefault(org_code, []).append((sd, ed))
+        service_working_map = {}  # service_code -> list of (start, end)
+        op_period = svc.find(f'{ns}OperatingPeriod')
+        if op_period is not None:
+            sd = op_period.findtext(f'{ns}StartDate', '')
+            ed = op_period.findtext(f'{ns}EndDate', '')
+            if sd and ed:
+                serviced_org_rows.append((service_code, sd, ed))
+                service_working_map.setdefault(service_code, []).append((sd, ed))
 
         # Parse Lines: line_id -> LineName
         line_names = {}
@@ -315,7 +316,8 @@ class BusLoader:
             jp_id = jp.attrib['id']
             route_ref = jp.findtext(f'{ns}RouteRef')
             sec_refs  = [s.text for s in jp.findall(f'{ns}JourneyPatternSectionRefs')]
-            jp_map[jp_id] = {'route_ref': route_ref, 'section_ids': sec_refs}
+            dest_display = jp.findtext(f'{ns}DestinationDisplay', '')
+            jp_map[jp_id] = {'route_ref': route_ref, 'section_ids': sec_refs, 'destination_display': dest_display}
 
         # ── 3. Routes → route_stops ──────────────────────────────
         # Build stop list per route from its JourneyPatterns' sections
@@ -338,11 +340,11 @@ class BusLoader:
 
         route_stops_rows = []
         for route_id, stops in route_stop_lists.items():
-            # Prefix route_id with organisation code if available so that
-            # route identifiers are namespaced per operator. This ensures
+            # Prefix route_id with service code if available so that
+            # route identifiers are namespaced per service. This ensures
             # uniqueness across multiple operator datasets loaded into the
             # same DB.
-            rkey = f"{org_code}:{route_id}" if org_code else route_id
+            rkey = f"{service_code}:{route_id}" if service_code else route_id
             for idx, atco in enumerate(stops):
                 route_stops_rows.append((rkey, atco, idx))
 
@@ -367,14 +369,17 @@ class BusLoader:
             dep_sec  = self._hms_to_seconds(dep_hms)
             line_ref = vj.findtext(f'{ns}LineRef', '')
             line_name = line_names.get(line_ref, '')
+            if line_name:
+                line_name = f"{service_code}:{line_name}"
 
             info = jp_map[jp_ref]
             route_ref = info['route_ref']
-            # Namespace journey and route IDs with the organisation code
+            destination_display = info.get('destination_display', '')
+            # Namespace journey and route IDs with the service code
             # so they're unique across multiple operators.
-            jkey = f"{org_code}:{vj_code}" if org_code and vj_code else (vj_code or '')
-            rkey = f"{org_code}:{route_ref}" if org_code and route_ref else (route_ref or '')
-            journey_routes_rows.append((jkey, rkey, line_name))
+            jkey = f"{service_code}:{vj_code}" if service_code and vj_code else (vj_code or '')
+            rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
+            journey_routes_rows.append((jkey, rkey, line_name, destination_display))
 
             # ── Parse OperatingProfile ────────────────────────────
             op = vj.find(f'{ns}OperatingProfile')
@@ -404,29 +409,6 @@ class BusLoader:
                             op_start = sd
                         if ed:
                             op_end = ed
-
-                # ServicedOrganisationDayType
-                sodt = op.find(f'{ns}ServicedOrganisationDayType')
-                if sodt is not None:
-                    # Check if runs on working days or holidays
-                    if sodt.find(f'{ns}DaysOfOperation/{ns}WorkingDays') is not None:
-                        org_working = 1
-                    elif sodt.find(f'{ns}DaysOfNonOperation/{ns}WorkingDays') is not None:
-                        org_working = 0
-                    elif sodt.find(f'{ns}DaysOfOperation/{ns}Holidays') is not None:
-                        org_working = 0  # runs on holidays = runs on non-working days
-                    elif sodt.find(f'{ns}DaysOfNonOperation/{ns}Holidays') is not None:
-                        org_working = 1  # doesn't run on holidays = runs on working days
-                    # Get org ref
-                    org_ref_el = sodt.find(f'{ns}DaysOfOperation/{ns}WorkingDays/{ns}ServicedOrganisationRef')
-                    if org_ref_el is None:
-                        org_ref_el = sodt.find(f'{ns}DaysOfNonOperation/{ns}WorkingDays/{ns}ServicedOrganisationRef')
-                    if org_ref_el is None:
-                        org_ref_el = sodt.find(f'{ns}DaysOfOperation/{ns}Holidays/{ns}ServicedOrganisationRef')
-                    if org_ref_el is None:
-                        org_ref_el = sodt.find(f'{ns}DaysOfNonOperation/{ns}Holidays/{ns}ServicedOrganisationRef')
-                    if org_ref_el is not None:
-                        org_ref = org_ref_el.text or ''
 
             # Store journey operating profile keyed by the namespaced journey id
             journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working))
@@ -499,11 +481,11 @@ class BusLoader:
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
-            journey_routes: list of (journey_id, route_id, line_name)
+            journey_routes: list of (journey_id, route_id, line_name, destination_display)
             journey_times:  list of (journey_id, atco_code, arrival_time)
             stop_names:     list of (atco_code, common_name, indicator, locality)
             service_ops:    list of (service_code, start_date, end_date)
-            serviced_orgs:  list of (org_code, start_date, end_date)
+            serviced_orgs:  list of (service_code, start_date, end_date)
             journey_ops:    list of (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working)
         """
         conn = sqlite3.connect(self.db_path)
@@ -513,7 +495,7 @@ class BusLoader:
             route_stops
         )
         cursor.executemany(
-            "INSERT OR REPLACE INTO journey_routes (journey_id, route_id, line_name) VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO journey_routes (journey_id, route_id, line_name, destination_display) VALUES (?,?,?,?)",
             journey_routes
         )
         cursor.executemany(
@@ -532,7 +514,7 @@ class BusLoader:
             )
         if serviced_orgs:
             cursor.executemany(
-                "INSERT OR REPLACE INTO serviced_org_working_days (org_code, start_date, end_date) VALUES (?,?,?)",
+                "INSERT OR REPLACE INTO serviced_org_working_days (service_code, start_date, end_date) VALUES (?,?,?)",
                 serviced_orgs
             )
         if journey_ops:
@@ -601,10 +583,10 @@ class BusLoader:
             bd.add_journey_times(current_journey, times_buf)
 
         # --- 4. populate route_metadata and journey_metadata ---------------
-        # journey_routes has (journey_id, route_id, line_name)
-        cursor.execute("SELECT journey_id, route_id, line_name FROM journey_routes")
+        # journey_routes has (journey_id, route_id, line_name, destination_display)
+        cursor.execute("SELECT journey_id, route_id, line_name, destination_display FROM journey_routes")
         route_line_names = {}   # route_id -> line_name (first seen)
-        for journey_id, route_id, line_name in cursor.fetchall():
+        for journey_id, route_id, line_name, destination_display in cursor.fetchall():
             # journey metadata
             j_int = bd.map_journeys.code_to_int.get(journey_id)
             if j_int is not None:
@@ -612,6 +594,7 @@ class BusLoader:
                     "journey_id": journey_id,
                     "route_id":   route_id,
                     "line_name":  line_name or "",
+                    "destination_display": destination_display or "",
                 }
             # collect line_name per route (keep first non-empty)
             if route_id not in route_line_names or not route_line_names[route_id]:
@@ -643,9 +626,9 @@ class BusLoader:
         cur = conn.cursor()
 
         # 1. Load serviced org working-day ranges
-        org_ranges = {}   # org_code -> [(start, end), ...]
-        for org, sd, ed in cur.execute("SELECT org_code, start_date, end_date FROM serviced_org_working_days"):
-            org_ranges.setdefault(org, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
+        service_ranges = {}   # service_code -> [(start, end), ...]
+        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM serviced_org_working_days"):
+            service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
 
         # 1b. Load service operating periods (coarse outer boundary)
         svc_periods = {}  # service_code -> (start_date | None, end_date | None)
@@ -700,8 +683,8 @@ class BusLoader:
                 continue
 
             # c) Serviced organisation check
-            if org_ref and org_ref in org_ranges:
-                in_working = any(s <= query_date <= e for s, e in org_ranges[org_ref])
+            if org_ref and org_ref in service_ranges:
+                in_working = any(s <= query_date <= e for s, e in service_ranges[org_ref])
                 if org_working == 1 and not in_working:
                     continue     # should run on working days, but today isn't one
                 if org_working == 0 and in_working:
@@ -791,17 +774,18 @@ class BusLoader:
 
         # 3d. metadata
         cur.execute(
-            f"SELECT journey_id, route_id, line_name FROM journey_routes WHERE journey_id IN ({placeholders})",
+            f"SELECT journey_id, route_id, line_name, destination_display FROM journey_routes WHERE journey_id IN ({placeholders})",
             valid_list,
         )
         route_line_names = {}
-        for journey_id, route_id, line_name in cur.fetchall():
+        for journey_id, route_id, line_name, destination_display in cur.fetchall():
             j_int = bd.map_journeys.code_to_int.get(journey_id)
             if j_int is not None:
                 bd.journey_metadata[j_int] = {
                     "journey_id": journey_id,
                     "route_id":   route_id,
                     "line_name":  line_name or "",
+                    "destination_display": destination_display or "",
                 }
             if route_id not in route_line_names or not route_line_names[route_id]:
                 route_line_names[route_id] = line_name or ""

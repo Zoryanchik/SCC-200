@@ -28,12 +28,13 @@ class RaptorRouter:
                                     "day": None }
         n_transfer = -1
         initial_stops = walking.reachable_stops( start_point )
-        switch_a = set()
-        switch_b = set()
+        switch_a = []
+        switch_b = []
         for stop, walk_time in initial_stops.items():
             reach_stops[ stop ][ "arrival_time" ] = start_time + walk_time
             reach_stops[ stop ][ "type" ] = "walking"
-            switch_a.add( stop )
+            if stop not in switch_a:
+                switch_a.append( stop )
         if allowed_modes is None:
             allowed_modes = {"bus", "train"}
         self.recursive_raptor( start_date,
@@ -47,13 +48,25 @@ class RaptorRouter:
         final_stops = walking.reachable_stops( destination )
         if not final_stops:
             return {}
-        final_stop = next( iter( final_stops ) )
-        arrival_time = reach_stops[ final_stop ][ "arrival_time" ] + final_stops[ final_stop ]
+        
+        # Find the reached stop that gives the earliest arrival at destination
+        # (transit arrival at stop + walking time from stop to destination)
+        best_final_stop = None
+        best_total_arrival = math.inf
+        
         for stop, walk_time in final_stops.items():
-            if walk_time + reach_stops[ stop ][ "arrival_time" ] < arrival_time:
-                final_stop = stop
-                arrival_time = walk_time + reach_stops[ stop ][ "arrival_time" ]
-        final_walk_seconds = final_stops[ final_stop ]
+            if reach_stops[stop]["arrival_time"] < math.inf:
+                total_arrival = reach_stops[stop]["arrival_time"] + walk_time
+                if total_arrival < best_total_arrival:
+                    best_total_arrival = total_arrival
+                    best_final_stop = stop
+        
+        if best_final_stop is None:
+            return {}
+        
+        final_stop = best_final_stop
+        arrival_time = best_total_arrival
+        final_walk_seconds = final_stops[final_stop]
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
         track = final_stop
@@ -93,7 +106,10 @@ class RaptorRouter:
                         first_stop = jt[0][0]
                         last_stop  = jt[-1][0]
                         info['journey_origin'] = day.stop_metadata[first_stop] if first_stop < len(day.stop_metadata) else f"stop#{first_stop}"
-                        info['journey_destination'] = day.stop_metadata[last_stop] if last_stop < len(day.stop_metadata) else f"stop#{last_stop}"
+                        # Use destination_display from journey metadata if available, else last stop
+                        journey_meta = day.journey_metadata[j_id] if j_id < len(day.journey_metadata) else {}
+                        dest_display = journey_meta.get('destination_display', '')
+                        info['journey_destination'] = dest_display or (day.stop_metadata[last_stop] if last_stop < len(day.stop_metadata) else f"stop#{last_stop}")
                     # departure time at the boarding stop (prev_stop)
                     if prev is not None:
                         jsi = day.journey_stop_index[j_id] if j_id < len(day.journey_stop_index) else {}
@@ -118,14 +134,14 @@ class RaptorRouter:
                           transfer_limit: int,
                           reach_stops: dict,
                           walking: Walking,
-                          switch_a: set,
-                          switch_b: set,
+                          switch_a: list,
+                          switch_b: list,
                           allowed_modes: set ):
         if len( switch_a ) == 0 or n_transfer == transfer_limit:
             return
         else:
             n_transfer += 1
-            switch_b = set()
+            switch_b = []
             for stop in switch_a:
                 #get routes passing by the stop
                 routes = self.today.stop_to_routes[ stop ]
@@ -155,7 +171,9 @@ class RaptorRouter:
                         reach_stops[ walk_stop ][ "prev_stop" ] = stop
                         reach_stops[ walk_stop ][ "type" ] = "walking"
                         walking_additions.add( walk_stop )
-            switch_b = switch_b.union( walking_additions )
+            for w in walking_additions:
+                if w not in switch_b:
+                    switch_b.append(w)
             self.recursive_raptor( start_date,
                                    n_transfer,
                                    transfer_limit,
@@ -174,9 +192,9 @@ class RaptorRouter:
         if not stop_deps:
             return None
 
-        arrival = reach_stops[stop]["arrival_time"]
+        arrival_start = reach_stops[stop]["arrival_time"] + 90
         # Binary search for first departure >= arrival
-        idx = bisect.bisect_left(stop_deps, (arrival,))
+        idx = bisect.bisect_left(stop_deps, (arrival_start,))
 
         # Scan forward to find a journey whose mode is allowed
         while idx < len(stop_deps):
@@ -200,6 +218,7 @@ class RaptorRouter:
                     reach_stops[subsequent_point]["type"] = network.journey_type(first_journey)
                     reach_stops[subsequent_point]["journey"] = first_journey
                     reach_stops[subsequent_point]["day"] = network
-                    switch_b.add(subsequent_point)
+                    if subsequent_point not in switch_b:
+                        switch_b.append(subsequent_point)
             return first_journey
         return None
