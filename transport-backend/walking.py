@@ -48,12 +48,19 @@ class Walking:
         # 1. Candidate stops within bounding box (~1.3 km)
         margin = 0.012
         candidates = []
+        exact_matches = {}  # {stop_int: walk_seconds} for exact coordinate matches
         for stop_int, (slat, slon) in self._coords.items():
             if abs(slat - lat) <= margin and abs(slon - lon) <= margin:
                 candidates.append(stop_int)
+                # Check for exact coordinate match (within ~1 meter precision)
+                if abs(slat - lat) < 1e-5 and abs(slon - lon) < 1e-5:
+                    exact_matches[stop_int] = 0
 
         if not candidates:
             return {}
+
+        # 2. Build OSRM /table request: source = user location,
+        #    destinations = candidate stops
 
         # 2. Build OSRM /table request: source = user location,
         #    destinations = candidate stops
@@ -82,10 +89,12 @@ class Walking:
                 if walk_time <= self._max:
                     result[stop_int] = walk_time
             sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
+            # Include exact matches (stops at the user's exact location)
+            sorted_result.update(exact_matches)
             return sorted_result
 
         if data.get("code") != "Ok":
-            return {}
+            return dict(sorted(exact_matches.items()))
 
         durations = data["durations"][0]        # single-source row
         result = {}
@@ -97,5 +106,7 @@ class Walking:
 
         # Sort by walk_seconds ascending
         sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
+        # Include exact matches (stops at the user's exact location)
+        sorted_result.update(exact_matches)
         return sorted_result
     
