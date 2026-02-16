@@ -15,7 +15,7 @@ This document contains the full, actionable task list (19 items) with implementa
 
 ## High Priority
 - [x] Scaffold FastAPI server and `/health` (with tests).
-- [ ] Implement `/search/stops` endpoint (with tests).
+- [x] Implement `/search/stops` endpoint (with tests).
 - [ ] Implement `/bus/live/{operator}` endpoint (with tests).
 - [ ] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [ ] Expand search to support any location (prompted), not just stations.

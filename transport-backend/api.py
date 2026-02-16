@@ -102,6 +102,41 @@ async def health():
     return {"status": "ok"}
 
 
+# -- Stop search ---------------------------------------------------------------
+
+
+@app.get("/search/stops")
+async def search_stops(q: str = "", limit: int = 10):
+    """Search stops by name (case-insensitive substring match).
+
+    Query params:
+        q:     search string (required for results)
+        limit: max results to return (default 10)
+
+    Returns JSON list of {id, name, atco_code, lat, lon}.
+    """
+    from fastapi.responses import JSONResponse
+
+    if not q:
+        return []
+
+    if _base_cache is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Backend not initialized"},
+        )
+
+    try:
+        loader = _base_cache["loader"]
+        results = loader.search_stops(q, limit)
+        return results
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc)},
+        )
+
+
 # ── Static files & frontend ──────────────────────────────────────────────
 
 # Only mount static files if the directory exists (skipped during tests)
