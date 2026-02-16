@@ -1,4 +1,4 @@
-"""Tests for the FastAPI transport backend API.
+﻿"""Tests for the FastAPI transport backend API.
 
 Covers /health, /api/bus_live, /api/route, format_route_text,
 get_router_for_date, and core app setup.
@@ -46,7 +46,7 @@ sys.modules["time_utils"].seconds_to_time = MagicMock(
     side_effect=lambda s: f"{int(s)//3600:02d}:{(int(s)%3600)//60:02d}:{int(s)%60:02d}"
 )
 
-# Now import the app — the heavy imports resolve to mocks
+# Now import the app â€” the heavy imports resolve to mocks
 import api as api_module  # noqa: E402
 from api import app, format_route_text, get_router_for_date  # noqa: E402
 
@@ -60,7 +60,7 @@ def client():
         yield c
 
 
-# ── /health endpoint tests ────────────────────────────────────────────────
+# â”€â”€ /health endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestHealthEndpoint:
@@ -84,7 +84,7 @@ class TestHealthEndpoint:
         assert "application/json" in response.headers["content-type"]
 
 
-# ── App metadata tests ────────────────────────────────────────────────────
+# â”€â”€ App metadata tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestAppMetadata:
@@ -109,7 +109,7 @@ class TestAppMetadata:
         assert "get" in schema["paths"]["/health"]
 
 
-# ── /api/bus_live endpoint tests ──────────────────────────────────────────
+# â”€â”€ /api/bus_live endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestBusLiveEndpoint:
@@ -186,7 +186,7 @@ class TestBusLiveEndpoint:
         assert data["buses"] == []
 
 
-# ── /api/route endpoint tests ────────────────────────────────────────────
+# â”€â”€ /api/route endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestRouteEndpoint:
@@ -295,7 +295,7 @@ class TestRouteEndpoint:
         assert "DB unavailable" in data["error"]
 
 
-# ── get_router_for_date tests ────────────────────────────────────────────
+# â”€â”€ get_router_for_date tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestGetRouterForDate:
@@ -349,7 +349,7 @@ class TestGetRouterForDate:
         mock_init.assert_called_once()
 
 
-# ── format_route_text tests ──────────────────────────────────────────────
+# â”€â”€ format_route_text tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestFormatRouteText:
@@ -457,7 +457,7 @@ class TestFormatRouteText:
         assert "Stop B" in result
         assert "Route found" in result
         assert "line 10" in result  # line_name split on ":"
-        assert "Depot → Centre" in result
+        assert "Depot -> Centre" in result
 
     def test_multi_leg_route_walking_transfer(self):
         """Route with a walking transfer between stops."""
@@ -633,3 +633,6 @@ class TestFormatRouteText:
         }
         result = format_route_text(route, merged)
         assert "Route found" in result
+
+
+
