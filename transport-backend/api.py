@@ -1,4 +1,4 @@
-"""Transport Backend — FastAPI server.
+﻿"""Transport Backend -€” FastAPI server.
 
 Exposes transport functionality (health check, live buses, journey
 planning) as a JSON API consumed by the frontend.
@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from bus_live import BusLive
+from bus_live import BusLive, get_bus_live
 from main import build_for_date
 from time_utils import seconds_since_midnight
 
@@ -68,7 +68,7 @@ class JourneyPlanRequest(BaseModel):
     maxTransfers: int = 5
     mode: str = "both"     # bus | train | both
 
-# ── Lifespan (startup / shutdown) ─────────────────────────────────────────
+# -”€-”€ Lifespan (startup / shutdown) -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
 
 @asynccontextmanager
@@ -84,16 +84,16 @@ async def lifespan(app: FastAPI):
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
         logger.warning(
-            "Backend initialisation failed — endpoints requiring "
+            "Backend initialisation failed -€” endpoints requiring "
             "transport data will be unavailable: %s", exc,
         )
-    yield  # ← server is running
+    yield  # -† server is running
     # Shutdown logic (if needed) goes here
 
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
 
-# ── Health check ──────────────────────────────────────────────────────────
+# -”€-”€ Health check -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
 
 @app.get("/health")
@@ -137,7 +137,7 @@ async def search_stops(q: str = "", limit: int = 10):
         )
 
 
-# ── Static files & frontend ──────────────────────────────────────────────
+# -”€-”€ Static files & frontend -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
 # Only mount static files if the directory exists (skipped during tests)
 _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -156,7 +156,8 @@ async def get_frontend():
 async def get_live_buses(request: BusLiveRequest):
     """Get live bus data near a location."""
     try:
-        bl = BusLive(timeout=10)  # 10 second timeout for live data
+        from bus_live import BusLive as BusLiveClass
+        bl = BusLiveClass(timeout=10)  # 10 second timeout for live data
         results = bl.get_bus_live(request.lat, request.lon, lat_tol=request.lat_tol, lon_tol=request.lon_tol)
 
         # Convert tuples to dictionaries for JSON response
@@ -174,6 +175,52 @@ async def get_live_buses(request: BusLiveRequest):
 
     except Exception as e:
         return BusLiveResponse(success=False, error=str(e))
+
+
+@app.get("/bus/live/{operator}")
+async def bus_live_operator(
+    operator: str,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    latTol: float = 0.0003,
+    lonTol: float = 0.0003,
+):
+    """Get live bus positions for a specific operator."""
+    from fastapi.responses import JSONResponse
+
+    if lat is None or lon is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "lat and lon are required"},
+        )
+
+    urls = None
+    if operator.lower() != "all":
+        urls = [f"https://transport.scc.lancs.ac.uk/bus/live/{operator}"]
+
+    try:
+        results = get_bus_live(
+            lat,
+            lon,
+            urls=urls,
+            lat_tol=latTol,
+            lon_tol=lonTol,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc)},
+        )
+
+    return [
+        {
+            "line": line_ref,
+            "destination": dest,
+            "lat": lat_v,
+            "lon": lon_v,
+        }
+        for line_ref, dest, lat_v, lon_v, _operator in results
+    ]
 
 # Global cache for router/timetable/walking by date
 _router_cache = {}
@@ -213,14 +260,14 @@ def format_route_text(route_result, merged):
         total_arrival = meta.get('total_arrival')
         out = []
         out.append(f"\n{'='*60}")
-        out.append(f"  Route found — only walking")
+        out.append(f"  Route found -€” only walking")
         out.append(f"{'='*60}")
         if start_point:
-            out.append(f"\n  ◎ Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
+            out.append(f"\n  -—Ž Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
         walk_min = (start_walk + end_walk) / 60
-        out.append(f"    │  🚶 Walk {walk_min:.0f} min ({start_walk + end_walk}s)")
+        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({start_walk + end_walk}s)")
         if destination:
-            out.append(f"  ◎ Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
+            out.append(f"  -—Ž Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
         if total_arrival is not None:
             from time_utils import seconds_to_time
             out.append(f"    Arrive at {seconds_to_time(int(total_arrival))}")
@@ -246,28 +293,28 @@ def format_route_text(route_result, merged):
     legs.reverse()
     out = []
     out.append(f"\n{'='*60}")
-    out.append(f"  Route found — {len(legs)} stop(s)")
+    out.append(f"  Route found -€” {len(legs)} stop(s)")
     out.append(f"{'='*60}")
     if start_point and legs:
         first_arrival = legs[0][1]["arrival_time"]
         depart_time = first_arrival - start_walk
-        out.append(f"\n  ◎ Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
+        out.append(f"\n  -—Ž Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
         out.append(f"    Depart at {seconds_to_time(int(depart_time))}")
         walk_min = start_walk / 60
-        out.append(f"    │  🚶 Walk {walk_min:.0f} min ({start_walk}s)")
+        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({start_walk}s)")
     for i, (stop_int, info) in enumerate(legs):
         stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
         transport = info["type"] if info["type"] else "origin"
         if i == 0:
-            out.append(f"  ● {stop_label}")
+            out.append(f"  -— {stop_label}")
             out.append(f"    Arrive at {arrival}")
         else:
             if transport == "walking":
                 prev_stop_int, prev_info = legs[i - 1]
                 walk_secs = info["arrival_time"] - prev_info["arrival_time"]
                 walk_min = walk_secs / 60
-                out.append(f"    │  🚶 Walk {walk_min:.0f} min ({int(walk_secs)}s)")
+                out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({int(walk_secs)}s)")
             else:
                 jinfo = info.get("journey_info")
                 line_name = jinfo.get("line_name", "") if jinfo else ""
@@ -282,17 +329,17 @@ def format_route_text(route_result, merged):
                 if line_name:
                     desc_parts.append(f"line {line_name}")
                 if j_origin and j_dest:
-                    desc_parts.append(f"{j_origin} → {j_dest}")
+                    desc_parts.append(f"{j_origin} -> {j_dest}")
                 if board_dep is not None:
                     desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
-                desc = " · ".join(desc_parts) if desc_parts else transport
-                out.append(f"    │  {desc}")
-            out.append(f"  ● {stop_label}")
+                desc = " - ".join(desc_parts) if desc_parts else transport
+                out.append(f"    -”‚  {desc}")
+            out.append(f"  -— {stop_label}")
             out.append(f"    Arrive at {arrival}")
     if destination and legs:
         walk_min = end_walk / 60
-        out.append(f"    │  🚶 Walk {walk_min:.0f} min ({end_walk}s)")
-        out.append(f"  ◎ Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
+        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({end_walk}s)")
+        out.append(f"  -—Ž Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
         if total_arrival is not None:
             out.append(f"    Arrive at {seconds_to_time(int(total_arrival))}")
     out.append(f"\n{'='*60}")
@@ -629,3 +676,10 @@ async def get_route(request: RouteRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="localhost", port=8000)
+
+
+
+
+
+
+
