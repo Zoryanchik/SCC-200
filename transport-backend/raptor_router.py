@@ -53,7 +53,6 @@ class RaptorRouter:
         # (transit arrival at stop + walking time from stop to destination)
         best_final_stop = None
         best_total_arrival = math.inf
-        
         for stop, walk_time in final_stops.items():
             if reach_stops[stop]["arrival_time"] < math.inf:
                 total_arrival = reach_stops[stop]["arrival_time"] + walk_time
@@ -66,6 +65,19 @@ class RaptorRouter:
         
         final_stop = best_final_stop
         arrival_time = best_total_arrival
+        dir_walking = walking.walking_time_between( start_point, destination )
+        if dir_walking is not None and dir_walking + start_time < arrival_time + 10:
+            # Direct walking is faster than any transit route found
+            return {
+                '_meta': {
+                    'start_walk_seconds': dir_walking,
+                    'end_walk_seconds': 0,
+                    'total_arrival': start_time + dir_walking,
+                    'start_point': start_point,
+                    'destination': destination,
+                }
+                # No transit legs, just a direct walk
+            }
         final_walk_seconds = final_stops[final_stop]
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}

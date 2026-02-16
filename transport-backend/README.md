@@ -1,3 +1,17 @@
+to run mock frontend:
+run api.py
+go to http://localhost:8000
+
+
+
+
+
+
+
+
+
+
+
 Router:
 - Run main.py in terminal
 - Waiting to be connected to front-end
