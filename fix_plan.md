@@ -17,7 +17,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
 - [x] Implement `/bus/live/{operator}` endpoint (with tests).
-- [ ] Connect frontend bus live with backend using map center `latitude` and `longitude`.
+- [x] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [x] Expand search to support any location (prompted), not just stations.
 - [ ] Align search UI and map on the same page; prioritize map locations.
 - [ ] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.

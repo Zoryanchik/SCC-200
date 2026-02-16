@@ -2,7 +2,7 @@
  * Custom Hooks for Transport Data Management
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchLiveBusLocations,
   fetchRailDepartures,
@@ -31,21 +31,38 @@ const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
 };
 
 /**
- * Hook for fetching and managing live bus locations
- * @param {string} operatorCode - Bus operator code
- * @param {number} refreshInterval - Refresh interval in milliseconds (default: 30000)
+ * Hook for fetching and managing live bus locations.
+ * Accepts dynamic lat/lon (e.g. from map center) and debounces
+ * API calls so rapid map panning does not spam the backend.
+ *
+ * @param {string}  operatorCode     - Bus operator code (e.g. 'SCCU')
+ * @param {Object}  options
+ * @param {number}  [options.lat]            - Centre latitude
+ * @param {number}  [options.lon]            - Centre longitude
+ * @param {number}  [options.refreshInterval=30000] - Auto-refresh interval (ms)
+ * @param {number}  [options.debounceMs=800] - Debounce delay for lat/lon changes (ms)
  */
-export const useLiveBusLocations = (operatorCode, refreshInterval = 30000) => {
+export const useLiveBusLocations = (
+  operatorCode,
+  { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
+) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const debounceRef = useRef(null);
+  const intervalRef = useRef(null);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (fetchLat, fetchLon) => {
     if (!operatorCode) return;
     try {
       setLoading(true);
+      const opts = {};
+      if (typeof fetchLat === 'number' && typeof fetchLon === 'number') {
+        opts.lat = fetchLat;
+        opts.lon = fetchLon;
+      }
       const result = await withRetry(
-        () => fetchLiveBusLocations(operatorCode),
+        () => fetchLiveBusLocations(operatorCode, opts),
         { retries: 2, baseDelay: 500 }
       );
       setData(result);
@@ -58,13 +75,36 @@ export const useLiveBusLocations = (operatorCode, refreshInterval = 30000) => {
     }
   }, [operatorCode]);
 
+  // Debounce lat/lon changes, then set up auto-refresh interval
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, refreshInterval);
-    return () => clearInterval(interval);
-  }, [fetchData, refreshInterval]);
+    // Clear any pending debounce timer
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    // Clear any previous refresh interval
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
 
-  return { data, loading, error, refetch: fetchData };
+    debounceRef.current = setTimeout(() => {
+      // Initial fetch after debounce
+      fetchData(lat, lon);
+
+      // Set up periodic refresh with the debounced coordinates
+      intervalRef.current = setInterval(() => {
+        fetchData(lat, lon);
+      }, refreshInterval);
+    }, debounceMs);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [fetchData, lat, lon, refreshInterval, debounceMs]);
+
+  const refetch = useCallback(() => fetchData(lat, lon), [fetchData, lat, lon]);
+
+  return { data, loading, error, refetch };
 };
 
 /**
