@@ -1,20 +1,27 @@
-"""
-Simple FastAPI server for bus_live functionality.
+"""Transport Backend — FastAPI server.
+
+Exposes transport functionality (health check, live buses, journey
+planning) as a JSON API consumed by the frontend.
 """
 
+from contextlib import asynccontextmanager
+import logging
+import os
+import sys
+import threading
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-import sys
-import os
+
 from bus_live import BusLive
-from datetime import datetime
 from main import build_for_date
 from time_utils import seconds_since_midnight
-import threading
+
+logger = logging.getLogger(__name__)
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -47,15 +54,54 @@ class RouteResponse(BaseModel):
     route: Optional[dict] = None
     error: Optional[str] = None
 
-app = FastAPI(title="Bus Live API")
+# ── Lifespan (startup / shutdown) ─────────────────────────────────────────
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialise base transport data on server start.
+
+    Errors are caught so the server can still serve /health even
+    when the heavy backend is unavailable (e.g. during testing).
+    """
+    global _base_cache
+    try:
+        from main import initialize_base
+        _base_cache = initialize_base()
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "Backend initialisation failed — endpoints requiring "
+            "transport data will be unavailable: %s", exc,
+        )
+    yield  # ← server is running
+    # Shutdown logic (if needed) goes here
+
+
+app = FastAPI(title="Transport API", lifespan=lifespan)
+
+# ── Health check ──────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    """Liveness probe. Returns ``{"status": "ok"}`` when the server is up."""
+    return {"status": "ok"}
+
+
+# ── Static files & frontend ──────────────────────────────────────────────
+
+# Only mount static files if the directory exists (skipped during tests)
+_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
 
 @app.get("/")
 async def get_frontend():
     """Serve the frontend HTML page."""
-    return FileResponse("index.html")
+    return FileResponse(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+    )
 
 @app.post("/api/bus_live", response_model=BusLiveResponse)
 async def get_live_buses(request: BusLiveRequest):
@@ -230,10 +276,6 @@ async def get_route(request: RouteRequest):
         return {"success": True, "route": result, "route_text": route_text}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-# Initialize base data at module load
-from main import initialize_base
-_base_cache = initialize_base()
 
 if __name__ == "__main__":
     import uvicorn
