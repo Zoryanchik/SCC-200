@@ -13,6 +13,17 @@ vi.mock('../../services/transportApi', () => ({
   fetchPricing: vi.fn()
 }))
 
+vi.mock('../../services/liveUpdates', () => ({
+  liveUpdatesManager: {
+    connect: vi.fn().mockRejectedValue(new Error('not available')),
+    disconnect: vi.fn().mockResolvedValue(undefined),
+    subscribeToTrainMovements: vi.fn(),
+    subscribeToBusMovements: vi.fn(),
+    subscribeToAlerts: vi.fn(),
+    unsubscribe: vi.fn(),
+  }
+}))
+
 describe('useStopSearch', () => {
   test('returns results after debounce', async () => {
     api.searchStops.mockResolvedValueOnce([{ atco_code: 'ATCO1', name: 'Central Bus Stop', type: 'stop' }])
