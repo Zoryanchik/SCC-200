@@ -109,4 +109,23 @@ class Walking:
         # Include exact matches (stops at the user's exact location)
         sorted_result.update(exact_matches)
         return sorted_result
-    
+
+    def walking_time_between(self, point_a, point_b):
+        """
+        Compute walking time (seconds) between two arbitrary (lat, lon) points.
+        Uses OSRM if available, otherwise falls back to haversine estimate.
+        """
+        lat1, lon1 = point_a
+        lat2, lon2 = point_b
+        url = f"{self._osrm}/route/v1/foot/{lon1},{lat1};{lon2},{lat2}?overview=false&steps=false&annotations=duration"
+        try:
+            resp = urllib.request.urlopen(url, timeout=10)
+            data = json.loads(resp.read())
+            resp.close()
+            if data.get("code") == "Ok" and data["routes"]:
+                return int(data["routes"][0]["duration"])
+        except Exception:
+            pass
+        # Fallback: haversine distance, 1 m/s walking speed
+        dist_m = math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111000
+        return int(dist_m / 1.0)

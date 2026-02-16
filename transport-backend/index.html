@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Bus Data Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Live Bus Data Viewer</h1>
+
+        <form id="busLiveForm">
+            <div class="form-group">
+                <label for="bus_lat">Latitude:</label>
+                <input type="number" id="bus_lat" step="any" value="54.046" required>
+            </div>
+
+            <div class="form-group">
+                <label for="bus_lon">Longitude:</label>
+                <input type="number" id="bus_lon" step="any" value="-2.798" required>
+            </div>
+
+            <div class="form-group">
+                <label for="lat_tol">Latitude Tolerance:</label>
+                <input type="number" id="lat_tol" step="any" value="0.0003" min="0" required>
+            </div>
+
+            <div class="form-group">
+                <label for="lon_tol">Longitude Tolerance:</label>
+                <input type="number" id="lon_tol" step="any" value="0.0003" min="0" required>
+            </div>
+
+            <button type="submit">Find Live Buses</button>
+        </form>
+
+        <div id="bus-loading" class="loading">Searching for live buses...</div>
+        <div id="bus-result" class="result" style="display: none;"></div>
+    </div>
+
+    <!-- Routing Form -->
+    <div class="container" style="margin-top: 40px;">
+        <h1>Route Planner</h1>
+        <form id="routeForm">
+            <div class="form-group">
+                <label for="start_lat">Start Latitude:</label>
+                <input type="number" id="start_lat" step="any" value="54.046" required>
+            </div>
+            <div class="form-group">
+                <label for="start_lon">Start Longitude:</label>
+                <input type="number" id="start_lon" step="any" value="-2.798" required>
+            </div>
+            <div class="form-group">
+                <label for="end_lat">End Latitude:</label>
+                <input type="number" id="end_lat" step="any" value="54.050" required>
+            </div>
+            <div class="form-group">
+                <label for="end_lon">End Longitude:</label>
+                <input type="number" id="end_lon" step="any" value="-2.800" required>
+            </div>
+            <div class="form-group">
+                <label for="route_date">Date (YYYY-MM-DD):</label>
+                <input type="date" id="route_date" required>
+            </div>
+            <div class="form-group">
+                <label for="route_time">Time (HH:MM:SS):</label>
+                <input type="time" id="route_time" step="1" required>
+            </div>
+            <div class="form-group">
+                <label for="max_transfers">Max Transfers:</label>
+                <input type="number" id="max_transfers" value="5" min="0" required>
+            </div>
+            <div class="form-group">
+                <label for="mode">Mode:</label>
+                <select id="mode">
+                    <option value="both">Both</option>
+                    <option value="bus">Bus</option>
+                    <option value="train">Train</option>
+                </select>
+            </div>
+            <button type="submit">Find Route</button>
+        </form>
+        <div id="route-loading" class="loading">Searching for route...</div>
+        <div id="route-result" class="result" style="display: none;"></div>
+    </div>
+
+    <script src="static/script.js"></script>
+</body>
+</html>
