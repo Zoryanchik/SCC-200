@@ -6,6 +6,21 @@
 
 const API_BASE_URL = 'https://transport.scc.lancs.ac.uk';
 
+const normalizeStopLocation = (stop) => {
+  if (!stop || typeof stop !== 'object') return null;
+  const lat = stop.lat ?? stop.latitude;
+  const lon = stop.lon ?? stop.longitude;
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+  return { lat, lon };
+};
+
+const normalizeDateTime = (input) => {
+  const dateValue = input ? new Date(input) : new Date();
+  const date = dateValue.toISOString().slice(0, 10);
+  const time = dateValue.toTimeString().slice(0, 8);
+  return { date, time };
+};
+
 /**
  * Fetch bus times for a specific stop
  * @param {string} stopCode - The stop code (e.g., '2800S12345')
@@ -115,6 +130,12 @@ export const searchStops = async (query) => {
  */
 export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
   try {
+    const from = normalizeStopLocation(fromStop);
+    const to = normalizeStopLocation(toStop);
+    if (!from || !to) {
+      throw new Error('fromStop and toStop must include lat/lon');
+    }
+    const { date, time } = normalizeDateTime(departureTime);
     const response = await fetch(
       `${API_BASE_URL}/journey/plan`,
       {
@@ -123,9 +144,10 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          fromStop,
-          toStop,
-          departureTime
+          fromStop: from,
+          toStop: to,
+          departureTime: time,
+          date
         })
       }
     );
