@@ -1,4 +1,4 @@
-import ssl
+﻿import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import List, Tuple, Iterable, Optional
@@ -143,6 +143,12 @@ class BusLive:
         return results
 
 
+def get_bus_live(lat, lon, urls=None, lat_tol=0.0003, lon_tol=0.0003, timeout=10):
+    """Convenience wrapper for BusLive.get_bus_live."""
+    bl = BusLive(urls=urls, timeout=timeout)
+    return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol)
+
+
 def main():
     """Simple CLI to query nearby live buses.
 
@@ -164,13 +170,13 @@ def main():
         try:
             args.lat = float(input("Enter center latitude (e.g. 54.046): ").strip())
         except Exception:
-            print("Invalid latitude input—exiting.")
+            print("Invalid latitude input - exiting.")
             return
     if args.lon is None:
         try:
             args.lon = float(input("Enter center longitude (e.g. -2.798): ").strip())
         except Exception:
-            print("Invalid longitude input—exiting.")
+            print("Invalid longitude input - exiting.")
             return
 
     bl = BusLive(urls=args.urls if args.urls else None, timeout=args.timeout)
@@ -190,3 +196,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

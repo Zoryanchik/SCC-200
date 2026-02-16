@@ -1,9 +1,9 @@
----
+﻿---
 
 ### File 2: `transport-backend/TRANSPORT_BACKEND_MY_TASKS.md` (Task List)
 
 ```markdown
-# Transport Backend — My Tasks
+# Transport Backend â€” My Tasks
 
 Generated: 2026-02-12
 
@@ -16,7 +16,7 @@ This document contains the full, actionable task list (19 items) with implementa
 ## High Priority
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
-- [ ] Implement `/bus/live/{operator}` endpoint (with tests).
+- [x] Implement `/bus/live/{operator}` endpoint (with tests).
 - [ ] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [ ] Expand search to support any location (prompted), not just stations.
 - [ ] Align search UI and map on the same page; prioritize map locations.
