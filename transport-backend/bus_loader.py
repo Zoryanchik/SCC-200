@@ -839,6 +839,46 @@ class BusLoader:
         conn.close()
         return count
 
+    def search_stops(self, query, limit=10):
+        """Search for stops by name (case-insensitive substring match).
+
+        Joins stop_names and stop_coords tables to return results with
+        coordinates.  Returns a list of dicts with keys:
+        id, name, atco_code, lat, lon.
+
+        Args:
+            query: substring to search for in common_name
+            limit: maximum number of results to return
+
+        Returns:
+            list[dict]: matching stops
+        """
+        if not query:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT sn.atco_code, sn.common_name, sc.lat, sc.lon
+            FROM stop_names sn
+            LEFT JOIN stop_coords sc ON sn.atco_code = sc.atco_code
+            WHERE LOWER(sn.common_name) LIKE LOWER(?)
+            LIMIT ?
+            """,
+            (f"%{query}%", limit),
+        )
+        results = []
+        for i, row in enumerate(cur.fetchall()):
+            results.append({
+                "id": i,
+                "name": row[1],
+                "atco_code": row[0],
+                "lat": row[2],
+                "lon": row[3],
+            })
+        conn.close()
+        return results
+
     # ── Pickle cache ─────────────────────────────────────────────
 
     @property
