@@ -19,7 +19,7 @@ afterEach(() => {
 
 describe('useTransportData hooks', () => {
   test('useStopSearch debounces and returns results', async () => {
-    api.searchStops.mockResolvedValueOnce([{ atco_code: 'ATCO1', name: 'Lancaster Bus Station' }])
+    api.searchStops.mockResolvedValueOnce([{ atco_code: 'ATCO1', name: 'Lancaster Bus Station', type: 'stop' }])
 
     const { result } = renderHook(() => useStopSearch('Lan', 10))
 
@@ -27,6 +27,22 @@ describe('useTransportData hooks', () => {
       expect(result.current.loading).toBe(false)
       expect(api.searchStops).toHaveBeenCalledWith('Lan')
       expect(result.current.results.length).toBeGreaterThan(0)
+    })
+  })
+
+  test('useStopSearch handles mixed stop and location types', async () => {
+    api.searchStops.mockResolvedValueOnce([
+      { id: 1, name: 'Lancaster Bus Station', atco_code: 'LAN001', lat: 54.048, lon: -2.801, type: 'stop' },
+      { id: 'loc:0', name: 'Lancaster, Lancashire, UK', atco_code: null, lat: 54.047, lon: -2.801, type: 'location' }
+    ])
+
+    const { result } = renderHook(() => useStopSearch('Lancaster', 10))
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+      expect(result.current.results).toHaveLength(2)
+      expect(result.current.results[0].type).toBe('stop')
+      expect(result.current.results[1].type).toBe('location')
     })
   })
 
