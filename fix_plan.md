@@ -21,7 +21,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Expand search to support any location (prompted), not just stations.
 - [ ] Align search UI and map on the same page; prioritize map locations.
 - [ ] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
-- [ ] Implement `/journey/plan` endpoint with `routeGeometries`.
+- [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 
 ## Medium Priority
 - [ ] Implement `/rail/departures/{station}` endpoint.
@@ -42,6 +42,7 @@ This document contains the full, actionable task list (19 items) with implementa
 
 ## Completed
 - [x] Scaffold FastAPI server and `/health` (with tests).
+- [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 
 ---
 
