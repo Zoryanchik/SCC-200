@@ -62,3 +62,6 @@ venv/
 # Ralph / Claude agent artifacts
 .ralph/
 .claude/
+
+# Nested project copy
+SCC-200/
