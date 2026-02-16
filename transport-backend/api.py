@@ -5,12 +5,15 @@ planning) as a JSON API consumed by the frontend.
 """
 
 from contextlib import asynccontextmanager
+import json
 import logging
 import os
 import sys
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
+from urllib.request import Request as UrllibRequest, urlopen
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -105,6 +108,34 @@ async def health():
 # -- Stop search ---------------------------------------------------------------
 
 
+
+def geocode_locations(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    if not query or limit <= 0:
+        return []
+    params = urlencode({"format": "json", "q": query, "limit": str(limit), "addressdetails": "0"})
+    url = f"https://nominatim.openstreetmap.org/search?{params}"
+    request = UrllibRequest(url, headers={"User-Agent": "transport-backend/1.0"})
+    with urlopen(request, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    results = []
+    for idx, item in enumerate(payload):
+        try:
+            lat = float(item.get("lat"))
+            lon = float(item.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        name = item.get("display_name") or item.get("name") or query
+        results.append({
+            "id": f"loc:{idx}",
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "atco_code": None,
+            "type": "location",
+        })
+    return results
+
+
 @app.get("/search/stops")
 async def search_stops(q: str = "", limit: int = 10):
     """Search stops by name (case-insensitive substring match).
@@ -113,7 +144,7 @@ async def search_stops(q: str = "", limit: int = 10):
         q:     search string (required for results)
         limit: max results to return (default 10)
 
-    Returns JSON list of {id, name, atco_code, lat, lon}.
+    Returns JSON list of {id, name, atco_code, lat, lon, type}.
     """
     from fastapi.responses import JSONResponse
 
@@ -128,8 +159,17 @@ async def search_stops(q: str = "", limit: int = 10):
 
     try:
         loader = _base_cache["loader"]
-        results = loader.search_stops(q, limit)
-        return results
+        stop_results = loader.search_stops(q, limit)
+        for stop in stop_results:
+            stop["type"] = "stop"
+        remaining = max(0, limit - len(stop_results))
+        location_results = []
+        if remaining > 0:
+            try:
+                location_results = geocode_locations(q, remaining)
+            except Exception as exc:
+                logger.warning("Geocoding lookup failed: %s", exc)
+        return stop_results + location_results
     except Exception as exc:
         return JSONResponse(
             status_code=500,

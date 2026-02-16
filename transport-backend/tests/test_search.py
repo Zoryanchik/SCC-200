@@ -1,8 +1,11 @@
-﻿"""Tests for the /search/stops endpoint.
+﻿"""Tests for the /search/stops endpoint and geocode_locations function.
 
-Validates stop search with mocked BusLoader data  no real
-filesystem or database access required.
+Validates stop search with mocked BusLoader data and geocoding
+with mocked urlopen — no real filesystem, database, or network
+access required.
 """
+import io
+import json
 import sys
 import os
 from unittest.mock import MagicMock, patch
@@ -67,9 +70,16 @@ def client():
         yield c
 
 
+@pytest.fixture(autouse=False)
+def _mock_geocode():
+    with patch("api.geocode_locations", return_value=[]):
+        yield
+
+
 #  /search/stops endpoint tests 
 
 
+@pytest.mark.usefixtures("_mock_geocode")
 class TestSearchStopsEndpoint:
     """Validate the GET /search/stops endpoint contract."""
 
@@ -111,6 +121,32 @@ class TestSearchStopsEndpoint:
         assert "atco_code" in item
         assert "lat" in item
         assert "lon" in item
+        assert "type" in item
+        assert item["type"] == "stop"
+
+    def test_search_includes_location_results(self, client: TestClient):
+        """Geocoded locations should be included with type=location."""
+        mock_loader = MagicMock()
+        mock_loader.search_stops.return_value = []
+        api_module._base_cache = {"loader": mock_loader}
+
+        locations = [
+            {
+                "id": "loc:0",
+                "name": "Lancaster, UK",
+                "atco_code": None,
+                "lat": 54.047,
+                "lon": -2.801,
+                "type": "location",
+            }
+        ]
+
+        with patch("api.geocode_locations", return_value=locations) as geocode_mock:
+            response = client.get("/search/stops", params={"q": "lancaster", "limit": 3})
+
+        data = response.json()
+        assert data == locations
+        geocode_mock.assert_called_once_with("lancaster", 3)
 
     def test_search_respects_limit(self, client: TestClient):
         """Limit parameter caps the number of results returned."""
@@ -219,3 +255,206 @@ class TestSearchStopsEndpoint:
         assert response.status_code == 500
         data = response.json()
         assert "error" in data
+
+    def test_search_mixed_stops_and_locations(self, client: TestClient):
+        """Stops and geocoded locations should be merged in the response."""
+        mock_loader = MagicMock()
+        mock_loader.search_stops.side_effect = _mock_search
+        api_module._base_cache = {"loader": mock_loader}
+
+        fake_locations = [
+            {
+                "id": "loc:0",
+                "name": "Lancaster Town Hall",
+                "lat": 54.048,
+                "lon": -2.799,
+                "atco_code": None,
+                "type": "location",
+            }
+        ]
+        with patch("api.geocode_locations", return_value=fake_locations):
+            response = client.get(
+                "/search/stops", params={"q": "lancaster", "limit": 10}
+            )
+
+        data = response.json()
+        stop_items = [d for d in data if d.get("type") == "stop"]
+        loc_items = [d for d in data if d.get("type") == "location"]
+        assert len(stop_items) == 2  # Lancaster Bus Station + Lancaster University
+        assert len(loc_items) == 1
+        assert loc_items[0]["name"] == "Lancaster Town Hall"
+
+    def test_search_geocode_failure_returns_stops_only(self, client: TestClient):
+        """If geocoding raises an error, stops should still be returned."""
+        mock_loader = MagicMock()
+        mock_loader.search_stops.side_effect = _mock_search
+        api_module._base_cache = {"loader": mock_loader}
+
+        with patch("api.geocode_locations", side_effect=Exception("timeout")):
+            response = client.get(
+                "/search/stops", params={"q": "central", "limit": 5}
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) >= 1
+        assert all(d.get("type") == "stop" for d in data)
+
+    def test_search_all_results_have_type_field(self, client: TestClient):
+        """Every result must include a 'type' field ('stop' or 'location')."""
+        mock_loader = MagicMock()
+        mock_loader.search_stops.side_effect = _mock_search
+        api_module._base_cache = {"loader": mock_loader}
+
+        fake_locs = [
+            {
+                "id": "loc:0",
+                "name": "Somewhere",
+                "lat": 54.0,
+                "lon": -2.0,
+                "atco_code": None,
+                "type": "location",
+            }
+        ]
+        with patch("api.geocode_locations", return_value=fake_locs):
+            response = client.get(
+                "/search/stops", params={"q": "cent", "limit": 10}
+            )
+
+        data = response.json()
+        assert len(data) >= 1
+        for item in data:
+            assert "type" in item
+            assert item["type"] in ("stop", "location")
+
+
+# ── geocode_locations unit tests ──────────────────────────────────────────────
+
+
+def _make_nominatim_response(items):
+    """Create a mock urlopen context-manager returning Nominatim-style JSON."""
+    body = json.dumps(items).encode("utf-8")
+    buf = io.BytesIO(body)
+    buf.read_orig = buf.read
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=buf)
+    ctx.__exit__ = MagicMock(return_value=False)
+    return ctx
+
+
+class TestGeocodeLocations:
+    """Unit tests for the geocode_locations helper function."""
+
+    @patch("api.urlopen")
+    def test_returns_locations_from_nominatim(self, mock_urlopen):
+        """Nominatim results are converted to {id, name, lat, lon, atco_code, type}."""
+        nominatim_data = [
+            {"lat": "54.047", "lon": "-2.801", "display_name": "Lancaster, UK"},
+            {"lat": "51.509", "lon": "-0.118", "display_name": "London, UK"},
+        ]
+        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+
+        results = api_module.geocode_locations("Lancaster", limit=5)
+
+        assert len(results) == 2
+        assert results[0]["name"] == "Lancaster, UK"
+        assert results[0]["lat"] == 54.047
+        assert results[0]["lon"] == -2.801
+        assert results[0]["type"] == "location"
+        assert results[0]["atco_code"] is None
+        assert results[0]["id"] == "loc:0"
+        assert results[1]["id"] == "loc:1"
+
+    @patch("api.urlopen")
+    def test_empty_query_returns_empty(self, mock_urlopen):
+        """An empty query string should return [] without calling the API."""
+        results = api_module.geocode_locations("", limit=5)
+        assert results == []
+        mock_urlopen.assert_not_called()
+
+    @patch("api.urlopen")
+    def test_zero_limit_returns_empty(self, mock_urlopen):
+        """limit=0 should return [] without calling the API."""
+        results = api_module.geocode_locations("test", limit=0)
+        assert results == []
+        mock_urlopen.assert_not_called()
+
+    @patch("api.urlopen")
+    def test_negative_limit_returns_empty(self, mock_urlopen):
+        """Negative limit should return [] without calling the API."""
+        results = api_module.geocode_locations("test", limit=-1)
+        assert results == []
+        mock_urlopen.assert_not_called()
+
+    @patch("api.urlopen")
+    def test_skips_entries_with_invalid_coords(self, mock_urlopen):
+        """Entries with non-numeric lat/lon should be skipped."""
+        nominatim_data = [
+            {"lat": "not-a-number", "lon": "-2.0", "display_name": "Bad"},
+            {"lat": "54.0", "lon": "-2.0", "display_name": "Good"},
+        ]
+        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+
+        results = api_module.geocode_locations("test", limit=5)
+        assert len(results) == 1
+        assert results[0]["name"] == "Good"
+
+    @patch("api.urlopen")
+    def test_falls_back_to_query_when_no_name(self, mock_urlopen):
+        """If Nominatim provides no display_name/name, use the query string."""
+        nominatim_data = [{"lat": "54.0", "lon": "-2.0"}]
+        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+
+        results = api_module.geocode_locations("my query", limit=5)
+        assert len(results) == 1
+        assert results[0]["name"] == "my query"
+
+    @patch("api.urlopen")
+    def test_uses_name_field_when_display_name_missing(self, mock_urlopen):
+        """fallback to 'name' field if 'display_name' is absent."""
+        nominatim_data = [
+            {"lat": "54.0", "lon": "-2.0", "name": "Short Name"}
+        ]
+        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+
+        results = api_module.geocode_locations("q", limit=5)
+        assert results[0]["name"] == "Short Name"
+
+    @patch("api.urlopen")
+    def test_api_timeout_propagates(self, mock_urlopen):
+        """Network errors should propagate to the caller."""
+        mock_urlopen.side_effect = Exception("Connection timed out")
+
+        with pytest.raises(Exception, match="Connection timed out"):
+            api_module.geocode_locations("Lancaster", limit=5)
+
+    @patch("api.urlopen")
+    def test_respects_limit_in_url(self, mock_urlopen):
+        """The limit parameter should be passed to the Nominatim URL."""
+        mock_urlopen.return_value = _make_nominatim_response([])
+
+        api_module.geocode_locations("test", limit=3)
+
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]
+        assert "limit=3" in request_obj.full_url
+
+    @patch("api.urlopen")
+    def test_user_agent_header_set(self, mock_urlopen):
+        """Request must include a User-Agent header (Nominatim requirement)."""
+        mock_urlopen.return_value = _make_nominatim_response([])
+
+        api_module.geocode_locations("test", limit=3)
+
+        call_args = mock_urlopen.call_args
+        request_obj = call_args[0][0]
+        assert "User-agent" in request_obj.headers
+
+    @patch("api.urlopen")
+    def test_returns_empty_for_empty_api_response(self, mock_urlopen):
+        """Empty Nominatim response should return []."""
+        mock_urlopen.return_value = _make_nominatim_response([])
+
+        results = api_module.geocode_locations("nowhere", limit=5)
+        assert results == []

@@ -20,11 +20,11 @@ import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 
 const MOCK_STOPS = [
-  { id: 1, name: "Lancaster Bus Station", code: "LAN001" },
-  { id: 2, name: "Lancaster Train Station", code: "LAN002" },
-  { id: 3, name: "Morecambe Bus Station", code: "MOR001" },
-  { id: 4, name: "Preston Bus Station", code: "PRE001" },
-  { id: 5, name: "Blackpool North Station", code: "BLK001" }
+  { id: 1, name: "Lancaster Bus Station", code: "LAN001", lat: 54.048, lon: -2.801, type: "stop" },
+  { id: 2, name: "Lancaster Train Station", code: "LAN002", lat: 54.049, lon: -2.807, type: "stop" },
+  { id: 3, name: "Morecambe Bus Station", code: "MOR001", lat: 54.069, lon: -2.869, type: "stop" },
+  { id: 4, name: "Preston Bus Station", code: "PRE001", lat: 53.761, lon: -2.703, type: "stop" },
+  { id: 5, name: "Blackpool North Station", code: "BLK001", lat: 53.816, lon: -3.050, type: "stop" }
 ];
 
 const MOCK_ROUTES = [
@@ -66,6 +66,17 @@ export default function HomePage() {
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates('alerts');
   const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState(MOCK_ROUTES); // Start with mock routes for instant display
+
+  const getCoordsFromOption = (option) => {
+    if (!option || typeof option === "string") return null;
+    const lat = option.lat ?? option.latitude;
+    const lon = option.lon ?? option.longitude;
+    if (typeof lat !== "number" || typeof lon !== "number") return null;
+    return { lat, lon };
+  };
+
+  const fromCoords = useMemo(() => getCoordsFromOption(selectedFromStop), [selectedFromStop]);
+  const toCoords = useMemo(() => getCoordsFromOption(selectedToStop), [selectedToStop]);
 
   useEffect(() => {
     if (!liveAlertUpdate) return;
@@ -141,12 +152,12 @@ export default function HomePage() {
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
   const handleSearch = async () => {
-    if (!selectedFromStop || !selectedToStop) return;
+    if (!fromCoords || !toCoords) return;
     setIsSearching(true);
     try {
       const journeys = await getJourneyPlans(
-        selectedFromStop?.code,
-        selectedToStop?.code,
+        fromCoords,
+        toCoords,
         new Date().toISOString()
       );
       setRoutes(Array.isArray(journeys) ? journeys : []);
@@ -267,15 +278,36 @@ export default function HomePage() {
               <Autocomplete
                 freeSolo
                 options={allStops.from}
-                getOptionLabel={(option) => typeof option === 'string' ? option : option.name}
+                getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || '')}
                 value={selectedFromStop}
                 onChange={(e, value) => {
+                  if (typeof value === 'string') {
+                    setSelectedFromStop(null);
+                    setFromLocation(value);
+                    return;
+                  }
                   setSelectedFromStop(value);
-                  if (typeof value === 'object') setFromLocation(value.name);
+                  if (value && typeof value === 'object') setFromLocation(value.name || '');
                 }}
                 inputValue={fromLocation}
                 onInputChange={(e, value) => setFromLocation(value)}
                 loading={fromLoading}
+                renderOption={(props, option) => {
+                  const label = typeof option === 'string' ? option : option.name;
+                  const optionType = typeof option === 'string' ? 'stop' : (option.type || 'stop');
+                  return (
+                    <Box component="li" {...props} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      {optionType === 'location' ? <MapPin size={16} /> : <Bus size={16} />}
+                      <Box sx={{ flexGrow: 1 }}>
+                        <Typography variant="body2" fontWeight={600}>{label}</Typography>
+                        {optionType === 'location' && (
+                          <Typography variant="caption" color="text.secondary">Location</Typography>
+                        )}
+                      </Box>
+                      <Chip label={optionType === 'location' ? 'Location' : 'Stop'} size="small" variant="outlined" />
+                    </Box>
+                  );
+                }}
                 renderInput={(params) => (
                   <TextField
                     {...params}
@@ -296,15 +328,36 @@ export default function HomePage() {
               <Autocomplete
                 freeSolo
                 options={allStops.to}
-                getOptionLabel={(option) => typeof option === 'string' ? option : option.name}
+                getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || '')}
                 value={selectedToStop}
                 onChange={(e, value) => {
+                  if (typeof value === 'string') {
+                    setSelectedToStop(null);
+                    setToLocation(value);
+                    return;
+                  }
                   setSelectedToStop(value);
-                  if (typeof value === 'object') setToLocation(value.name);
+                  if (value && typeof value === 'object') setToLocation(value.name || '');
                 }}
                 inputValue={toLocation}
                 onInputChange={(e, value) => setToLocation(value)}
                 loading={toLoading}
+                renderOption={(props, option) => {
+                  const label = typeof option === 'string' ? option : option.name;
+                  const optionType = typeof option === 'string' ? 'stop' : (option.type || 'stop');
+                  return (
+                    <Box component="li" {...props} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      {optionType === 'location' ? <MapPin size={16} /> : <Bus size={16} />}
+                      <Box sx={{ flexGrow: 1 }}>
+                        <Typography variant="body2" fontWeight={600}>{label}</Typography>
+                        {optionType === 'location' && (
+                          <Typography variant="caption" color="text.secondary">Location</Typography>
+                        )}
+                      </Box>
+                      <Chip label={optionType === 'location' ? 'Location' : 'Stop'} size="small" variant="outlined" />
+                    </Box>
+                  );
+                }}
                 renderInput={(params) => (
                   <TextField
                     {...params}
@@ -327,7 +380,7 @@ export default function HomePage() {
                 size="large" 
                 sx={{ alignSelf: "stretch" }}
                 onClick={handleSearch}
-                disabled={!selectedFromStop || !selectedToStop || isSearching}
+                disabled={!fromCoords || !toCoords || isSearching}
               >
                 {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
               </Button>
