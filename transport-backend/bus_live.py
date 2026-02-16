@@ -9,7 +9,7 @@ class BusLive:
 
     get_bus_live(lat, lon, urls=None, lat_tol=0.0003, lon_tol=0.0003)
 
-    Returns a list of tuples: (line_ref, destination_name, latitude, longitude)
+    Returns a list of tuples: (line_ref, destination_name, latitude, longitude, operator_name)
     Only vehicleactivity elements whose latitude/longitude fall inside the
     specified box around (lat, lon) are included.
     """
@@ -22,6 +22,16 @@ class BusLive:
         "https://transport.scc.lancs.ac.uk/bus/live/SCMY",
         "https://transport.scc.lancs.ac.uk/bus/live/NUTT",
     ]
+
+    # Mapping of operator codes to full names
+    OPERATOR_NAMES = {
+        "ARCT": "Archway Travel",
+        "BLAC": "Blackpool Transport",
+        "KLCO": "Kirkby Lonsdale Coach Hire",
+        "SCCU": "Stagecoach Cumbria & North Lancashire",
+        "SCMY": "Stagecoach Merseyside & South Lancashire",
+        "NUTT": "Transpora North West",
+    }
 
     def __init__(self, urls: Iterable[str] = None, timeout: Optional[float] = None):
         self.urls = list(urls) if urls else list(self.DEFAULT_URLS)
@@ -52,8 +62,8 @@ class BusLive:
         return (c.text or '').strip()
 
     def get_bus_live(self, lat: float, lon: float, urls: Iterable[str] = None,
-                     lat_tol: float = 0.0003, lon_tol: float = 0.0003) -> List[Tuple[str, str, float, float]]:
-        """Return nearby live vehicles as (line_ref, destination_name, lat, lon).
+                     lat_tol: float = 0.0003, lon_tol: float = 0.0003) -> List[Tuple[str, str, float, float, str]]:
+        """Return nearby live vehicles as (line_ref, destination_name, lat, lon, operator_name).
 
         lat, lon are the centre point; lat_tol/lon_tol define the half-widths of
         the allowed rectangle.
@@ -101,6 +111,11 @@ class BusLive:
                             self._get_text(mvj, 'destinationref') or
                             self._get_text(mvj, 'DestinationRef'))
 
+                    # parse operator reference and map to full name
+                    operator_ref = (self._get_text(mvj, 'operatorref') or
+                                    self._get_text(mvj, 'OperatorRef'))
+                    operator_name = self.OPERATOR_NAMES.get(operator_ref, operator_ref or 'Unknown')
+
                     # vehicle location may be nested under VehicleLocation element
                     lat_s = lon_s = ''
                     vl = None
@@ -123,7 +138,7 @@ class BusLive:
                         continue
 
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        results.append((line_ref, dest, lat_v, lon_v))
+                        results.append((line_ref, dest, lat_v, lon_v, operator_name))
 
         return results
 
@@ -169,8 +184,8 @@ def main():
 
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
-    for i, (line, dest, lat, lon) in enumerate(display_results):
-        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}")
+    for i, (line, dest, lat, lon, operator) in enumerate(display_results):
+        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}")
 
 
 if __name__ == "__main__":
