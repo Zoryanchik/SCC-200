@@ -18,7 +18,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Implement `/search/stops` endpoint (with tests).
 - [x] Implement `/bus/live/{operator}` endpoint (with tests).
 - [ ] Connect frontend bus live with backend using map center `latitude` and `longitude`.
-- [ ] Expand search to support any location (prompted), not just stations.
+- [x] Expand search to support any location (prompted), not just stations.
 - [ ] Align search UI and map on the same page; prioritize map locations.
 - [ ] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
@@ -43,6 +43,7 @@ This document contains the full, actionable task list (19 items) with implementa
 ## Completed
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
+- [x] Expand search to support any location (prompted), not just stations.
 
 ---
 
