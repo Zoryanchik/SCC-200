@@ -42,15 +42,28 @@ export const fetchBusTimes = async (stopCode) => {
 };
 
 /**
- * Fetch live bus locations for a given operator
- * @param {string} operatorCode - The operator code (e.g., 'stagecoach')
+ * Fetch live bus locations for a given operator, filtered by map center.
+ * @param {string} operatorCode - The operator code (e.g., 'SCCU')
+ * @param {Object} options - Optional lat/lon/latTol/lonTol for geo-filtering
+ * @param {number} [options.lat] - Center latitude
+ * @param {number} [options.lon] - Center longitude
+ * @param {number} [options.latTol=0.05] - Latitude tolerance (half-width)
+ * @param {number} [options.lonTol=0.05] - Longitude tolerance (half-width)
  * @returns {Promise<Array>} Array of bus location data
  */
-export const fetchLiveBusLocations = async (operatorCode) => {
+export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.05, lonTol = 0.05 } = {}) => {
   try {
-    const response = await fetch(
-      `${API_BASE_URL}/bus/live/${operatorCode}`
-    );
+    let url = `${API_BASE_URL}/bus/live/${operatorCode}`;
+    if (typeof lat === 'number' && typeof lon === 'number') {
+      const params = new URLSearchParams({
+        lat: String(lat),
+        lon: String(lon),
+        latTol: String(latTol),
+        lonTol: String(lonTol),
+      });
+      url += `?${params.toString()}`;
+    }
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }

@@ -1,5 +1,27 @@
 import { renderHook, act } from '@testing-library/react'
+import { vi } from 'vitest'
 import { useFavoriteRoutes } from '../useTransportData'
+
+vi.mock('../../services/transportApi', () => ({
+  fetchLiveBusLocations: vi.fn(),
+  fetchRailDepartures: vi.fn(),
+  fetchBusArrivals: vi.fn(),
+  searchStops: vi.fn(),
+  getJourneyPlans: vi.fn(),
+  fetchServiceAlerts: vi.fn(),
+  fetchPricing: vi.fn()
+}))
+
+vi.mock('../../services/liveUpdates', () => ({
+  liveUpdatesManager: {
+    connect: vi.fn().mockRejectedValue(new Error('not available')),
+    disconnect: vi.fn().mockResolvedValue(undefined),
+    subscribeToTrainMovements: vi.fn(),
+    subscribeToBusMovements: vi.fn(),
+    subscribeToAlerts: vi.fn(),
+    unsubscribe: vi.fn(),
+  }
+}))
 
 describe('useFavoriteRoutes', () => {
   beforeEach(() => {
