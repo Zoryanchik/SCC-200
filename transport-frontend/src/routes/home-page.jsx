@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useCallback, lazy, Suspense } from "react";
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
@@ -14,10 +14,12 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
-import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates } from "../hooks/useTransportData";
+import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
+
+const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
 const MOCK_STOPS = [
   { id: 1, name: "Lancaster Bus Station", code: "LAN001", lat: 54.048, lon: -2.801, type: "stop" },
@@ -29,26 +31,28 @@ const MOCK_STOPS = [
 
 const MOCK_ROUTES = [
   {
-    id: 1,
-    duration: "45 mins",
-    transfers: 1,
+    id: 1, duration: "45 mins", transfers: 1,
     steps: [
       { type: "walk", duration: "5 mins", to: "Lancaster Station" },
       { type: "train", route: "Northern", duration: "30 mins", from: "Lancaster", to: "Preston" },
       { type: "walk", duration: "10 mins", to: "Destination" }
     ],
-    price: "£5.20"
+    price: "5.20"
   },
   {
-    id: 2,
-    duration: "38 mins",
-    transfers: 0,
-    steps: [
-      { type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }
-    ],
-    price: "£3.80"
+    id: 2, duration: "38 mins", transfers: 0,
+    steps: [{ type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }],
+    price: "3.80"
   }
 ];
+
+const MOCK_MARKERS = [
+  { id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
+  { id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
+  { id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
+];
+
+const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
 
 export default function HomePage() {
   const [fromLocation, setFromLocation] = useState("");
@@ -59,13 +63,103 @@ export default function HomePage() {
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation);
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation);
-  
-  // Fetch real data from API
+
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
-  const { data: departures, loading: departuresLoading } = useLiveDepartures('LAN');
-  const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates('alerts');
+  const { data: departures, loading: departuresLoading } = useLiveDepartures("LAN");
+  const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
-  const [routes, setRoutes] = useState(MOCK_ROUTES); // Start with mock routes for instant display
+  const [routes, setRoutes] = useState(MOCK_ROUTES);
+
+  // ---- Map + live-bus state (merged from map-view-page) ----
+  const [markers, setMarkers] = useState(MOCK_MARKERS);
+  const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
+  const [openPopupId, setOpenPopupId] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+
+  /** Called by MapViewMap whenever the user finishes panning / zooming. */
+  const handleMoveEnd = useCallback(({ lat, lon }) => {
+    setMapCenter({ lat, lon });
+  }, []);
+
+  // Debounced live bus data tied to the current map center
+  const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations("SCCU", {
+    lat: mapCenter.lat,
+    lon: mapCenter.lon,
+    refreshInterval: 30000,
+    debounceMs: 800,
+  });
+  const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 30000);
+  const { data: liveBusUpdate } = useLiveUpdates("bus");
+
+  // Update markers when real bus API data arrives
+  useEffect(() => {
+    if (
+      (Array.isArray(busLocations) && busLocations.length > 0) ||
+      (Array.isArray(trainDepartures) && trainDepartures.length > 0)
+    ) {
+      const newMarkers = [];
+      let id = 1;
+      if (Array.isArray(busLocations)) {
+        busLocations.forEach((bus) => {
+          newMarkers.push({
+            id: id++,
+            position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
+            name: bus.name || "Bus " + (bus.id || ""),
+            type: "bus",
+            status: bus.status || "On time",
+            routeNumber: bus.routeNumber || bus.route,
+          });
+        });
+      }
+      if (Array.isArray(trainDepartures)) {
+        trainDepartures.forEach((train) => {
+          newMarkers.push({
+            id: id++,
+            position: [train.latitude || train.lat, train.longitude || train.lon],
+            name: train.station || train.name || "Train Station",
+            type: "train",
+            status: train.status || (train.delayMinutes ? "Delayed " + train.delayMinutes + " mins" : "On time"),
+            destination: train.destination,
+            departureTime: train.departureTime || train.scheduledTime,
+          });
+        });
+      }
+      setMarkers(newMarkers);
+    }
+  }, [busLocations, trainDepartures]);
+
+  // Merge live WebSocket bus updates into markers
+  useEffect(() => {
+    const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : liveBusUpdate ? [liveBusUpdate] : [];
+    const normalized = updates
+      .map((item) => {
+        const lat = item?.latitude ?? item?.lat;
+        const lon = item?.longitude ?? item?.lon;
+        if (typeof lat !== "number" || typeof lon !== "number") return null;
+        return {
+          id: item?.vehicleId || item?.id || "bus-" + lat + "-" + lon,
+          position: [lat, lon],
+          name: item?.name || ("Bus " + (item?.route || "")).trim(),
+          type: "bus",
+          status: item?.status || "On time",
+          routeNumber: item?.routeNumber || item?.route,
+        };
+      })
+      .filter(Boolean);
+    if (normalized.length === 0) return;
+    setMarkers((prev) => {
+      const next = new Map(prev.map((m) => [m.id, m]));
+      for (const item of normalized) next.set(item.id, { ...next.get(item.id), ...item });
+      return Array.from(next.values());
+    });
+  }, [liveBusUpdate]);
+
+  const filteredMarkers = useMemo(
+    () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
+    [markers, filters.showBuses, filters.showTrains]
+  );
+  // ---- end map state ----
 
   const getCoordsFromOption = (option) => {
     if (!option || typeof option === "string") return null;
@@ -83,20 +177,18 @@ export default function HomePage() {
     const updates = Array.isArray(liveAlertUpdate) ? liveAlertUpdate : [liveAlertUpdate];
     const normalized = updates
       .map((alert, idx) => ({
-        id: alert?.id || alert?.alertId || `${Date.now()}-${idx}`,
+        id: alert?.id || alert?.alertId || Date.now() + "-" + idx,
         severity: alert?.severity || alert?.level || "info",
-        message: alert?.message || alert?.description || alert?.text || "Service update"
+        message: alert?.message || alert?.description || alert?.text || "Service update",
       }))
       .filter((alert) => alert.message);
-
     if (normalized.length === 0) return;
-
     setLiveAlerts((prev) => {
       const merged = [...normalized, ...prev];
       const seen = new Set();
       const deduped = [];
       for (const item of merged) {
-        const key = `${item.severity}-${item.message}`;
+        const key = item.severity + "-" + item.message;
         if (seen.has(key)) continue;
         seen.add(key);
         deduped.push(item);
@@ -105,7 +197,6 @@ export default function HomePage() {
     });
   }, [liveAlertUpdate]);
 
-  // Transform departures data
   const liveDepartures = useMemo(() => {
     if (!Array.isArray(departures) || departures.length === 0) {
       return [
@@ -117,28 +208,24 @@ export default function HomePage() {
     return departures.slice(0, 3).map((dep, idx) => ({
       id: idx + 1,
       type: dep.type || "bus",
-      route: dep.routeNumber || dep.route || "—",
+      route: dep.routeNumber || dep.route || "\u2014",
       destination: dep.destination || dep.to || "Unknown",
-      time: dep.minutesToDeparture ? `${dep.minutesToDeparture} mins` : dep.time || "—",
-      status: dep.status || (dep.delayMinutes ? `Delayed ${dep.delayMinutes} mins` : "On time")
+      time: dep.minutesToDeparture ? dep.minutesToDeparture + " mins" : dep.time || "\u2014",
+      status: dep.status || (dep.delayMinutes ? "Delayed " + dep.delayMinutes + " mins" : "On time"),
     }));
   }, [departures]);
 
-  // Transform alerts data
   const alerts = useMemo(() => {
-    const apiAlerts = Array.isArray(serviceAlerts) && serviceAlerts.length > 0
-      ? serviceAlerts.slice(0, 3).map((alert, idx) => ({
-          id: alert?.id || idx + 1,
-          severity: alert?.severity || "info",
-          message: alert?.message || alert?.description || "Service update"
-        }))
-      : [];
-
+    const apiAlerts =
+      Array.isArray(serviceAlerts) && serviceAlerts.length > 0
+        ? serviceAlerts.slice(0, 3).map((alert, idx) => ({
+            id: alert?.id || idx + 1,
+            severity: alert?.severity || "info",
+            message: alert?.message || alert?.description || "Service update",
+          }))
+        : [];
     const combined = [...liveAlerts, ...apiAlerts];
-    if (combined.length > 0) {
-      return combined.slice(0, 3);
-    }
-
+    if (combined.length > 0) return combined.slice(0, 3);
     return [
       { id: 1, severity: "warning", message: "M6 delays between J33-J36: 15 mins" },
       { id: 2, severity: "info", message: "Bus route 2 diversion via King Street" },
@@ -146,8 +233,8 @@ export default function HomePage() {
   }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
-    const fromResults = fromLoading ? [] : (fromStopResults?.length ? fromStopResults : MOCK_STOPS);
-    const toResults = toLoading ? [] : (toStopResults?.length ? toStopResults : MOCK_STOPS);
+    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : MOCK_STOPS;
+    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : MOCK_STOPS;
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
@@ -155,14 +242,10 @@ export default function HomePage() {
     if (!fromCoords || !toCoords) return;
     setIsSearching(true);
     try {
-      const journeys = await getJourneyPlans(
-        fromCoords,
-        toCoords,
-        new Date().toISOString()
-      );
+      const journeys = await getJourneyPlans(fromCoords, toCoords, new Date().toISOString());
       setRoutes(Array.isArray(journeys) ? journeys : []);
     } catch (error) {
-      console.error('Journey search error:', error);
+      console.error("Journey search error:", error);
       setRoutes(MOCK_ROUTES);
     } finally {
       setIsSearching(false);
@@ -175,62 +258,132 @@ export default function HomePage() {
       fromName: selectedFromStop?.name,
       to: selectedToStop?.code,
       toName: selectedToStop?.name,
-      ...route
+      ...route,
     });
   };
 
   const isFavorited = (route) => {
-    return favorites.some(fav => 
-      fav.from === selectedFromStop?.code && 
-      fav.to === selectedToStop?.code && 
-      fav.id === route.id
+    return favorites.some(
+      (fav) => fav.from === selectedFromStop?.code && fav.to === selectedToStop?.code && fav.id === route.id
     );
   };
 
+  const MapFallback = () => (
+    <Skeleton variant="rounded" sx={{ width: "100%", height: { xs: 350, md: 450 } }} />
+  );
+
   return (
     <Stack spacing={{ xs: 2, md: 3 }}>
-      <Paper elevation={0} sx={{ 
-        p: { xs: 2.5, md: 3.5 }, 
-        background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
-        color: 'white',
-        borderRadius: '16px'
-      }}>
+      <Paper
+        elevation={0}
+        sx={{
+          p: { xs: 2.5, md: 3.5 },
+          background: "linear-gradient(135deg, #6366F1 0%, #EC4899 100%)",
+          color: "white",
+          borderRadius: "16px",
+        }}
+      >
         <Stack direction="row" spacing={1.5} alignItems="center">
           <Bus size={24} />
           <Typography variant="h5" fontWeight={700}>
             Dashboard
           </Typography>
-          <Chip 
-            label="Live" 
-            sx={{ 
-              fontWeight: 700,
-              backgroundColor: 'rgba(255,255,255,0.25)',
-              color: 'white'
-            }} 
-            size="small" 
+          <Chip
+            label="Live"
+            sx={{ fontWeight: 700, backgroundColor: "rgba(255,255,255,0.25)", color: "white" }}
+            size="small"
           />
         </Stack>
       </Paper>
 
-      <Paper elevation={0} sx={{ 
-        p: { xs: 2, md: 3 }, 
-        borderRadius: '16px',
-        border: '1px solid',
-        borderColor: 'divider',
-        background: 'transparent'
-      }}>
+      {/* ---- Inline live transport map ---- */}
+      <Paper
+        elevation={0}
+        sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
+      >
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
+          <MapPin size={20} color="#6366F1" />
+          <Typography variant="subtitle1" fontWeight={700}>
+            Live Transport Map
+          </Typography>
+        </Stack>
+
+        <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
+          <Box
+            data-testid="filter-buses"
+            onClick={() => setFilters((f) => ({ ...f, showBuses: !f.showBuses }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showBuses ? "#6366F1" : "transparent",
+              color: filters.showBuses ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Bus size={18} /> Buses {filteredMarkers.filter((m) => m.type === "bus").length}
+          </Box>
+          <Box
+            data-testid="filter-trains"
+            onClick={() => setFilters((f) => ({ ...f, showTrains: !f.showTrains }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showTrains ? "#10B981" : "transparent",
+              color: filters.showTrains ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
+          </Box>
+        </Stack>
+
+        <Suspense fallback={<MapFallback />}>
+          <Box sx={{ height: { xs: 350, md: 450 }, borderRadius: "12px", overflow: "hidden" }}>
+            <MapViewMap
+              filteredMarkers={filteredMarkers}
+              openPopupId={openPopupId}
+              onOpenPopup={setOpenPopupId}
+              onClosePopup={() => setOpenPopupId(null)}
+              userLocation={null}
+              nearestStop={null}
+              busLoading={busLoading}
+              trainLoading={trainLoading}
+              onMapReady={setMapInstance}
+              onMoveEnd={handleMoveEnd}
+            />
+          </Box>
+        </Suspense>
+      </Paper>
+
+      {/* ---- Alerts ---- */}
+      <Paper
+        elevation={0}
+        sx={{
+          p: { xs: 2, md: 3 },
+          borderRadius: "16px",
+          border: "1px solid",
+          borderColor: "divider",
+          background: "transparent",
+        }}
+      >
         <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
           <AlertCircle size={20} color="#EC4899" />
-          <Typography variant="subtitle1" fontWeight={700}>Service alerts</Typography>
-          {alertsConnected && (
-            <Chip
-              label="Live"
-              size="small"
-              color="primary"
-              variant="outlined"
-              sx={{ ml: 1 }}
-            />
-          )}
+          <Typography variant="subtitle1" fontWeight={700}>
+            Service alerts
+          </Typography>
+          {alertsConnected && <Chip label="Live" size="small" color="primary" variant="outlined" sx={{ ml: 1 }} />}
         </Stack>
         <Stack spacing={1.5}>
           {alertsLoading ? (
@@ -240,16 +393,15 @@ export default function HomePage() {
               ))}
             </Stack>
           ) : alerts.length > 0 ? (
-            alerts.map(alert => (
-              <Alert 
-                key={alert.id} 
-                severity={alert.severity === "warning" ? "warning" : "info"} 
+            alerts.map((alert) => (
+              <Alert
+                key={alert.id}
+                severity={alert.severity === "warning" ? "warning" : "info"}
                 variant="outlined"
-                sx={{ 
-                  borderRadius: '8px',
-                  backgroundColor: alert.severity === "warning" 
-                    ? 'rgba(245, 158, 11, 0.05)'
-                    : 'rgba(59, 130, 246, 0.05)'
+                sx={{
+                  borderRadius: "8px",
+                  backgroundColor:
+                    alert.severity === "warning" ? "rgba(245, 158, 11, 0.05)" : "rgba(59, 130, 246, 0.05)",
                 }}
               >
                 {alert.message}
@@ -265,46 +417,55 @@ export default function HomePage() {
 
       <Grid container spacing={{ xs: 2, md: 3 }}>
         <Grid item xs={12} md={6}>
-          <Paper elevation={0} sx={{ 
-            p: { xs: 2.5, md: 3.5 }, 
-            height: "100%",
-            borderRadius: '16px',
-            border: '1px solid',
-            borderColor: 'divider'
-          }}>
+          <Paper
+            elevation={0}
+            sx={{
+              p: { xs: 2.5, md: 3.5 },
+              height: "100%",
+              borderRadius: "16px",
+              border: "1px solid",
+              borderColor: "divider",
+            }}
+          >
             <Stack spacing={2.5}>
-              <Typography variant="h6" fontWeight={700}>Quick journey search</Typography>
-              
+              <Typography variant="h6" fontWeight={700}>
+                Quick journey search
+              </Typography>
+
               <Autocomplete
                 freeSolo
                 options={allStops.from}
-                getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || '')}
+                getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
                 value={selectedFromStop}
                 onChange={(e, value) => {
-                  if (typeof value === 'string') {
+                  if (typeof value === "string") {
                     setSelectedFromStop(null);
                     setFromLocation(value);
                     return;
                   }
                   setSelectedFromStop(value);
-                  if (value && typeof value === 'object') setFromLocation(value.name || '');
+                  if (value && typeof value === "object") setFromLocation(value.name || "");
                 }}
                 inputValue={fromLocation}
                 onInputChange={(e, value) => setFromLocation(value)}
                 loading={fromLoading}
                 renderOption={(props, option) => {
-                  const label = typeof option === 'string' ? option : option.name;
-                  const optionType = typeof option === 'string' ? 'stop' : (option.type || 'stop');
+                  const label = typeof option === "string" ? option : option.name;
+                  const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                   return (
-                    <Box component="li" {...props} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      {optionType === 'location' ? <MapPin size={16} /> : <Bus size={16} />}
+                    <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
                       <Box sx={{ flexGrow: 1 }}>
-                        <Typography variant="body2" fontWeight={600}>{label}</Typography>
-                        {optionType === 'location' && (
-                          <Typography variant="caption" color="text.secondary">Location</Typography>
+                        <Typography variant="body2" fontWeight={600}>
+                          {label}
+                        </Typography>
+                        {optionType === "location" && (
+                          <Typography variant="caption" color="text.secondary">
+                            Location
+                          </Typography>
                         )}
                       </Box>
-                      <Chip label={optionType === 'location' ? 'Location' : 'Stop'} size="small" variant="outlined" />
+                      <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
                     </Box>
                   );
                 }}
@@ -319,7 +480,11 @@ export default function HomePage() {
                           <MapPin size={18} />
                         </InputAdornment>
                       ),
-                      endAdornment: fromLoading ? <CircularProgress color="inherit" size={20} /> : params.InputProps.endAdornment
+                      endAdornment: fromLoading ? (
+                        <CircularProgress color="inherit" size={20} />
+                      ) : (
+                        params.InputProps.endAdornment
+                      ),
                     }}
                   />
                 )}
@@ -328,33 +493,37 @@ export default function HomePage() {
               <Autocomplete
                 freeSolo
                 options={allStops.to}
-                getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || '')}
+                getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
                 value={selectedToStop}
                 onChange={(e, value) => {
-                  if (typeof value === 'string') {
+                  if (typeof value === "string") {
                     setSelectedToStop(null);
                     setToLocation(value);
                     return;
                   }
                   setSelectedToStop(value);
-                  if (value && typeof value === 'object') setToLocation(value.name || '');
+                  if (value && typeof value === "object") setToLocation(value.name || "");
                 }}
                 inputValue={toLocation}
                 onInputChange={(e, value) => setToLocation(value)}
                 loading={toLoading}
                 renderOption={(props, option) => {
-                  const label = typeof option === 'string' ? option : option.name;
-                  const optionType = typeof option === 'string' ? 'stop' : (option.type || 'stop');
+                  const label = typeof option === "string" ? option : option.name;
+                  const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                   return (
-                    <Box component="li" {...props} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      {optionType === 'location' ? <MapPin size={16} /> : <Bus size={16} />}
+                    <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
                       <Box sx={{ flexGrow: 1 }}>
-                        <Typography variant="body2" fontWeight={600}>{label}</Typography>
-                        {optionType === 'location' && (
-                          <Typography variant="caption" color="text.secondary">Location</Typography>
+                        <Typography variant="body2" fontWeight={600}>
+                          {label}
+                        </Typography>
+                        {optionType === "location" && (
+                          <Typography variant="caption" color="text.secondary">
+                            Location
+                          </Typography>
                         )}
                       </Box>
-                      <Chip label={optionType === 'location' ? 'Location' : 'Stop'} size="small" variant="outlined" />
+                      <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
                     </Box>
                   );
                 }}
@@ -369,15 +538,19 @@ export default function HomePage() {
                           <NavIcon size={18} />
                         </InputAdornment>
                       ),
-                      endAdornment: toLoading ? <CircularProgress color="inherit" size={20} /> : params.InputProps.endAdornment
+                      endAdornment: toLoading ? (
+                        <CircularProgress color="inherit" size={20} />
+                      ) : (
+                        params.InputProps.endAdornment
+                      ),
                     }}
                   />
                 )}
               />
 
-              <Button 
-                variant="contained" 
-                size="large" 
+              <Button
+                variant="contained"
+                size="large"
                 sx={{ alignSelf: "stretch" }}
                 onClick={handleSearch}
                 disabled={!fromCoords || !toCoords || isSearching}
@@ -401,13 +574,13 @@ export default function HomePage() {
                         sx={{
                           p: 1,
                           borderRadius: 1,
-                          backgroundColor: '#f5f5f5',
-                          cursor: 'pointer',
-                          '&:hover': { backgroundColor: '#eeeeee' }
+                          backgroundColor: "#f5f5f5",
+                          cursor: "pointer",
+                          "&:hover": { backgroundColor: "#eeeeee" },
                         }}
                       >
                         <Typography variant="caption" fontWeight={600}>
-                          {fav.fromName} → {fav.toName}
+                          {fav.fromName} \u2192 {fav.toName}
                         </Typography>
                       </Box>
                     ))}
@@ -423,7 +596,9 @@ export default function HomePage() {
             <Stack spacing={2}>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Clock size={18} />
-                <Typography variant="h6" fontWeight={700}>Nearby departures</Typography>
+                <Typography variant="h6" fontWeight={700}>
+                  Nearby departures
+                </Typography>
               </Stack>
               <Stack spacing={1.5}>
                 {departuresLoading ? (
@@ -433,9 +608,7 @@ export default function HomePage() {
                     ))}
                   </Stack>
                 ) : (
-                  liveDepartures.map(dep => (
-                    <DepartureCard key={dep.id} departure={dep} />
-                  ))
+                  liveDepartures.map((dep) => <DepartureCard key={dep.id} departure={dep} />)
                 )}
               </Stack>
             </Stack>
@@ -445,22 +618,19 @@ export default function HomePage() {
 
       <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
         <Stack spacing={2}>
-          <Typography variant="h6" fontWeight={700}>Suggested routes</Typography>
+          <Typography variant="h6" fontWeight={700}>
+            Suggested routes
+          </Typography>
           {isSearching ? (
             <Stack spacing={2}>
-              {[1, 2, 3].map(i => (
+              {[1, 2, 3].map((i) => (
                 <Skeleton key={i} height={120} variant="rounded" />
               ))}
             </Stack>
           ) : routes.length > 0 ? (
             <Stack spacing={2}>
-              {routes.map(route => (
-                <RouteCard 
-                  key={route.id} 
-                  route={route}
-                  onSave={handleSaveRoute}
-                  isSaved={isFavorited(route)}
-                />
+              {routes.map((route) => (
+                <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
               ))}
             </Stack>
           ) : (
