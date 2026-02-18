@@ -1,4 +1,4 @@
----
+﻿---
 
 ### File 2: `transport-backend/TRANSPORT_BACKEND_MY_TASKS.md` (Task List)
 
@@ -27,59 +27,22 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Implement `/rail/departures/{station}` endpoint.
 - [ ] Implement `/pricing` endpoint (distance-based stub ok).
 - [ ] Implement `/weather` and `/alerts` endpoints.
-- [ ] Add WebSocket or STOMP live updates adapter. **[Anton]**
-- [ ] Ensure multi-leg route geometry export for map polylines. **[Anton]**
-- [ ] Add station classification (P27) and filtering (P28). **[Anton]**
-- [ ] Add OSRM integration with walking fallback. **[Anton]**
-- [ ] Update frontend services and hooks to match API responses. **[Jamie]**
-- [ ] Add developer docs and Docker compose. **[Jamie]**
+- [ ] Add WebSocket or STOMP live updates adapter.
+- [ ] Ensure multi-leg route geometry export for map polylines.
+- [ ] Add station classification (P27) and filtering (P28).
+- [ ] Add OSRM integration with walking fallback.
+- [ ] Update frontend services and hooks to match API responses.
+- [ ] Add developer docs and Docker compose.
 
 ## Low Priority
 - [ ] Ingest and parse train data to populate `TrainData`.
-- [ ] Harden production config (CORS, auth, rate limits). **[Jamie]**
-- [ ] Add performance caching for routing. **[John]**
-- [ ] Add analytics and frequent routes endpoint. **[Jamie]**
+- [ ] Harden production config (CORS, auth, rate limits).
+- [ ] Add performance caching for routing.
+- [ ] Add analytics and frequent routes endpoint.
 
 ## Completed
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
-- [x] Expand search to support any location (prompted), not just stations.
-
----
-
-## Work Assignments
-
-### John — Backend API Endpoints (5 tasks)
-Focus: Building out the remaining REST endpoints and data layer.
-
-| # | Task | Priority |
-|---|------|----------|
-| 5 | Implement /rail/departures/{station} endpoint | Medium |
-| 6 | Implement /pricing endpoint (distance-based stub) | Medium |
-| 7 | Implement /weather and /alerts endpoints | Medium |
-| 12 | Ingest and parse train data to populate TrainData | Low |
-| 17 | Add performance caching for routing | Low |
-
-### Anton — Real-time Systems, Routing & Geometry (5 tasks)
-Focus: Live data, routing infrastructure, and station features.
-
-| # | Task | Priority |
-|---|------|----------|
-| — | Review mock FastAPI frontend for integration cues | High |
-| 8 | Add WebSocket/STOMP live updates adapter | Medium |
-| 9 | Ensure multi-leg route geometry export for map polylines | Medium |
-| 10+11 | Add station classification (P27) and filtering (P28) | Medium |
-| 13 | Add OSRM integration with walking fallback | Medium |
-
-### Jamie — Frontend Integration & DevOps (4 tasks)
-Focus: Connecting the frontend to the new backend, docs, and hardening.
-
-| # | Task | Priority |
-|---|------|----------|
-| 15 | Update frontend services and hooks to match API responses | Medium |
-| 14 | Add developer docs and Docker compose | Medium |
-| 16 | Harden production config (CORS, auth, rate limits) | Low |
-| 18 | Add analytics and frequent routes endpoint | Low |
 
 ---
 
