@@ -31,8 +31,8 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Ensure multi-leg route geometry export for map polylines.
 - [ ] Add station classification (P27) and filtering (P28).
 - [ ] Add OSRM integration with walking fallback.
-- [ ] Update frontend services and hooks to match API responses.  **[JJ]**
-- [ ] Add developer docs and Docker compose. **[JJ]**
+- [X] Update frontend services and hooks to match API responses.  
+- [X] Add developer docs and Docker compose. 
 
 ## Low Priority
 - [ ] Ingest and parse train data to populate `TrainData`.
