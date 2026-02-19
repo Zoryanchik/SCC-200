@@ -1,4 +1,4 @@
----
+﻿---
 
 ### File 2: `transport-backend/TRANSPORT_BACKEND_MY_TASKS.md` (Task List)
 
@@ -20,7 +20,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [x] Expand search to support any location (prompted), not just stations.
 - [x] Align search UI and map on the same page; prioritize map locations.
-- [ ] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
+- [x] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 
 ## Medium Priority
@@ -44,6 +44,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 - [x] Expand search to support any location (prompted), not just stations.
+- [x] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
 
 ---
 
