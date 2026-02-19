@@ -160,7 +160,14 @@ export default function HomePage() {
         toCoords,
         new Date().toISOString()
       );
-      setRoutes(Array.isArray(journeys) ? journeys : []);
+      // `getJourneyPlans` may return either an array (legacy) or a normalized object { success, legs }
+      if (Array.isArray(journeys)) {
+        setRoutes(journeys);
+      } else if (journeys && typeof journeys === 'object') {
+        setRoutes(Array.isArray(journeys.legs) ? journeys.legs : []);
+      } else {
+        setRoutes([]);
+      }
     } catch (error) {
       console.error('Journey search error:', error);
       setRoutes(MOCK_ROUTES);
@@ -177,6 +184,30 @@ export default function HomePage() {
       toName: selectedToStop?.name,
       ...route
     });
+  };
+
+  const formatRouteForCard = (raw) => {
+    // If already in card-friendly shape, return as-is
+    if (raw && (raw.duration || raw.steps)) return raw;
+    // Backend `leg` shape: { type, from_stop, to_stop, duration_seconds, departure_time, arrival_time, line_name, transfers }
+    const durationSeconds = raw?.duration_seconds ?? null;
+    const duration = durationSeconds != null ? `${Math.round(durationSeconds / 60)} mins` : (raw?.arrival_time || raw?.departure_time || '—');
+    const transfers = raw?.transfers ?? 0;
+    const steps = [];
+    if (raw) {
+      if (raw.type === 'walking' || raw.type === 'walk') {
+        steps.push({ type: 'walk', duration: duration, to: raw.to_stop?.name || raw.to_stop?.lat ? 'Destination' : '' });
+      } else {
+        steps.push({ type: raw.type || 'transit', route: raw.line_name || raw.lineRef || raw.line || '', duration: duration, from: raw.from_stop?.name || '', to: raw.to_stop?.name || '' });
+      }
+    }
+    return {
+      id: raw?.id ?? `${raw?.type}-${Math.random()}`,
+      duration,
+      transfers,
+      steps,
+      price: raw?.price ?? null,
+    };
   };
 
   const isFavorited = (route) => {
@@ -456,8 +487,8 @@ export default function HomePage() {
             <Stack spacing={2}>
               {routes.map(route => (
                 <RouteCard 
-                  key={route.id} 
-                  route={route}
+                  key={route.id}
+                  route={formatRouteForCard(route)}
                   onSave={handleSaveRoute}
                   isSaved={isFavorited(route)}
                 />
