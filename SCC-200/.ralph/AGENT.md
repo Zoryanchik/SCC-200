@@ -52,7 +52,8 @@ cargo run
 - POST /journey/plan returns {success, legs[], meta, routeGeometries[]} — legs have from_stop/to_stop with name/lat/lon
 - routeGeometries coords use [lat, lon] order (NOT GeoJSON [lon, lat])
 - /search/stops returns mixed type:"stop" and type:"location" results; locations have atco_code: null
-- Frontend API_BASE_URL (transportApi.js) still points at external host; needs env config for local backend
+- Frontend API_BASE_URL now reads from VITE_API_BASE_URL env variable; defaults to http://localhost:8000 for local dev
+- .env sets local default, .env.production sets https://transport.scc.lancs.ac.uk for builds, .env.local is gitignored for overrides
 - 5 endpoints called by frontend are not yet implemented: /rail/departures, /weather, /alerts, /pricing, /bus/times
 - Integration schemas documented in transport-backend/INTEGRATION_SCHEMAS.md
 

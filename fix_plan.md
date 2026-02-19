@@ -22,7 +22,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Align search UI and map on the same page; prioritize map locations.
 - [x] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
-- [ ] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend.
+- [x] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend.
 - [ ] **P2:** Implement 6 missing backend endpoints called by frontend (rail, weather, alerts, pricing, bus times, bus arrivals).
 
 ## Medium Priority
