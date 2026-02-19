@@ -292,7 +292,7 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 
 ### Key Integration Notes
 
-1. **API_BASE_URL mismatch**: Frontend `transportApi.js` uses `https://transport.scc.lancs.ac.uk` as base URL. For local dev, this must be changed to `http://localhost:8000` or a proxy configured in vite.
+1. **API_BASE_URL mismatch**: Frontend `transportApi.js` uses `https://transport.scc.lancs.ac.uk` as base URL. For local dev, this must be changed to `http://localhost:5005` or a proxy configured in vite.
 2. **`/bus/live/{operator}` response shape**: Backend returns `{line, destination, lat, lon}`. Frontend mock tests already use this shape — confirmed aligned.
 3. **`/search/stops` mixed types**: Backend returns both `type: "stop"` and `type: "location"` results. Frontend tests already handle this.
 4. **`/journey/plan` geometry format**: `routeGeometries[*].coords` uses `[lat, lon]` pairs (not GeoJSON `[lon, lat]`). Frontend polyline rendering must respect this order.
