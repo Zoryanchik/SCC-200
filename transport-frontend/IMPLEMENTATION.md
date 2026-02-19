@@ -252,9 +252,14 @@ function MyComponent() {
 ## 🔧 Configuration
 
 ### API Base URL
-Edit [src/services/transportApi.js](src/services/transportApi.js):
-```javascript
-const API_BASE_URL = 'http://transport.scc.lancs.ac.uk';
+Set the `VITE_API_BASE_URL` environment variable (see `.env.example`).
+Defaults to `http://localhost:8000` for local development.
+```bash
+# .env (local dev default)
+VITE_API_BASE_URL=http://localhost:8000
+
+# .env.production (production build)
+VITE_API_BASE_URL=https://transport.scc.lancs.ac.uk
 ```
 
 ### WebSocket Broker

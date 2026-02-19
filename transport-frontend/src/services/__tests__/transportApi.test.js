@@ -499,3 +499,86 @@ describe('fetchBusArrivals — GET /bus/arrivals/{stopCode}', () => {
     await expect(fetchBusArrivals('INVALID')).rejects.toThrow('404');
   });
 });
+
+// ---- API_BASE_URL environment variable configuration ----------------------
+
+/**
+ * These tests verify that API_BASE_URL is driven by the VITE_API_BASE_URL
+ * environment variable (P1 fix).  Because the constant is evaluated at
+ * module-load time, each test resets the module registry and dynamically
+ * re-imports transportApi to pick up the stubbed env value.
+ */
+describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  test('defaults to http://localhost:8000 when VITE_API_BASE_URL is empty', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', '');
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
+
+    const { searchStops: search } = await import('../transportApi');
+    await search('test');
+
+    const url = fetch.mock.calls[0][0];
+    expect(url).toBe('http://localhost:8000/search/stops?q=test');
+  });
+
+  test('defaults to http://localhost:8000 when VITE_API_BASE_URL is undefined', async () => {
+    // In vitest, deleting an env key is done by setting it to undefined
+    vi.stubEnv('VITE_API_BASE_URL', undefined);
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
+
+    const { searchStops: search } = await import('../transportApi');
+    await search('test');
+
+    const url = fetch.mock.calls[0][0];
+    expect(url).toContain('http://localhost:8000/');
+  });
+
+  test('uses VITE_API_BASE_URL when set to a custom URL', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://custom-api.example.com');
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
+
+    const { searchStops: search } = await import('../transportApi');
+    await search('test');
+
+    const url = fetch.mock.calls[0][0];
+    expect(url).toBe('https://custom-api.example.com/search/stops?q=test');
+  });
+
+  test('uses production URL when VITE_API_BASE_URL points to external host', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://transport.scc.lancs.ac.uk');
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
+
+    const { searchStops: search } = await import('../transportApi');
+    await search('test');
+
+    const url = fetch.mock.calls[0][0];
+    expect(url).toBe('https://transport.scc.lancs.ac.uk/search/stops?q=test');
+  });
+
+  test('all API functions use the configured base URL', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'http://my-backend:9000');
+    vi.resetModules();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
+
+    const mod = await import('../transportApi');
+
+    // Call several functions and verify each hits the configured host
+    await mod.searchStops('x');
+    await mod.fetchBusTimes('STOP1');
+    await mod.fetchRailDepartures('LAN');
+    await mod.fetchServiceAlerts();
+
+    for (const call of fetch.mock.calls) {
+      const url = typeof call[0] === 'string' ? call[0] : call[0].toString();
+      expect(url).toMatch(/^http:\/\/my-backend:9000\//);
+    }
+  });
+});
