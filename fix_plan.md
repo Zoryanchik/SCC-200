@@ -20,7 +20,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [x] Expand search to support any location (prompted), not just stations.
 - [x] Align search UI and map on the same page; prioritize map locations.
-- [x] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
+ - [x] Review mock FastAPI frontend (`api.py`, http://localhost:5050) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 - [x] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend.
 - [ ] **P2:** Implement 6 missing backend endpoints called by frontend (rail, weather, alerts, pricing, bus times, bus arrivals).
@@ -51,7 +51,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 - [x] Expand search to support any location (prompted), not just stations.
-- [x] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
+ - [x] Review mock FastAPI frontend (`api.py`, http://localhost:5050) for integration cues.
 
 ---
 
@@ -60,7 +60,7 @@ This document contains the full, actionable task list (19 items) with implementa
 ### P1 — API_BASE_URL hardcoded to external host (BLOCKING)
 - **File:** `transport-frontend/src/services/transportApi.js`
 - **Problem:** `API_BASE_URL` is `https://transport.scc.lancs.ac.uk`. The React frontend never hits `localhost:8000` during local dev. All calls go to the university server.
-- **Fix:** Switch to an env variable (`VITE_API_BASE_URL`) with a `.env` default of `http://localhost:8000`, or configure a Vite proxy.
+- **Fix:** Switch to an env variable (`VITE_API_BASE_URL`) with a `.env` default of `http://localhost:5050`, or configure a Vite proxy.
 
 ### P2 — 6 frontend endpoints have no backend implementation
 The frontend calls these endpoints, but `api.py` does not define them. They will 404.
@@ -148,7 +148,7 @@ Focus: Connecting the frontend to the new backend, docs, and hardening.
 ## Recent requests (2026-02-16)
 - Tried to connect backend bus live with frontend but it did not work well. The function takes `latitude` and `longitude` as parameters (current map center). Request: modify frontend to adapt. Note: not familiar with frontend.
 - Search bar should support any location search (ideally with prompt), not just stations. Suggests putting the map on the same page as search bar and prioritizing locations on the map.
-- Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:8000. Note: check overall project in case something changed.
+- Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:5050. Note: check overall project in case something changed.
 
 ---
 

@@ -514,7 +514,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     vi.resetModules();
   });
 
-  test('defaults to http://localhost:8000 when VITE_API_BASE_URL is empty', async () => {
+  test('defaults to http://localhost:5050 when VITE_API_BASE_URL is empty', async () => {
     vi.stubEnv('VITE_API_BASE_URL', '');
     vi.resetModules();
     vi.stubGlobal('fetch', vi.fn().mockReturnValue(jsonResponse([])));
@@ -523,7 +523,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     await search('test');
 
     const url = fetch.mock.calls[0][0];
-    expect(url).toBe('http://localhost:8000/search/stops?q=test');
+    expect(url).toBe('http://localhost:5050/search/stops?q=test');
   });
 
   test('defaults to http://localhost:8000 when VITE_API_BASE_URL is undefined', async () => {
@@ -536,7 +536,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     await search('test');
 
     const url = fetch.mock.calls[0][0];
-    expect(url).toContain('http://localhost:8000/');
+    expect(url).toContain('http://localhost:5050/');
   });
 
   test('uses VITE_API_BASE_URL when set to a custom URL', async () => {

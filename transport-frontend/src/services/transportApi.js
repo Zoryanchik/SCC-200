@@ -4,11 +4,11 @@
  * Based on Lancaster University transport API feeds
  *
  * API_BASE_URL is read from the VITE_API_BASE_URL environment variable.
- * Defaults to http://localhost:8000 for local development.
+ * Defaults to http://localhost:5050 for local development.
  * Set via .env, .env.production, or .env.local (see .env.example).
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
 
 const normalizeStopLocation = (stop) => {
   if (!stop || typeof stop !== 'object') return null;

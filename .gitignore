@@ -65,3 +65,4 @@ venv/
 
 # Nested project copy (now tracked)
 # SCC-200/
+transport-backend/cache/

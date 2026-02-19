@@ -253,10 +253,10 @@ function MyComponent() {
 
 ### API Base URL
 Set the `VITE_API_BASE_URL` environment variable (see `.env.example`).
-Defaults to `http://localhost:8000` for local development.
+Defaults to `http://localhost:5050` for local development.
 ```bash
 # .env (local dev default)
-VITE_API_BASE_URL=http://localhost:8000
+VITE_API_BASE_URL=http://localhost:5050
 
 # .env.production (production build)
 VITE_API_BASE_URL=https://transport.scc.lancs.ac.uk

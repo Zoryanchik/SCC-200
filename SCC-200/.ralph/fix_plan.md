@@ -20,7 +20,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Connect frontend bus live with backend using map center `latitude` and `longitude`.
 - [x] Expand search to support any location (prompted), not just stations.
 - [x] Align search UI and map on the same page; prioritize map locations.
-- [ ] Review mock FastAPI frontend (`api.py`, http://localhost:8000) for integration cues.
+- [ ] Review mock FastAPI frontend (`api.py`, http://localhost:5050) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 
 ## Medium Priority
@@ -49,7 +49,7 @@ This document contains the full, actionable task list (19 items) with implementa
 ## Recent requests (2026-02-16)
 - Tried to connect backend bus live with frontend but it did not work well. The function takes `latitude` and `longitude` as parameters (current map center). Request: modify frontend to adapt. Note: not familiar with frontend.
 - Search bar should support any location search (ideally with prompt), not just stations. Suggests putting the map on the same page as search bar and prioritizing locations on the map.
-- Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:8000. Note: check overall project in case something changed.
+- Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:5050. Note: check overall project in case something changed.
 
 ---
 
