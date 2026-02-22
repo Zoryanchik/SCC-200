@@ -12,22 +12,8 @@ IMAGE=transport-backend:local
 CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
-echo "Checking for image $IMAGE..."
-if ! podman image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "Image not found locally — building $IMAGE (this may take a minute)..."
-  podman build -t "$IMAGE" .
-else
-  echo "Image found locally: $IMAGE"
-fi
-
-if podman ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-  echo "Stopping and removing existing container $CONTAINER..."
-  podman stop "$CONTAINER" || true
-  podman rm "$CONTAINER" || true
-fi
-
-echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"
-podman run -d --name "$CONTAINER" -p 5050:5050 -v "$CACHE_DIR":/app/cache "$IMAGE"
+echo "Starting backend container (build if needed)..."
+"$HERE/start_container.sh"
 
 echo "Waiting for /health to respond (timeout ~90s)..."
 for i in {1..30}; do
