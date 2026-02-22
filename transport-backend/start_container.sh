@@ -7,30 +7,43 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 
+
 IMAGE=transport-backend:local
 CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
 mkdir -p "$CACHE_DIR"
 
+# Detect container runtime: prefer podman, fall back to docker
+if command -v podman >/dev/null 2>&1; then
+  RUNTIME=podman
+elif command -v docker >/dev/null 2>&1; then
+  RUNTIME=docker
+else
+  echo "Error: neither podman nor docker is installed or on PATH." >&2
+  exit 2
+fi
+
+echo "Using container runtime: $RUNTIME"
+
 echo "Checking for image $IMAGE..."
-if ! podman image inspect "$IMAGE" >/dev/null 2>&1; then
+if ! $RUNTIME image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Image not found locally — building $IMAGE (this may take a minute)..."
-  podman build -t "$IMAGE" .
+  $RUNTIME build -t "$IMAGE" .
 else
   echo "Image found locally: $IMAGE"
 fi
 
-if podman ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
   echo "Stopping and removing existing container $CONTAINER..."
-  podman stop "$CONTAINER" || true
-  podman rm "$CONTAINER" || true
+  $RUNTIME stop "$CONTAINER" || true
+  $RUNTIME rm "$CONTAINER" || true
 fi
 
 echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"
-podman run -d --name "$CONTAINER" -p 5050:5050 -v "$CACHE_DIR":/app/cache "$IMAGE"
+$RUNTIME run -d --name "$CONTAINER" -p 5050:5050 -v "$CACHE_DIR":/app/cache "$IMAGE"
 
-echo "Container started (id: $(podman ps -l --format '{{.ID}}'))."
+echo "Container started (id: $($RUNTIME ps -l --format '{{.ID}}'))."
 #!/usr/bin/env bash
 set -euo pipefail
 

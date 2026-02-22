@@ -13,6 +13,19 @@ CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
 echo "Starting backend container (build if needed)..."
+
+# Detect container runtime for portability (prefer podman, fall back to docker)
+if command -v podman >/dev/null 2>&1; then
+  RUNTIME=podman
+elif command -v docker >/dev/null 2>&1; then
+  RUNTIME=docker
+else
+  echo "Error: neither podman nor docker is installed or on PATH." >&2
+  exit 2
+fi
+
+echo "Using container runtime: $RUNTIME"
+
 "$HERE/start_container.sh"
 
 echo "Waiting for /health to respond (timeout ~90s)..."
