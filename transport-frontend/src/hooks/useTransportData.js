@@ -241,15 +241,8 @@ export const useJourneyPlans = (fromStop, toStop, departureTime) => {
         ),
         { retries: 1, baseDelay: 600 }
       );
-      // `getJourneyPlans` now returns a normalized object: { success, legs, meta, routeGeometries, error }
-      if (result && result.success === false) {
-        const err = new Error(result.error || 'Journey planning failed');
-        setError(err);
-        setRoutes(Array.isArray(result.legs) ? result.legs : []);
-      } else {
-        setRoutes(Array.isArray(result?.legs) ? result.legs : []);
-        setError(null);
-      }
+      setRoutes(result);
+      setError(null);
     } catch (err) {
       setError(err);
       console.error('Error fetching journey plans:', err);

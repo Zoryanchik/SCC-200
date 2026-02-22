@@ -7,7 +7,7 @@ from typing import List, Tuple, Iterable, Optional
 class BusLive:
     """Fetch live vehicle positions from one or more SCCI feeds.
 
-    get_bus_live(lat, lon, urls=None, lat_tol=0.0003, lon_tol=0.0003)
+    get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01)
 
     Returns a list of tuples: (line_ref, destination_name, latitude, longitude, operator_name)
     Only vehicleactivity elements whose latitude/longitude fall inside the
@@ -62,7 +62,7 @@ class BusLive:
         return (c.text or '').strip()
 
     def get_bus_live(self, lat: float, lon: float, urls: Iterable[str] = None,
-                     lat_tol: float = 0.0003, lon_tol: float = 0.0003) -> List[Tuple[str, str, float, float, str]]:
+                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple[str, str, float, float, str]]:
         """Return nearby live vehicles as (line_ref, destination_name, lat, lon, operator_name).
 
         lat, lon are the centre point; lat_tol/lon_tol define the half-widths of

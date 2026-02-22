@@ -54,7 +54,7 @@ class RaptorRouter:
         best_final_stop = None
         best_total_arrival = math.inf
         for stop, walk_time in final_stops.items():
-            if reach_stops[stop]["arrival_time"] < math.inf:
+            if reach_stops[stop]["type"] != "walking" and reach_stops[stop]["arrival_time"] < math.inf:
                 total_arrival = reach_stops[stop]["arrival_time"] + walk_time
                 if total_arrival < best_total_arrival:
                     best_total_arrival = total_arrival
