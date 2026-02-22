@@ -98,6 +98,36 @@ export class RAPTORRouter {
   }
 
   /**
+   * Return a normalized route planner response matching backend-like shape.
+   * { success: true, legs: [...], meta: {...}, routeGeometries: [] }
+   */
+  async findRouteNormalized(fromStopId, toStopId, departureTime, maxTransfers = 3) {
+    const routes = this.findRoute(fromStopId, toStopId, departureTime, maxTransfers);
+    // Convert each simple route summary into a single-leg style to be compatible
+    // with backend `legs` shape. This is a best-effort mapping.
+    const legs = routes.map((r, idx) => ({
+      id: r.id ?? `route-${idx}`,
+      type: 'transit',
+      from_stop: null,
+      to_stop: null,
+      duration_seconds: typeof r.duration === 'number' ? r.duration : (r.durationMinutes ? r.durationMinutes * 60 : null),
+      departure_time: r.departureTime ?? null,
+      arrival_time: r.arrivalTime ?? null,
+      transfers: r.transfers ?? null,
+      raw: r,
+    }));
+
+    return {
+      success: true,
+      legs,
+      meta: {
+        requested: { from: fromStopId, to: toStopId, departureTime, maxTransfers },
+      },
+      routeGeometries: [],
+    };
+  }
+
+  /**
    * Find the next departure on a route from a given stop after a certain time
    * @private
    */

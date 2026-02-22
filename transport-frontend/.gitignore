@@ -12,10 +12,6 @@ dist
 dist-ssr
 *.local
 
-# Local environment overrides (may contain secrets)
-.env.local
-.env.*.local
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

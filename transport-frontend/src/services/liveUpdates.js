@@ -68,8 +68,44 @@ class LiveUpdatesManager {
     try {
       const subscription = this.client.subscribe(topic, (message) => {
         try {
-          const data = JSON.parse(message.body);
-          callback(data);
+          const raw = JSON.parse(message.body);
+          const normalize = (item) => {
+            if (!item || typeof item !== 'object') return null;
+            // Alerts
+            if (item.alertId || item.id || item.title || item.description) {
+              return {
+                id: item.id ?? item.alertId ?? `${Date.now()}-${Math.random()}`,
+                severity: item.severity ?? item.level ?? 'info',
+                message: item.message ?? item.description ?? item.text ?? item.title ?? null,
+                raw: item,
+              };
+            }
+            // Bus/train movement
+            const line = item.line ?? item.line_ref ?? item.lineRef ?? null;
+            const destination = item.destination ?? item.dest ?? item.to ?? null;
+            const lat = item.lat ?? item.latitude ?? item.lat_v ?? null;
+            const lon = item.lon ?? item.longitude ?? item.lon_v ?? null;
+            if (line || destination || lat || lon) {
+              return {
+                id: item.id ?? `${line ?? 'veh'}-${Date.now()}-${Math.random()}`,
+                type: item.type ?? (item.routeType ? item.routeType : 'vehicle'),
+                line: line,
+                destination: destination,
+                latitude: typeof lat === 'number' ? lat : (lat ? Number(lat) : null),
+                longitude: typeof lon === 'number' ? lon : (lon ? Number(lon) : null),
+                raw: item,
+              };
+            }
+            // Fallback — return raw
+            return { raw: item };
+          };
+
+          if (Array.isArray(raw)) {
+            const normalized = raw.map(normalize).filter(Boolean);
+            callback(normalized);
+          } else {
+            callback(normalize(raw));
+          }
         } catch (error) {
           console.error('Error parsing message:', error);
           callback(message.body);
