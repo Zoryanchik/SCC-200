@@ -55,24 +55,24 @@ fi
 # Allow override to run container with host network (useful on Linux when
 # you want the container to access host services directly). Set USE_HOST_NETWORK=1
 # in the environment to enable.
-RUN_OPTS=(--name "$CONTAINER")
+RUN_FLAGS="--name $CONTAINER"
 
 # Forward OSRM_URL into the container if set on the host so the backend
 # inside the container can probe the correct OSRM endpoint.
-ENV_OPTS=()
+ENV_FLAGS=""
 if [ -n "${OSRM_URL:-}" ]; then
   echo "Forwarding OSRM_URL into container: $OSRM_URL"
-  ENV_OPTS+=( -e "OSRM_URL=$OSRM_URL" )
+  ENV_FLAGS="-e OSRM_URL=$OSRM_URL"
 fi
 if [ "${USE_HOST_NETWORK:-0}" = "1" ]; then
   echo "Using host networking for container (USE_HOST_NETWORK=1)"
-  RUN_OPTS+=(--network host)
+  RUN_FLAGS="$RUN_FLAGS --network host"
   # When using host networking we don't publish ports
 else
-  RUN_OPTS+=(-p 5050:5050)
+  RUN_FLAGS="$RUN_FLAGS -p 5050:5050"
 fi
 
 echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"
-$RUNTIME run -d "${RUN_OPTS[@]}" "${ENV_OPTS[@]}" -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE"
+$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE"
 
 echo "Container started (id: $($RUNTIME ps -l --format '{{.ID}}' 2>/dev/null))."
