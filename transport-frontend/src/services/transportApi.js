@@ -2,14 +2,18 @@
  * Transport API Service
  * Handles all API calls to the transport backend
  * Based on Lancaster University transport API feeds
+ *
+ * API_BASE_URL is read from the VITE_API_BASE_URL environment variable.
+ * Defaults to http://localhost:5050 for local development.
+ * Set via .env, .env.production, or .env.local (see .env.example).
  */
 
-const API_BASE_URL = (import.meta?.env?.VITE_API_BASE_URL) || 'https://transport.scc.lancs.ac.uk';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
 
 const normalizeStopLocation = (stop) => {
   if (!stop || typeof stop !== 'object') return null;
-  const lat = stop.lat ?? stop.latitude ?? stop.latitute ?? null;
-  const lon = stop.lon ?? stop.longitude ?? stop.long ?? null;
+  const lat = stop.lat ?? stop.latitude;
+  const lon = stop.lon ?? stop.longitude;
   if (typeof lat !== 'number' || typeof lon !== 'number') return null;
   return { lat, lon };
 };
@@ -51,56 +55,23 @@ export const fetchBusTimes = async (stopCode) => {
  * @param {number} [options.lonTol=0.05] - Longitude tolerance (half-width)
  * @returns {Promise<Array>} Array of bus location data
  */
-const _normalizeBus = (raw, operatorHint = null) => {
-  if (!raw || typeof raw !== 'object') return null;
-  // Handle variations from GET /bus/live and POST /api/bus_live
-  const lineRef = raw.line_ref ?? raw.line ?? raw.lineRef ?? null;
-  const destination = raw.destination ?? raw.dest ?? raw.to ?? null;
-  const latitude = raw.latitude ?? raw.lat ?? raw.lat_v ?? raw.latitude ?? null;
-  const longitude = raw.longitude ?? raw.lon ?? raw.lon_v ?? raw.longitude ?? null;
-  const operator = raw.operator ?? operatorHint ?? null;
-  if (lineRef == null || latitude == null || longitude == null) return null;
-  return {
-    lineRef,
-    destination,
-    latitude,
-    longitude,
-    operator,
-  };
-};
-
-export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.0003, lonTol = 0.0003 } = {}) => {
+export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.05, lonTol = 0.05 } = {}) => {
   try {
-    // If we have lat/lon prefer the POST /api/bus_live endpoint (returns richer data)
+    let url = `${API_BASE_URL}/bus/live/${operatorCode}`;
     if (typeof lat === 'number' && typeof lon === 'number') {
-      const resp = await fetch(`${API_BASE_URL}/api/bus_live`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lat, lon, lat_tol: latTol, lon_tol: lonTol }),
+      const params = new URLSearchParams({
+        lat: String(lat),
+        lon: String(lon),
+        latTol: String(latTol),
+        lonTol: String(lonTol),
       });
-      if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
-      const payload = await resp.json();
-      if (payload == null) return [];
-      // payload shape: { success: true/false, buses: [..], error }
-      if (payload.success === false) {
-        const err = new Error(payload.error || 'bus_live error');
-        err.code = 'API_ERROR';
-        throw err;
-      }
-      const arr = Array.isArray(payload.buses) ? payload.buses : [];
-      return arr.map((b) => _normalizeBus(b)).filter(Boolean);
+      url += `?${params.toString()}`;
     }
-
-    // Fallback: GET /bus/live/{operator}
-    const url = `${API_BASE_URL}/bus/live/${operatorCode || 'all'}`;
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
-    const raw = await response.json();
-    // raw is expected to be an array of { line, destination, lat, lon }
-    if (!Array.isArray(raw)) return [];
-    return raw.map((r) => _normalizeBus(r, operatorCode)).filter(Boolean);
+    return await response.json();
   } catch (error) {
     console.error('Error fetching bus locations:', error);
     throw error;

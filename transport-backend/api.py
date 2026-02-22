@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from urllib.request import Request as UrllibRequest, urlopen
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -95,6 +96,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
+
+# -- CORS ------------------------------------------------------------------
+"""app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)"""
 
 # -”€-”€ Health check -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
@@ -287,42 +302,56 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 def format_route_text(route_result, merged):
+    """Format a human-readable route summary.
+
+    This function intentionally uses plain ASCII text for separators
+    and markers to avoid encoding / mojibake issues when printed
+    to terminals or returned over the API.
+    """
     from time_utils import seconds_to_time
+    import math
+
     if not route_result:
         return "\n  No route found."
-    # If route_result only contains '_meta', treat as only walking
-    if set(route_result.keys()) == {'_meta'}:
-        meta = route_result['_meta']
-        start_point = meta.get('start_point', ())
-        destination = meta.get('destination', ())
-        start_walk = meta.get('start_walk_seconds', 0)
-        end_walk = meta.get('end_walk_seconds', 0)
-        total_arrival = meta.get('total_arrival')
+
+    # Walking-only route (only _meta present)
+    if set(route_result.keys()) == {"_meta"}:
+        meta = route_result["_meta"]
+        start_point = meta.get("start_point", ())
+        destination = meta.get("destination", ())
+        start_walk = meta.get("start_walk_seconds", 0)
+        end_walk = meta.get("end_walk_seconds", 0)
+        total_arrival = meta.get("total_arrival")
+
         out = []
-        out.append(f"\n{'='*60}")
-        out.append(f"  Route found -€” only walking")
-        out.append(f"{'='*60}")
+        out.append("\n" + "=" * 60)
+        out.append("  Route found - only walking")
+        out.append("=" * 60)
         if start_point:
-            out.append(f"\n  -—Ž Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
+            out.append(f"\n  - Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
         walk_min = (start_walk + end_walk) / 60
-        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({start_walk + end_walk}s)")
+        out.append(f"    - Walk {walk_min:.0f} min ({start_walk + end_walk}s)")
         if destination:
-            out.append(f"  -—Ž Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
+            out.append(f"  - Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
         if total_arrival is not None:
-            from time_utils import seconds_to_time
             out.append(f"    Arrive at {seconds_to_time(int(total_arrival))}")
-        out.append(f"\n{'='*60}")
+        out.append("\n" + "=" * 60)
         return "\n".join(out)
-    meta = route_result.pop('_meta', {})
-    start_walk = meta.get('start_walk_seconds', 0)
-    end_walk   = meta.get('end_walk_seconds', 0)
-    total_arrival = meta.get('total_arrival')
-    start_point = meta.get('start_point', ())
-    destination = meta.get('destination', ())
-    all_prevs = {info["prev_stop"] for info in route_result.values() if info["prev_stop"] is not None}
+
+    # Multi-stop transit route
+    meta = route_result.pop("_meta", {})
+    start_walk = meta.get("start_walk_seconds", 0)
+    end_walk = meta.get("end_walk_seconds", 0)
+    total_arrival = meta.get("total_arrival")
+    start_point = meta.get("start_point", ())
+    destination = meta.get("destination", ())
+
+    all_prevs = {info["prev_stop"] for info in route_result.values()
+                 if info["prev_stop"] is not None}
     destinations = [s for s in route_result if s not in all_prevs]
     if not destinations:
         destinations = list(route_result.keys())
+
     stop = destinations[0]
     visited = set()
     legs = []
@@ -331,37 +360,41 @@ def format_route_text(route_result, merged):
         legs.append((stop, route_result[stop]))
         stop = route_result[stop]["prev_stop"]
     legs.reverse()
+
     out = []
-    out.append(f"\n{'='*60}")
-    out.append(f"  Route found -€” {len(legs)} stop(s)")
-    out.append(f"{'='*60}")
+    out.append("\n" + "=" * 60)
+    out.append(f"  Route found - {len(legs)} stop(s)")
+    out.append("=" * 60)
+
     if start_point and legs:
         first_arrival = legs[0][1]["arrival_time"]
         depart_time = first_arrival - start_walk
-        out.append(f"\n  -—Ž Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
+        out.append(f"\n  - Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
         out.append(f"    Depart at {seconds_to_time(int(depart_time))}")
         walk_min = start_walk / 60
-        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({start_walk}s)")
+        out.append(f"    - Walk {walk_min:.0f} min ({start_walk}s)")
+
     for i, (stop_int, info) in enumerate(legs):
         stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
-        transport = info["type"] if info["type"] else "origin"
+        transport = info.get("type") or "origin"
+
         if i == 0:
-            out.append(f"  -— {stop_label}")
+            out.append(f"  - {stop_label}")
             out.append(f"    Arrive at {arrival}")
         else:
             if transport == "walking":
                 prev_stop_int, prev_info = legs[i - 1]
                 walk_secs = info["arrival_time"] - prev_info["arrival_time"]
                 walk_min = walk_secs / 60
-                out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({int(walk_secs)}s)")
+                out.append(f"    - Walk {walk_min:.0f} min ({int(walk_secs)}s)")
             else:
                 jinfo = info.get("journey_info")
                 line_name = jinfo.get("line_name", "") if jinfo else ""
                 if line_name and ":" in line_name:
                     line_name = line_name.split(":")[-1]
                 j_origin = info.get("journey_origin", "")
-                j_dest   = info.get("journey_destination", "")
+                j_dest = info.get("journey_destination", "")
                 board_dep = info.get("board_departure")
                 desc_parts = []
                 if transport:
@@ -373,16 +406,19 @@ def format_route_text(route_result, merged):
                 if board_dep is not None:
                     desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
                 desc = " - ".join(desc_parts) if desc_parts else transport
-                out.append(f"    -”‚  {desc}")
-            out.append(f"  -— {stop_label}")
+                out.append(f"    - {desc}")
+
+            out.append(f"  - {stop_label}")
             out.append(f"    Arrive at {arrival}")
+
     if destination and legs:
         walk_min = end_walk / 60
-        out.append(f"    -”‚  ðŸš¶ Walk {walk_min:.0f} min ({end_walk}s)")
-        out.append(f"  -—Ž Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
+        out.append(f"    - Walk {walk_min:.0f} min ({end_walk}s)")
+        out.append(f"  - Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
         if total_arrival is not None:
             out.append(f"    Arrive at {seconds_to_time(int(total_arrival))}")
-    out.append(f"\n{'='*60}")
+
+    out.append("\n" + "=" * 60)
     return "\n".join(out)
 
 
@@ -715,7 +751,7 @@ async def get_route(request: RouteRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="localhost", port=8000)
+    uvicorn.run(app, host="localhost", port=5005)
 
 
 

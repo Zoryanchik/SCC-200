@@ -60,9 +60,9 @@ venv/
 .venv/
 
 # Ralph / Claude agent artifacts
-.ralph/
+/.ralph/
 .claude/
 
-# Backend cache: large data files used only for local dev. Kept out of repo
-# Remove the following comment if you want these files tracked again.
-transport-backend/cache/*
+# Nested project copy (now tracked)
+# SCC-200/
+transport-backend/cache/

@@ -1,6 +1,10 @@
+first start podman virtual environment:
+./run_backend.sh
+
 to run mock frontend:
-run api.py
-go to http://localhost:8000
+python3 api.py
+
+go to http://localhost:5005
 
 
 
