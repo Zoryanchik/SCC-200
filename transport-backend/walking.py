@@ -5,6 +5,8 @@ import os
 import time
 import shutil
 import subprocess
+import ssl
+import platform
 from urllib.parse import urlparse
 
 
@@ -73,15 +75,20 @@ def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
         except Exception:
             stored_mod = None
 
-    # Probe remote Last-Modified header (HEAD preferred)
+    # Probe remote Last-Modified header (HEAD preferred). Some hosts may
+    # present certificates that our environment can't verify; mirror bus_loader
+    # which disables verification for these toolkit downloads.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     try:
         req = urllib.request.Request(source_url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
     except Exception:
         # If HEAD fails, try GET headers only
         try:
-            with urllib.request.urlopen(source_url, timeout=timeout) as resp:
+            with urllib.request.urlopen(source_url, timeout=timeout, context=ctx) as resp:
                 remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
         except Exception:
             remote_mod = None
@@ -100,7 +107,10 @@ def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
     # Download PBF
     try:
         print(f"    Downloading {source_url} -> {pbf_path}")
-        urllib.request.urlretrieve(source_url, pbf_path)
+        # Stream download with the same insecure SSL context as above
+        req = urllib.request.Request(source_url)
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp, open(pbf_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
     except Exception as e:
         print(f"    ✗ Failed to download OSRM PBF: {e}")
         return None
@@ -115,13 +125,47 @@ def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
         print("    ✗ Neither podman nor docker is available to build OSRM files.")
         return None
 
+    # Ensure we have a foot profile available in the cache and mount it
+    # into the container at /data/foot.lua. This avoids relying on the
+    # image providing a profile at /opt/profiles/foot.lua which is not
+    # consistent across image builds/architectures.
+    profile_local = os.path.join(osrm_dir, "foot.lua")
+    if not os.path.exists(profile_local):
+        print("    Downloading OSRM foot profile into cache...")
+        try:
+            profile_url = os.environ.get(
+                "OSRM_PROFILE_URL",
+                "https://raw.githubusercontent.com/Project-OSRM/osrm-backend/master/profiles/foot.lua",
+            )
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(profile_url)
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp, open(profile_local, "wb") as out:
+                shutil.copyfileobj(resp, out)
+        except Exception as e:
+            print(f"    ✗ Failed to download foot profile: {e}")
+            # Continue — the build will likely fail, but we don't want to
+            # raise here and stop the whole startup sequence.
+
     # Run osrm-extract, osrm-partition, osrm-customize in container
+    # Mount cache_dir as /data so we can reference the PBF and profile
     vol = f"{osrm_dir}:/data"
-    profile_path = "/opt/profiles/foot.lua"
+    profile_path = "/data/foot.lua"
+
+    # Detect host architecture; on arm64 hosts pull/run the linux/amd64 image
+    # where possible (Docker/Podman support image emulation). This avoids
+    # "image platform does not match the expected platform" errors on Apple
+    # Silicon or other arm64 hosts by explicitly requesting the amd64 image.
+    arch = platform.machine().lower()
+    PLATFORM_ARGS = []
+    if arch in ("arm64", "aarch64"):
+        # Use the --platform flag supported by Docker and recent Podman
+        PLATFORM_ARGS = ["--platform", "linux/amd64"]
     commands = [
-        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-extract", "-p", profile_path, f"/data/{pbf_name}"],
-        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-partition", f"/data/{base_name}.osrm"],
-        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-customize", f"/data/{base_name}.osrm"],
+        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-extract", "-p", profile_path, f"/data/{pbf_name}"],
+        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-partition", f"/data/{base_name}.osrm"],
+        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-customize", f"/data/{base_name}.osrm"],
     ]
 
     for cmd in commands:
