@@ -1,6 +1,11 @@
 import json
 import math
 import urllib.request
+import os
+import time
+import shutil
+import subprocess
+from urllib.parse import urlparse
 
 
 class Walking:
@@ -28,6 +33,115 @@ class Walking:
         self._coords = stop_coords              # {stop_int: (lat, lon)}
         self._osrm = osrm_base
         self._max = max_walk_seconds
+
+
+def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
+    """Ensure OSRM dataset exists in cache_dir/osrm.
+
+    - Downloads the OSM PBF from source_url (defaults to GB extract) into
+      cache_dir/osrm/ and builds .osrm files using the official
+      osrm/osrm-backend image (requires docker or podman available).
+    - Uses a small meta file to avoid rebuilding unless the remote source
+      reports a changed Last-Modified header or the built files are missing.
+
+    Returns the path to the built .osrm prefix (e.g. /.../osrm/great-britain-latest)
+    or None if build was skipped/failed.
+    """
+    # Default to Geofabrik Great Britain PBF (changeable by caller)
+    if source_url is None:
+        source_url = "https://download.geofabrik.de/europe/great-britain-latest.osm.pbf"
+
+    osrm_dir = os.path.join(cache_dir, "osrm")
+    os.makedirs(osrm_dir, exist_ok=True)
+
+    parsed = urlparse(source_url)
+    pbf_name = os.path.basename(parsed.path)
+    if not pbf_name:
+        raise ValueError("Invalid source_url for OSRM dataset")
+    pbf_path = os.path.join(osrm_dir, pbf_name)
+
+    base_name = os.path.splitext(pbf_name)[0]
+    osrm_prefix = os.path.join(osrm_dir, base_name)
+
+    meta_path = os.path.join(osrm_dir, "meta.json")
+    stored_mod = None
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf8") as fh:
+                m = json.load(fh)
+                stored_mod = m.get("modified")
+        except Exception:
+            stored_mod = None
+
+    # Probe remote Last-Modified header (HEAD preferred)
+    try:
+        req = urllib.request.Request(source_url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
+    except Exception:
+        # If HEAD fails, try GET headers only
+        try:
+            with urllib.request.urlopen(source_url, timeout=timeout) as resp:
+                remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
+        except Exception:
+            remote_mod = None
+
+    need_download = False
+    if not os.path.exists(osrm_prefix + ".osrm"):
+        need_download = True
+    elif remote_mod and stored_mod != remote_mod:
+        need_download = True
+
+    if not need_download:
+        return osrm_prefix
+
+    print("  OSRM dataset missing or updated — (re)building OSRM data...")
+
+    # Download PBF
+    try:
+        print(f"    Downloading {source_url} -> {pbf_path}")
+        urllib.request.urlretrieve(source_url, pbf_path)
+    except Exception as e:
+        print(f"    ✗ Failed to download OSRM PBF: {e}")
+        return None
+
+    # Find container runtime
+    runtime = None
+    for r in ("podman", "docker"):
+        if shutil.which(r):
+            runtime = r
+            break
+    if runtime is None:
+        print("    ✗ Neither podman nor docker is available to build OSRM files.")
+        return None
+
+    # Run osrm-extract, osrm-partition, osrm-customize in container
+    vol = f"{osrm_dir}:/data"
+    profile_path = "/opt/profiles/foot.lua"
+    commands = [
+        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-extract", "-p", profile_path, f"/data/{pbf_name}"],
+        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-partition", f"/data/{base_name}.osrm"],
+        [runtime, "run", "--rm", "-v", vol, "osrm/osrm-backend", "osrm-customize", f"/data/{base_name}.osrm"],
+    ]
+
+    for cmd in commands:
+        print("    "+" ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"    ✗ OSRM build step failed: {e}")
+            return None
+
+    # Update meta
+    try:
+        meta = {"source_url": source_url, "modified": remote_mod, "built": int(time.time())}
+        with open(meta_path, "w", encoding="utf8") as fh:
+            json.dump(meta, fh)
+    except Exception:
+        pass
+
+    print("    ✓ OSRM build complete")
+    return osrm_prefix
 
     # ── transfers between transit stops (precomputed) ────────────
 

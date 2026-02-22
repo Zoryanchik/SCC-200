@@ -63,6 +63,15 @@ def initialize_base():
 
     import urllib.request as _ur
     osrm_ok = False
+    # Attempt to ensure OSRM dataset is available in cache (downloads/builds
+    # the .osrm files if missing). This uses docker/podman to run the
+    # osrm-backend image and may take time on first run.
+    try:
+        from walking import ensure_osrm_dataset
+        ensure_osrm_dataset(CACHE_DIR)
+    except Exception:
+        # If anything goes wrong, continue and allow the fallback behaviour.
+        pass
     # Allow the OSRM endpoint to be overridden by env var so containers can
     # address an OSRM sidecar by name (e.g. http://osrm:5000) or use host
     # networking. Default remains the historical localhost:5001 for host runs.
