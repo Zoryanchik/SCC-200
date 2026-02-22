@@ -63,19 +63,31 @@ def initialize_base():
 
     import urllib.request as _ur
     osrm_ok = False
+    # Allow the OSRM endpoint to be overridden by env var so containers can
+    # address an OSRM sidecar by name (e.g. http://osrm:5000) or use host
+    # networking. Default remains the historical localhost:5001 for host runs.
+    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5001")
     try:
-        _r = _ur.urlopen("http://localhost:5001/nearest/v1/foot/0,0", timeout=3)
+        probe_url = OSRM_URL.rstrip("/") + "/nearest/v1/foot/0,0"
+        _r = _ur.urlopen(probe_url, timeout=3)
         _r.close()
         osrm_ok = True
     except Exception:
         pass
 
     if not osrm_ok:
-        print("  ⚠  OSRM not reachable at http://localhost:5001")
+        print(f"  ⚠  OSRM not reachable at {OSRM_URL}")
         print("     Walking transfers will be unavailable.")
-        print("     To enable, start OSRM with a foot profile:")
+        print("     To enable, run an OSRM server and ensure the backend can reach it.")
+        print("     Examples:")
+        print("       # Run OSRM on the host (backend running on host will reach it):")
         print("       docker run -d -p 5001:5000 -v /path/to/data:/data \\")
         print("         osrm/osrm-backend osrm-routed --algorithm mld /data/nw-england.osrm")
+        print("       # Run OSRM as a separate container and point backend to it:")
+        print("       docker network create scc-net || true")
+        print("       docker run -d --name osrm --network scc-net osrm/osrm-backend \\")
+        print("         osrm-routed --algorithm mld /data/nw-england.osrm")
+        print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5000")
 
     if data_changed:
         loader.clear_walking_transfers()
