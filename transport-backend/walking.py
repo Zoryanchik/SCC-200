@@ -1,13 +1,6 @@
 import json
 import math
 import urllib.request
-import os
-import time
-import shutil
-import subprocess
-import ssl
-import platform
-from urllib.parse import urlparse
 
 
 class Walking:
@@ -35,157 +28,6 @@ class Walking:
         self._coords = stop_coords              # {stop_int: (lat, lon)}
         self._osrm = osrm_base
         self._max = max_walk_seconds
-
-
-def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
-    """Ensure OSRM dataset exists in cache_dir/osrm.
-
-    - Downloads the OSM PBF from source_url (defaults to GB extract) into
-      cache_dir/osrm/ and builds .osrm files using the official
-      osrm/osrm-backend image (requires docker or podman available).
-    - Uses a small meta file to avoid rebuilding unless the remote source
-      reports a changed Last-Modified header or the built files are missing.
-
-    Returns the path to the built .osrm prefix (e.g. /.../osrm/great-britain-latest)
-    or None if build was skipped/failed.
-    """
-    # Default to Geofabrik Great Britain PBF (changeable by caller)
-    if source_url is None:
-        source_url = "https://download.geofabrik.de/europe/great-britain-latest.osm.pbf"
-
-    osrm_dir = os.path.join(cache_dir, "osrm")
-    os.makedirs(osrm_dir, exist_ok=True)
-
-    parsed = urlparse(source_url)
-    pbf_name = os.path.basename(parsed.path)
-    if not pbf_name:
-        raise ValueError("Invalid source_url for OSRM dataset")
-    pbf_path = os.path.join(osrm_dir, pbf_name)
-
-    base_name = os.path.splitext(pbf_name)[0]
-    osrm_prefix = os.path.join(osrm_dir, base_name)
-
-    meta_path = os.path.join(osrm_dir, "meta.json")
-    stored_mod = None
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf8") as fh:
-                m = json.load(fh)
-                stored_mod = m.get("modified")
-        except Exception:
-            stored_mod = None
-
-    # Probe remote Last-Modified header (HEAD preferred). Some hosts may
-    # present certificates that our environment can't verify; mirror bus_loader
-    # which disables verification for these toolkit downloads.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    try:
-        req = urllib.request.Request(source_url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
-    except Exception:
-        # If HEAD fails, try GET headers only
-        try:
-            with urllib.request.urlopen(source_url, timeout=timeout, context=ctx) as resp:
-                remote_mod = resp.headers.get("Last-Modified") or resp.headers.get("ETag")
-        except Exception:
-            remote_mod = None
-
-    need_download = False
-    if not os.path.exists(osrm_prefix + ".osrm"):
-        need_download = True
-    elif remote_mod and stored_mod != remote_mod:
-        need_download = True
-
-    if not need_download:
-        return osrm_prefix
-
-    print("  OSRM dataset missing or updated — (re)building OSRM data...")
-
-    # Download PBF
-    try:
-        print(f"    Downloading {source_url} -> {pbf_path}")
-        # Stream download with the same insecure SSL context as above
-        req = urllib.request.Request(source_url)
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp, open(pbf_path, "wb") as out:
-            shutil.copyfileobj(resp, out)
-    except Exception as e:
-        print(f"    ✗ Failed to download OSRM PBF: {e}")
-        return None
-
-    # Find container runtime
-    runtime = None
-    for r in ("podman", "docker"):
-        if shutil.which(r):
-            runtime = r
-            break
-    if runtime is None:
-        print("    ✗ Neither podman nor docker is available to build OSRM files.")
-        return None
-
-    # Ensure we have a foot profile available in the cache and mount it
-    # into the container at /data/foot.lua. This avoids relying on the
-    # image providing a profile at /opt/profiles/foot.lua which is not
-    # consistent across image builds/architectures.
-    profile_local = os.path.join(osrm_dir, "foot.lua")
-    if not os.path.exists(profile_local):
-        print("    Downloading OSRM foot profile into cache...")
-        try:
-            profile_url = os.environ.get(
-                "OSRM_PROFILE_URL",
-                "https://raw.githubusercontent.com/Project-OSRM/osrm-backend/master/profiles/foot.lua",
-            )
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            req = urllib.request.Request(profile_url)
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp, open(profile_local, "wb") as out:
-                shutil.copyfileobj(resp, out)
-        except Exception as e:
-            print(f"    ✗ Failed to download foot profile: {e}")
-            # Continue — the build will likely fail, but we don't want to
-            # raise here and stop the whole startup sequence.
-
-    # Run osrm-extract, osrm-partition, osrm-customize in container
-    # Mount cache_dir as /data so we can reference the PBF and profile
-    vol = f"{osrm_dir}:/data"
-    profile_path = "/data/foot.lua"
-
-    # Detect host architecture; on arm64 hosts pull/run the linux/amd64 image
-    # where possible (Docker/Podman support image emulation). This avoids
-    # "image platform does not match the expected platform" errors on Apple
-    # Silicon or other arm64 hosts by explicitly requesting the amd64 image.
-    arch = platform.machine().lower()
-    PLATFORM_ARGS = []
-    if arch in ("arm64", "aarch64"):
-        # Use the --platform flag supported by Docker and recent Podman
-        PLATFORM_ARGS = ["--platform", "linux/amd64"]
-    commands = [
-        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-extract", "-p", profile_path, f"/data/{pbf_name}"],
-        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-partition", f"/data/{base_name}.osrm"],
-        [runtime, "run", *PLATFORM_ARGS, "--rm", "-v", vol, "osrm/osrm-backend", "osrm-customize", f"/data/{base_name}.osrm"],
-    ]
-
-    for cmd in commands:
-        print("    "+" ".join(cmd))
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"    ✗ OSRM build step failed: {e}")
-            return None
-
-    # Update meta
-    try:
-        meta = {"source_url": source_url, "modified": remote_mod, "built": int(time.time())}
-        with open(meta_path, "w", encoding="utf8") as fh:
-            json.dump(meta, fh)
-    except Exception:
-        pass
-
-    print("    ✓ OSRM build complete")
-    return osrm_prefix
 
     # ── transfers between transit stops (precomputed) ────────────
 
@@ -220,8 +62,6 @@ def ensure_osrm_dataset(cache_dir, source_url=None, timeout=30):
         # 2. Build OSRM /table request: source = user location,
         #    destinations = candidate stops
 
-        # 2. Build OSRM /table request: source = user location,
-        #    destinations = candidate stops
         coords_parts = [f"{lon},{lat}"]
         for s in candidates:
             slat, slon = self._coords[s]
