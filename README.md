@@ -33,6 +33,17 @@ This project addresses fragmented information across multiple transport operator
 - All AI-generated code must be clearly identified
 - Security audits against NCSC Software Security Code of Practice required
 - User testing requires SCC Ethics Committee approval
- - The backend expects an OSRM routed server at http://localhost:5321 by default (override with the OSRM_URL environment variable). The repository includes a Lancashire extract for local routing tests and the helper scripts default to that PBF. When running OSRM in a container map host port 5321 to container port 5000 (e.g. `-p 5321:5000`).
+- The backend expects an OSRM routed server at `http://localhost:5321` by default
+	(override with the `OSRM_URL` environment variable). For local testing the
+	repository includes a Lancashire extract and helper scripts that default to
+	that PBF. The canonical local data directory is `transport-backend/osrm/data`.
+
+	A helper script is available at `transport-backend/osrm/run_osrm.sh` which
+	downloads a PBF, prepares the OSRM files, and starts `osrm-routed`. The
+	helper uses Docker by default; if you prefer Podman, either run the
+	container commands under Podman or edit the script to use `podman`. When
+	running OSRM in a container map host port `5321` to the container port
+	`5321` (for example `-p 5321:5321` or `-p 5321:5000` depending on the image
+	configuration).
 
 For detailed project specifications, see [PROJECT_BRAIN.md](PROJECT_BRAIN.md).

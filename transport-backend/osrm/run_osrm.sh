@@ -5,7 +5,9 @@ set -euo pipefail
 # Defaults: downloads the provided URL and runs osrm on host port 5321
 
 PBF_URL_DEFAULT="https://download.geofabrik.de/europe/united-kingdom/england/lancashire-latest.osm.pbf"
-DATA_DIR_DEFAULT="./data"
+# Default data dir: directory next to this script (transport-backend/osrm/data)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR_DEFAULT="$SCRIPT_DIR/data"
 PORT_DEFAULT=5321
 
 PBF_URL="${1:-$PBF_URL_DEFAULT}"
@@ -43,18 +45,18 @@ else
   echo "PBF already exists at $PBF_PATH, skipping download."
 fi
 
-DOCKER_IMAGE="osrm/osrm-backend:latest"
+DOCKER_IMAGE="docker.io/osrm/osrm-backend:latest"
 
 echo "Step 1: osrm-extract (creates $NAME.osrm)"
 if [ ! -f "$DATA_DIR/$NAME.osrm" ]; then
-  docker run --rm -t -v "$PWD/$DATA_DIR":/data "$DOCKER_IMAGE" osrm-extract -p /opt/car.lua /data/"$BASE_NAME"
+  docker run --rm -t -v "$DATA_DIR":/data "$DOCKER_IMAGE" osrm-extract -p /opt/car.lua /data/"$BASE_NAME"
 else
   echo "  $NAME.osrm already exists, skipping extract."
 fi
 
 echo "Step 2: osrm-partition"
 if [ ! -f "$DATA_DIR/$NAME.osrm.partition" ]; then
-  docker run --rm -t -v "$PWD/$DATA_DIR":/data "$DOCKER_IMAGE" osrm-partition /data/"$NAME.osrm"
+  docker run --rm -t -v "$DATA_DIR":/data "$DOCKER_IMAGE" osrm-partition /data/"$NAME.osrm"
 else
   echo "  partition files already exist, skipping partition."
 fi
@@ -62,7 +64,7 @@ fi
 echo "Step 3: osrm-customize"
 if [ ! -f "$DATA_DIR/$NAME.osrm.mldgrids" ] && [ ! -f "$DATA_DIR/$NAME.osrm.hsgr" ]; then
   # customize will generate .mldgrids/.hsgr/.ramIndex/... depending on algorithm
-  docker run --rm -t -v "$PWD/$DATA_DIR":/data "$DOCKER_IMAGE" osrm-customize /data/"$NAME.osrm"
+  docker run --rm -t -v "$DATA_DIR":/data "$DOCKER_IMAGE" osrm-customize /data/"$NAME.osrm"
 else
   echo "  customize outputs already exist, skipping customize."
 fi
@@ -71,4 +73,4 @@ echo "Starting osrm-routed on host port $PORT (container port 5321)"
 echo "Press Ctrl-C to stop the server."
 
 # Run router (keep container interactive so logs show). Map host port $PORT to container 5321.
-docker run --rm -p ${PORT}:5321 -v "$PWD/$DATA_DIR":/data "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5321 /data/"$NAME.osrm"
+docker run --rm -p ${PORT}:5321 -v "$DATA_DIR":/data "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5321 /data/"$NAME.osrm"

@@ -1,3 +1,72 @@
+# Development and local testing (transport-backend)
+
+This directory contains backend helpers and small-area test utilities. The
+repository ships a small Lancashire PBF by default so you can run routing
+locally without downloading the full UK extract.
+
+Key points
+- OSRM routed server (HTTP) — expected at `http://localhost:5321` by default.
+  You can override this with the `OSRM_URL` environment variable (for example
+  `export OSRM_URL=http://127.0.0.1:5321`).
+- Canonical local OSRM data directory: `transport-backend/osrm/data`. The
+  helper script `transport-backend/osrm/run_osrm.sh` stores and reads PBF and
+  `.osrm` files here by default.
+- The included Lancashire extract is intended for development and testing.
+
+Running OSRM locally
+
+The repository includes a helper script that downloads a PBF (Lancashire by
+default), runs `osrm-extract` / `osrm-partition` / `osrm-customize`, and starts
+`osrm-routed` using the `osrm/osrm-backend` image.
+
+Script location and defaults
+
+```
+transport-backend/osrm/run_osrm.sh
+Default PBF: https://download.geofabrik.de/europe/united-kingdom/england/lancashire-latest.osm.pbf
+Default data dir: transport-backend/osrm/data
+Default host port: 5321
+```
+
+Basic usage (from the repository root):
+
+```bash
+./transport-backend/osrm/run_osrm.sh
+```
+
+Override the PBF, data dir and port (positional args):
+
+```bash
+./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5321
+```
+
+Notes on container runtimes
+
+- The helper script currently invokes `docker` to run the official
+  `osrm/osrm-backend` image. If you prefer Podman, you can run the same
+  commands under Podman or edit the script (replace `docker` with
+  `podman`). On macOS Podman uses a small Linux VM (`podman machine init` and
+  `podman machine start`) — if that VM is not started you may see connection
+  errors, in which case Docker is a simpler fallback.
+
+Running the backend
+
+Start the backend helper which will attempt to connect to the OSRM server at
+the URL provided by `OSRM_URL` (or `http://localhost:5321` by default):
+
+```bash
+./transport-backend/run_backend.sh
+```
+
+Other notes
+
+- The repository keeps an OSRM cache under `transport-backend/cache/osrm`.
+  This directory is not checked in to Git.
+- Ensure the `transport-backend/osrm/data` directory is writable by the user
+  running containers (permissions issues can cause the container to fail to
+  write intermediate files).
+- If you'd like, I can add a troubleshooting section and a short
+  `transport-backend/osrm/README.md` with common errors and quick fixes.
 # Development / small-area testing
 
 The `build_osrm.sh` helper used to default to the full England extract; to keep this
