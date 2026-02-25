@@ -30,7 +30,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Implement `/pricing` endpoint (distance-based stub ok).
 - [ ] Implement `/weather` and `/alerts` endpoints.
 - [ ] Add WebSocket or STOMP live updates adapter. **[Anton]** ✅
-- [ ] Ensure multi-leg route geometry export for map polylines. **[Anton]**
+- [x] Ensure multi-leg route geometry export for map polylines. **[Anton]**
 - [ ] Add station classification (P27) and filtering (P28). **[Anton]**
 - [ ] Add OSRM integration with walking fallback. **[Anton]**
 - [ ] Update frontend services and hooks to match API responses. **[Jamie]**
@@ -127,7 +127,7 @@ Focus: Live data, routing infrastructure, and station features.
 | P4 | ~~Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments~~ ✅ | Low |
 | — | ~~Review mock FastAPI frontend for integration cues~~ (done) | ~~High~~ |
 | 8 | ~~Add WebSocket/STOMP live updates adapter~~ ✅ | Medium |
-| 9 | Ensure multi-leg route geometry export for map polylines | Medium |
+| 9 | Ensure multi-leg route geometry export for map polylines | ✅ Done |
 | 10+11 | Add station classification (P27) and filtering (P28) | Medium |
 | 13 | Add OSRM integration with walking fallback | Medium |
 

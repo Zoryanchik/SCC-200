@@ -58,6 +58,8 @@ cargo run
 - Integration schemas documented in transport-backend/INTEGRATION_SCHEMAS.md
 - WS /ws/live provides STOMP 1.2 over WebSocket; ws_server.py broker polls BusLive every ~15s and pushes to /topic/BUS_MVT_ALL subscribers
 - Frontend liveUpdatesManager must set brokerURL to ws://localhost:5005/ws/live for local dev (default points at external STOMP server)
+- Transit leg routeGeometries now include ALL intermediate stop coords (not just 2-point boarding→alighting). _get_transit_coords() extracts full polyline from day.journey_times via journey_stop_index. Falls back to 2-point when day/journey is None or stops not found.
+- Each transit leg has an intermediate_stops field: list of {name, lat, lon} for stops between boarding and alighting (exclusive of endpoints). Walking legs omit this field.
 
 ## Feature Development Quality Standards
 

@@ -512,6 +512,87 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             return None
         return seconds_to_time(int(secs))
 
+    def _get_transit_coords(from_stop, to_stop, info, stop_coords):
+        """Extract all intermediate stop coordinates for a transit leg.
+
+        Uses the ``day`` (MergedData) and ``journey`` id stored in the
+        RAPTOR result to look up the full journey stop sequence, then
+        returns **[lat, lon]** pairs for every stop between the boarding
+        and alighting positions (inclusive).
+
+        Falls back to a simple 2-point line if the journey data is
+        unavailable.
+        """
+        day = info.get("day")
+        journey_id = info.get("journey")
+
+        # Fallback: just use boarding + alighting coords
+        def _two_point():
+            pts = []
+            fc = stop_coords.get(from_stop)
+            tc = stop_coords.get(to_stop)
+            if fc:
+                pts.append([fc[0], fc[1]])
+            if tc:
+                pts.append([tc[0], tc[1]])
+            return pts
+
+        if day is None or journey_id is None:
+            return _two_point()
+
+        try:
+            jt = day.journey_times[journey_id]
+            jsi = day.journey_stop_index[journey_id]
+        except (IndexError, AttributeError, TypeError):
+            return _two_point()
+
+        from_pos = jsi.get(from_stop)
+        to_pos = jsi.get(to_stop)
+        if from_pos is None or to_pos is None or from_pos >= to_pos:
+            return _two_point()
+
+        # Extract coords for every stop between boarding and alighting
+        coords = []
+        for stop_id, _atime, _dtime in jt[from_pos: to_pos + 1]:
+            c = stop_coords.get(stop_id)
+            if c:
+                coords.append([c[0], c[1]])
+
+        return coords if coords else _two_point()
+
+    def _get_intermediate_stop_names(from_stop, to_stop, info, merged, stop_coords):
+        """Return a list of intermediate stop dicts between boarding and alighting.
+
+        Each dict has ``{name, lat, lon}`` (lat/lon omitted if unknown).
+        The boarding and alighting stops themselves are **excluded** — they
+        are already in ``from_stop`` / ``to_stop`` on the leg.
+        """
+        day = info.get("day")
+        journey_id = info.get("journey")
+        if day is None or journey_id is None:
+            return []
+
+        try:
+            jt = day.journey_times[journey_id]
+            jsi = day.journey_stop_index[journey_id]
+        except (IndexError, AttributeError, TypeError):
+            return []
+
+        from_pos = jsi.get(from_stop)
+        to_pos = jsi.get(to_stop)
+        if from_pos is None or to_pos is None or to_pos - from_pos <= 1:
+            return []
+
+        stops = []
+        for stop_id, _atime, _dtime in jt[from_pos + 1: to_pos]:
+            entry = {"name": _stop_name(stop_id)}
+            c = stop_coords.get(stop_id)
+            if c:
+                entry["lat"] = c[0]
+                entry["lon"] = c[1]
+            stops.append(entry)
+        return stops
+
     _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#e53935"}
     legs = []
     geometries = []
@@ -605,6 +686,12 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             else:
                 leg["duration_seconds"] = None
 
+            # Attach intermediate stops for the leg (all stops between
+            # boarding and alighting, exclusive of endpoints which are
+            # already in from_stop / to_stop).
+            leg["intermediate_stops"] = _get_intermediate_stop_names(
+                prev_int, curr_int, curr_info, merged, stop_coords)
+
         legs.append(leg)
 
         # -- geometry for this leg --
@@ -616,11 +703,19 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             geo_name = f"{transport.title()} {line_name}"
         else:
             geo_name = transport.title() if transport else "Unknown"
-        coords = []
-        if prev_coord:
-            coords.append([prev_coord[0], prev_coord[1]])
-        if curr_coord:
-            coords.append([curr_coord[0], curr_coord[1]])
+
+        # For transit legs, extract ALL intermediate stop coords from the
+        # journey so the polyline follows the actual route, not just a
+        # straight line between boarding and alighting stops.
+        if transport != "walking":
+            coords = _get_transit_coords(
+                prev_int, curr_int, curr_info, stop_coords)
+        else:
+            coords = []
+            if prev_coord:
+                coords.append([prev_coord[0], prev_coord[1]])
+            if curr_coord:
+                coords.append([curr_coord[0], curr_coord[1]])
 
         geometries.append({
             "id": f"{transport}-{geo_idx}",

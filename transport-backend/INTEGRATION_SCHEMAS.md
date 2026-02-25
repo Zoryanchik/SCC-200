@@ -141,6 +141,7 @@ Each item has:
 | `line_name`         | string\|null| Bus/train route name (transit legs)  |
 | `journey_origin`    | string\|null| Service origin (transit legs)        |
 | `journey_destination`| string\|null| Service destination (transit legs)  |
+| `intermediate_stops` | Array\<Stop\>\|undefined | Intermediate stops between boarding and alighting (transit legs only). Each entry has `{ name, lat, lon }`. Empty array when adjacent stops; omitted for walking legs. |
 
 #### Meta Object
 | Field                | Type        |
@@ -156,7 +157,7 @@ Each item has:
 |---------|-------------------|---------------------------------|
 | `id`    | string            | e.g. `"walk-0"`, `"bus-1"`      |
 | `name`  | string            | Human label                     |
-| `coords`| Array\<[lat,lon]\>| Array of `[lat, lon]` pairs     |
+| `coords`| Array\<[lat,lon]\>| Array of `[lat, lon]` pairs. Transit legs include all intermediate stop coordinates for accurate polylines; walking legs use 2-point lines. |
 | `color` | string            | Hex color for polyline          |
 
 > **⚠️ Coordinate Order Convention**
@@ -195,7 +196,11 @@ Each item has:
       "arrival_time": "10:35:00",
       "line_name": "40",
       "journey_origin": "Lancaster",
-      "journey_destination": "Preston"
+      "journey_destination": "Preston",
+      "intermediate_stops": [
+        { "name": "Galgate", "lat": 53.977, "lon": -2.782 },
+        { "name": "Garstang", "lat": 53.898, "lon": -2.773 }
+      ]
     }
   ],
   "meta": {
@@ -207,7 +212,7 @@ Each item has:
   },
   "routeGeometries": [
     { "id": "walk-0", "name": "Walk to Lancaster Bus Station", "coords": [[54.048, -2.801], [54.049, -2.800]], "color": "#888888" },
-    { "id": "bus-1", "name": "Bus 40", "coords": [[54.049, -2.800], [53.759, -2.699]], "color": "#1a73e8" }
+    { "id": "bus-1", "name": "Bus 40", "coords": [[54.049, -2.800], [53.977, -2.782], [53.898, -2.773], [53.759, -2.699]], "color": "#1a73e8" }
   ]
 }
 ```
