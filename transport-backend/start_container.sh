@@ -65,23 +65,7 @@ fi
 # in the environment to enable.
 RUN_FLAGS="--name $CONTAINER"
 
-# Ensure a user network exists so the backend can talk to an OSRM container by name
-# We use a predictable network name so helpers can attach containers to it.
-NETWORK_NAME="scc200-net"
-$RUNTIME network create "$NETWORK_NAME" >/dev/null 2>&1 || true
-
-# If an OSRM container exists, try to attach it to the network. Prefer the
-# OSRM container's default listening port (5012). Allow the host environment
-# to override `OSRM_URL` if present (useful when running OSRM on a host port).
-if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "scc200-osrm"; then
-  echo "Found existing OSRM container 'scc200-osrm' — ensuring it's on network $NETWORK_NAME"
-  # try to connect it to the network (no-op if already connected)
-  $RUNTIME network connect "$NETWORK_NAME" scc200-osrm >/dev/null 2>&1 || true
-  # Default to the container's default port (5012) unless the host overrides OSRM_URL.
-  OSRM_URL="${OSRM_URL:-http://scc200-osrm:5012}"
-fi
-
-# Forward OSRM_URL into the container if set in the environment so the backend
+# Forward OSRM_URL into the container if set on the host so the backend
 # inside the container can probe the correct OSRM endpoint.
 ENV_FLAGS=""
 if [ -n "${OSRM_URL:-}" ]; then
@@ -93,7 +77,7 @@ if [ "${USE_HOST_NETWORK:-0}" = "1" ]; then
   RUN_FLAGS="$RUN_FLAGS --network host"
   # When using host networking we don't publish ports
 else
-  RUN_FLAGS="$RUN_FLAGS -p 5050:5050 --network $NETWORK_NAME"
+  RUN_FLAGS="$RUN_FLAGS -p 5050:5050"
 fi
 
 echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"

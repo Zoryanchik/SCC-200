@@ -990,7 +990,7 @@ class BusLoader:
 
     # ── OSRM walking transfer precomputation ─────────────────────
 
-    def precompute_walking_transfers(self, osrm_base="http://localhost:5012",
+    def precompute_walking_transfers(self, osrm_base="http://localhost:5321",
                                       max_walk_seconds=600,
                                       bbox_margin=0.012):
         """Precompute walking transfers between nearby stops using OSRM.

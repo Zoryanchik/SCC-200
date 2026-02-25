@@ -31,15 +31,6 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
-# If the script is run interactively (tty attached) and the user did not pass
-# --shell, automatically open a shell inside the started container. This
-# provides a convenient developer flow: `./run_backend.sh` will start the
-# container and drop you into its shell when ready.
-if [ "$USE_SHELL" -eq 0 ] && [ -t 0 ]; then
-  USE_SHELL=1
-  AUTO_SHELL=1
-fi
-
 echo "Starting backend container (build if needed)..."
 
 # Detect container runtime for portability (prefer podman if connected, fall back to docker)
@@ -70,11 +61,7 @@ for i in {1..30}; do
   if curl -sS http://localhost:5050/health >/dev/null 2>&1; then
     echo "\nBackend is ready at http://localhost:5050/health"
     if [ "$USE_SHELL" -eq 1 ]; then
-      if [ "${AUTO_SHELL:-0}" -eq 1 ]; then
-        echo "Auto-opening an interactive shell inside $CONTAINER (press Ctrl+D to exit)..."
-      else
-        echo "Opening an interactive shell inside $CONTAINER (press Ctrl+D to exit)..."
-      fi
+      echo "Opening an interactive shell inside $CONTAINER (press Ctrl+D to exit)..."
       if [ "$RUNTIME" = "podman" ]; then
         $RUNTIME exec -it "$CONTAINER" /bin/bash || $RUNTIME exec -it "$CONTAINER" /bin/sh
       else

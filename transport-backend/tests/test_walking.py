@@ -131,7 +131,7 @@ class TestOSRMProbe:
     def test_probe_true_when_reachable(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_urlopen.return_value = mock_resp
-        w = Walking({}, {}, osrm_base="http://fake-osrm:5012")
+        w = Walking({}, {}, osrm_base="http://fake-osrm:5000")
         assert w.osrm_available is True
         mock_resp.close.assert_called_once()
 
@@ -204,7 +204,7 @@ class TestReachableStopsOSRM:
         }).encode()
         mock_urlopen.return_value = mock_resp
 
-        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5012")
+        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5000")
         result = w.reachable_stops(USER_NEAR_A)
         # D is out of range; A, B, C should be present
         assert STOP_D not in result
@@ -218,14 +218,14 @@ class TestReachableStopsOSRM:
         mock_resp.read.return_value = json.dumps({"code": "Error"}).encode()
         mock_urlopen.return_value = mock_resp
 
-        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5012")
+        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5000")
         result = w.reachable_stops(USER_NEAR_A)
         # Should be a dict (possibly empty if no exact matches)
         assert isinstance(result, dict)
 
     def test_no_candidates_returns_empty(self):
         """Location far from all stops — no candidates in bbox."""
-        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5012")
+        w = Walking(INTER_WALK, COORDS, osrm_base="http://fake:5000")
         result = w.reachable_stops((0.0, 0.0))
         assert result == {}
 
@@ -314,7 +314,7 @@ class TestWalkingTimeBetween:
         }).encode()
         mock_urlopen.return_value = mock_resp
 
-        w = Walking({}, {}, osrm_base="http://fake:5012")
+        w = Walking({}, {}, osrm_base="http://fake:5000")
         result = w.walking_time_between((54.048, -2.801), (54.049, -2.802))
         assert result == 180
 
@@ -326,7 +326,7 @@ class TestWalkingTimeBetween:
         }).encode()
         mock_urlopen.return_value = mock_resp
 
-        w = Walking({}, {}, osrm_base="http://fake:5012")
+        w = Walking({}, {}, osrm_base="http://fake:5000")
         result = w.walking_time_between((54.048, -2.801), (54.049, -2.802))
         assert isinstance(result, int)
         assert result > 0
@@ -427,7 +427,7 @@ def _build_mock_walking():
     mock_walking = MagicMock()
     mock_walking.osrm_available = False
     mock_walking.status.return_value = {
-    "osrm_url": "http://localhost:5012",
+        "osrm_url": "http://localhost:5321",
         "osrm_available": False,
         "max_walk_seconds": 600,
         "precomputed_stops": 10,
@@ -467,7 +467,7 @@ class TestWalkingStatusEndpoint:
             resp = client.get("/walking/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["osrm_url"] == "http://localhost:5012"
+        assert data["osrm_url"] == "http://localhost:5321"
         assert data["osrm_available"] is False
         assert data["max_walk_seconds"] == 600
         assert data["precomputed_stops"] == 10

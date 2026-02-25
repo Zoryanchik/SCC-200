@@ -8,7 +8,7 @@ Defaults and locations
 - Script: `transport-backend/osrm/run_osrm.sh`
 - Default PBF: https://download.geofabrik.de/europe/united-kingdom/england/lancashire-latest.osm.pbf
 - Default data directory: `transport-backend/osrm/data` (absolute path next to the script)
--- Default host port: `5012`
+- Default host port: `5321`
 
 Prerequisites
 
@@ -21,11 +21,11 @@ How the helper works
 2. Run `osrm-extract` to create the initial `.osrm` file (skips if already present)
 3. Run `osrm-partition` and `osrm-customize` (skips if outputs already exist)
 4. Start `osrm-routed` using the MLD algorithm and expose the HTTP API on the
-  host port you provided (default 5012)
+   host port you provided (default 5321)
 
 Usage
 
-Run with defaults (Lancashire PBF, data stored in `transport-backend/osrm/data`, host port 5012):
+Run with defaults (Lancashire PBF, data stored in `transport-backend/osrm/data`, host port 5321):
 
 ```bash
 ./transport-backend/osrm/run_osrm.sh
@@ -34,15 +34,15 @@ Run with defaults (Lancashire PBF, data stored in `transport-backend/osrm/data`,
 Override the PBF URL, data directory and port (positional args):
 
 ```bash
-./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5012
+./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5321
 ```
 
 API example
 
-The router will be available at `http://localhost:5012` by default. Example route query:
+The router will be available at `http://localhost:5321` by default. Example route query:
 
 ```bash
-curl "http://localhost:5012/route/v1/driving/-2.123,53.456;-2.234,53.567?overview=false"
+curl "http://localhost:5321/route/v1/driving/-2.123,53.456;-2.234,53.567?overview=false"
 ```
 
 Podman users
@@ -67,7 +67,7 @@ will implement that.
 
 # OSRM sample runner
 
-This small helper downloads a Geofabrik PBF and runs OSRM (MLD) using the official Docker image, exposing the HTTP API on host port 5012 by default.
+This small helper downloads a Geofabrik PBF and runs OSRM (MLD) using the official Docker image, exposing the HTTP API on host port 5321 by default.
 
 Prerequisites
 - Docker Desktop installed and running
@@ -78,7 +78,7 @@ Files added
 
 Usage
 
-Run with defaults (Lancashire PBF, data stored in `./data`, host port 5012):
+Run with defaults (Lancashire PBF, data stored in `./data`, host port 5321):
 
 ```bash
 ./scripts/run_osrm.sh
@@ -87,7 +87,7 @@ Run with defaults (Lancashire PBF, data stored in `./data`, host port 5012):
 Specify an alternative PBF URL, data directory and port (in that order):
 
 ```bash
-./scripts/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5012
+./scripts/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5321
 ```
 
 Notes
@@ -95,12 +95,12 @@ Notes
 - The script will skip a step if its expected output already exists (so you can restart the router quickly).
 - The server runs with the MLD algorithm. The router will be accessible at:
 
-  http://localhost:5012/route/v1/driving/{lon1},{lat1};{lon2},{lat2}
+  http://localhost:5321/route/v1/driving/{lon1},{lat1};{lon2},{lat2}
 
 Example query:
 
 ```bash
-curl "http://localhost:5012/route/v1/driving/-2.123,53.456;-2.234,53.567?overview=false"
+curl "http://localhost:5321/route/v1/driving/-2.123,53.456;-2.234,53.567?overview=false"
 ```
 
 Troubleshooting

@@ -1110,10 +1110,7 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.environ.get("HOST", "0.0.0.0")
-    # Default to 5050 so both containerized and local runs use the same port
-    port = int(os.environ.get("PORT", "5050"))
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host="localhost", port=5005)
 
 
 
