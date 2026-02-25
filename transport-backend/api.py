@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Transport API", lifespan=lifespan)
 
 # -- CORS ------------------------------------------------------------------
-"""app.add_middleware(
+app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
@@ -97,7 +97,7 @@ app = FastAPI(title="Transport API", lifespan=lifespan)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)"""
+)
 
 # -”€-”€ Health check -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
