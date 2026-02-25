@@ -159,6 +159,21 @@ Each item has:
 | `coords`| Array\<[lat,lon]\>| Array of `[lat, lon]` pairs     |
 | `color` | string            | Hex color for polyline          |
 
+> **⚠️ Coordinate Order Convention**
+>
+> `routeGeometries[*].coords` uses **`[latitude, longitude]`** order.
+> This matches what Leaflet's `L.polyline()` expects.
+>
+> This is **NOT** GeoJSON order — GeoJSON uses `[longitude, latitude]`.
+> If the frontend ever switches to GeoJSON-based rendering (e.g. `L.geoJSON()`),
+> the coordinate pairs must be transposed.
+>
+> The same `[lat, lon]` convention applies to `from_stop`/`to_stop` objects
+> in each leg, and to `meta.start_point` / `meta.destination` arrays.
+>
+> Internally, the OSRM walking engine uses `lon,lat` in its URL — the
+> backend handles that reversal in `walking.py`.
+
 ```json
 {
   "success": true,

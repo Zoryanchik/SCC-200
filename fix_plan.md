@@ -44,7 +44,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Harden production config (CORS, auth, rate limits). **[Jamie]**
 - [ ] Add performance caching for routing. **[John]**
 - [ ] Add analytics and frequent routes endpoint. **[Jamie]**
-- [ ] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
+- [x] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
 - [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict.
 
 ## Completed
@@ -124,7 +124,7 @@ Focus: Live data, routing infrastructure, and station features.
 | # | Task | Priority |
 |---|------|----------|
 | P3 | ~~Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from GET)~~ ✅ | **Medium** |
-| P4 | Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments | Low |
+| P4 | ~~Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments~~ ✅ | Low |
 | — | ~~Review mock FastAPI frontend for integration cues~~ (done) | ~~High~~ |
 | 8 | Add WebSocket/STOMP live updates adapter | Medium |
 | 9 | Ensure multi-leg route geometry export for map polylines | Medium |

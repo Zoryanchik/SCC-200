@@ -395,6 +395,17 @@ def build_journey_plan_response(route_result, merged, stop_coords):
 
     Returns:
         dict with keys: success, legs, meta, routeGeometries
+
+    .. note:: **Coordinate order convention**
+
+       All ``routeGeometries[*].coords`` arrays use **[lat, lon]** order,
+       which is what Leaflet's ``L.polyline()`` expects.
+
+       This is **NOT** GeoJSON order — GeoJSON uses ``[longitude, latitude]``.
+       If the frontend ever switches to GeoJSON-based rendering (e.g.
+       ``L.geoJSON()``), the coords must be transposed.
+
+       Internal stop_coords dict also stores ``(lat, lon)`` tuples.
     """
     from time_utils import seconds_to_time
     import math
@@ -432,11 +443,13 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                              if total_arrival else None),
         }]
 
+        # Geometry coords use [lat, lon] order (Leaflet convention),
+        # NOT GeoJSON [lon, lat]. See docstring above.
         coords = []
         if len(start) >= 2:
-            coords.append([start[0], start[1]])
+            coords.append([start[0], start[1]])  # [lat, lon]
         if len(dest) >= 2:
-            coords.append([dest[0], dest[1]])
+            coords.append([dest[0], dest[1]])     # [lat, lon]
 
         geometries = ([{
             "id": "walk-0",
@@ -514,13 +527,14 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "departure_time": None,
             "arrival_time": _time_str(ordered[0][1]["arrival_time"]),
         })
-        wc = [[start_point[0], start_point[1]]]
+        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
+        wc = [[start_point[0], start_point[1]]]  # [lat, lon]
         if first_coord:
-            wc.append([first_coord[0], first_coord[1]])
+            wc.append([first_coord[0], first_coord[1]])  # [lat, lon]
         geometries.append({
             "id": f"walk-{geo_idx}",
             "name": f"Walk to {first_name}",
-            "coords": wc,
+            "coords": wc,  # [[lat, lon], ...]
             "color": "#888888",
         })
         geo_idx += 1
@@ -580,6 +594,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
         legs.append(leg)
 
         # -- geometry for this leg --
+        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
         color = _COLOR.get(transport, "#666666")
         if transport == "walking":
             geo_name = "Walk"
@@ -622,14 +637,15 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                 ordered[-1][1]["arrival_time"]),
             "arrival_time": _time_str(total_arrival),
         })
+        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
         wc = []
         if last_coord:
-            wc.append([last_coord[0], last_coord[1]])
-        wc.append([destination_point[0], destination_point[1]])
+            wc.append([last_coord[0], last_coord[1]])  # [lat, lon]
+        wc.append([destination_point[0], destination_point[1]])  # [lat, lon]
         geometries.append({
             "id": f"walk-{geo_idx}",
             "name": "Walk to destination",
-            "coords": wc,
+            "coords": wc,  # [[lat, lon], ...]
             "color": "#888888",
         })
 
