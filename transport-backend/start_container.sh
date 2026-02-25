@@ -71,7 +71,7 @@ NETWORK_NAME="scc200-net"
 $RUNTIME network create "$NETWORK_NAME" >/dev/null 2>&1 || true
 
 # If an OSRM container exists, try to attach it to the network. Prefer the
-# OSRM container's default listening port (5000). Allow the host environment
+# OSRM container's default listening port (5012). Allow the host environment
 # to override `OSRM_URL` if present (useful when running OSRM on a host port).
 if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "scc200-osrm"; then
   echo "Found existing OSRM container 'scc200-osrm' — ensuring it's on network $NETWORK_NAME"
