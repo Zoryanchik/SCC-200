@@ -1,9 +1,12 @@
 # Development / small-area testing
 
-The `build_osrm.sh` helper will by default download and preprocess the
-entire England extract from Geofabrik, which is several hundred megabytes and
-takes many minutes to convert.  If you’re just experimenting or running on a
-fresh machine you can avoid the long wait by using a much smaller dataset:
+The `build_osrm.sh` helper used to default to the full England extract; to keep this
+repository lightweight the helper and included scripts now use a Lancashire-only
+PBF by default. The Lancashire dataset is much smaller than the full England
+extract but still provides realistic coverage for local testing.
+
+If you’re just experimenting or running on a fresh machine you can still avoid
+long waits by using an even smaller sample dataset:
 
 ```sh
 cd transport-backend
@@ -35,9 +38,9 @@ Notes:
 - If you run OSRM in a container, make sure the container has access to the prepared `.osrm` files (from the extract/partition/customize steps).
 
 
-Using `--sample` is handy for quick iteration; once you need real routes you
-can rebuild with `--pbf-url` pointed at a larger extract (or just omit the
-option to get the default UK coverage).
+Using `--sample` is handy for quick iteration; once you need wider coverage you
+can rebuild with `--pbf-url` pointed at a larger extract. By default the
+helper uses the Lancashire extract supplied with this repository.
 
 The cache directory (`transport-backend/cache/osrm`) is reused across runs and
 is not checked into git; copy it from another machine if you’d rather avoid
