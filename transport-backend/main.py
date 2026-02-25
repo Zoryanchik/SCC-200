@@ -40,21 +40,34 @@ def initialize_base():
     data_changed = False
     if _count == 0:
         print("  Database empty — downloading timetable data...")
-        datasets = loader._fetch_dataset_info()
+        try:
+            datasets = loader._fetch_dataset_info()
+        except Exception as exc:
+            print(f"  Warning: failed to fetch dataset index: {exc}")
+            datasets = []
         print(f"  Got {len(datasets)} download URLs")
         for ds in datasets:
-            loader.download_and_load(ds['download_url'])
-            conn = _sql.connect(DB_PATH)
-            conn.execute(
-                "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
-                (ds['source_url'], ds['download_url'], ds['modified']),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                loader.download_and_load(ds['download_url'])
+                # save the new timestamp
+                conn = _sql.connect(DB_PATH)
+                conn.execute(
+                    "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                    (ds['source_url'], ds['download_url'], ds['modified']),
+                )
+                conn.commit()
+                conn.close()
+            except Exception as exc:
+                print(f"  Warning: failed to download/load dataset {ds.get('download_url')}: {exc}")
+                continue
         print("  ✓ Timetable data loaded")
         data_changed = True
     else:
-        data_changed = loader.check_for_updates()
+        try:
+            data_changed = loader.check_for_updates()
+        except Exception as exc:
+            print(f"  Warning: check_for_updates failed: {exc}")
+            data_changed = False
 
     print("  ✓ Database ready")
 
@@ -65,15 +78,15 @@ def initialize_base():
     osrm_ok = False
     # Allow the OSRM endpoint to be overridden by env var so containers can
     # address an OSRM sidecar by name (e.g. http://osrm:5000) or use host
-    # networking. Default remains the historical localhost:5321 for host runs.
-    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5321")
+    # networking. Default for local development is http://localhost:5012.
+    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
     try:
         probe_url = OSRM_URL.rstrip("/") + "/nearest/v1/foot/0,0"
         _r = _ur.urlopen(probe_url, timeout=3)
         _r.close()
         osrm_ok = True
     except Exception:
-        pass
+        osrm_ok = False
 
     if not osrm_ok:
         print(f"  ⚠  OSRM not reachable at {OSRM_URL}")
@@ -81,7 +94,7 @@ def initialize_base():
         print("     To enable, run an OSRM server and ensure the backend can reach it.")
         print("     Examples:")
         print("       # Run OSRM on the host (backend running on host will reach it):")
-        print("       docker run -d -p 5321:5000 -v /path/to/data:/data \\")
+        print("       docker run -d -p 5012:5000 -v /path/to/data:/data \\")
         print("         osrm/osrm-backend osrm-routed --algorithm mld /data/nw-england.osrm")
         print("       # Run OSRM as a separate container and point backend to it:")
         print("       docker network create scc-net || true")
@@ -90,10 +103,19 @@ def initialize_base():
         print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5000")
 
     if data_changed:
-        loader.clear_walking_transfers()
-    loader.download_stop_coords()
+        try:
+            loader.clear_walking_transfers()
+        except Exception as exc:
+            print(f"  Warning: clear_walking_transfers failed: {exc}")
+    try:
+        loader.download_stop_coords()
+    except Exception as exc:
+        print(f"  Warning: download_stop_coords failed: {exc}")
     if osrm_ok:
-        loader.precompute_walking_transfers(osrm_base=OSRM_URL)
+        try:
+            loader.precompute_walking_transfers(osrm_base=OSRM_URL)
+        except Exception as exc:
+            print(f"  Warning: precompute_walking_transfers failed: {exc}")
 
     # Build inter_walk table keyed by ATCO codes (will be remapped
     # to per-date integer IDs when the network is built)

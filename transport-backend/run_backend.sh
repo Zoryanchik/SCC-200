@@ -12,7 +12,7 @@ IMAGE=transport-backend:local
 CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
-USE_SHELL=0
+USE_SHELL=1
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --shell|-s)
