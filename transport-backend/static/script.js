@@ -19,33 +19,31 @@ document.getElementById('busLiveForm').addEventListener('submit', async function
     };
 
     try {
-        const response = await fetch('/api/bus_live', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(formData)
+        const params = new URLSearchParams({
+            lat: formData.lat,
+            lon: formData.lon,
+            latTol: formData.lat_tol,
+            lonTol: formData.lon_tol
         });
-
+        const response = await fetch(`/bus/live/all?${params}`);
         const data = await response.json();
 
         resultDiv.style.display = 'block';
 
-        if (data.success) {
+        if (Array.isArray(data)) {
             resultDiv.className = 'result success';
-            if (data.buses && data.buses.length > 0) {
-                let resultText = `Found ${data.buses.length} live bus(es):\n\n`;
-                data.buses.forEach((bus, index) => {
-                    resultText += `${index + 1}. Line: ${bus.line_ref}\n`;
+            if (data.length > 0) {
+                let resultText = `Found ${data.length} live bus(es):\n\n`;
+                data.forEach((bus, index) => {
+                    resultText += `${index + 1}. Line: ${bus.line}\n`;
                     resultText += `   Destination: ${bus.destination}\n`;
-                    resultText += `   Operator: ${bus.operator}\n`;
-                    resultText += `   Location: ${bus.latitude.toFixed(6)}, ${bus.longitude.toFixed(6)}\n\n`;
+                    resultText += `   Location: ${bus.lat.toFixed(6)}, ${bus.lon.toFixed(6)}\n\n`;
                 });
                 resultDiv.textContent = resultText;
             } else {
                 resultDiv.textContent = 'No live buses found in the specified area.';
             }
-        } else {
+        } else if (data.error) {
             resultDiv.className = 'result error';
             resultDiv.textContent = `Error: ${data.error}`;
         }

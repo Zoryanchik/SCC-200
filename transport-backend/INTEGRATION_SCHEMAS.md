@@ -59,43 +59,10 @@ Each item has:
 
 ---
 
-## 3. `POST /api/bus_live`
+## 3. ~~`POST /api/bus_live`~~ (Removed)
 
-**Purpose:** Live bus positions near a coordinate (used by mock frontend `index.html`).
-
-### Request Body (`BusLiveRequest`)
-| Field     | Type  | Default  | Required |
-|-----------|-------|----------|----------|
-| `lat`     | float | —        | Yes      |
-| `lon`     | float | —        | Yes      |
-| `lat_tol` | float | `0.0003` | No       |
-| `lon_tol` | float | `0.0003` | No       |
-
-### Response (`BusLiveResponse`)
-| Field     | Type              | Notes                       |
-|-----------|-------------------|-----------------------------|
-| `success` | bool              | `true` on success           |
-| `buses`   | Array\|null       | List of bus objects          |
-| `error`   | string\|null      | Error message on failure     |
-
-Each bus object:
-| Field       | Type   |
-|-------------|--------|
-| `line_ref`  | string |
-| `destination`| string |
-| `latitude`  | float  |
-| `longitude` | float  |
-| `operator`  | string |
-
-```json
-{
-  "success": true,
-  "buses": [
-    { "line_ref": "10", "destination": "City Centre", "latitude": 53.4808, "longitude": -2.2426, "operator": "FIRST" }
-  ],
-  "error": null
-}
-```
+> **Removed** — this duplicate endpoint was only used by the mock HTML frontend.
+> All consumers should use `GET /bus/live/{operator}` (see section 4).
 
 ---
 
@@ -191,6 +158,21 @@ Each bus object:
 | `name`  | string            | Human label                     |
 | `coords`| Array\<[lat,lon]\>| Array of `[lat, lon]` pairs     |
 | `color` | string            | Hex color for polyline          |
+
+> **⚠️ Coordinate Order Convention**
+>
+> `routeGeometries[*].coords` uses **`[latitude, longitude]`** order.
+> This matches what Leaflet's `L.polyline()` expects.
+>
+> This is **NOT** GeoJSON order — GeoJSON uses `[longitude, latitude]`.
+> If the frontend ever switches to GeoJSON-based rendering (e.g. `L.geoJSON()`),
+> the coordinate pairs must be transposed.
+>
+> The same `[lat, lon]` convention applies to `from_stop`/`to_stop` objects
+> in each leg, and to `meta.start_point` / `meta.destination` arrays.
+>
+> Internally, the OSRM walking engine uses `lon,lat` in its URL — the
+> backend handles that reversal in `walking.py`.
 
 ```json
 {
@@ -296,6 +278,6 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 2. **`/bus/live/{operator}` response shape**: Backend returns `{line, destination, lat, lon}`. Frontend mock tests already use this shape — confirmed aligned.
 3. **`/search/stops` mixed types**: Backend returns both `type: "stop"` and `type: "location"` results. Frontend tests already handle this.
 4. **`/journey/plan` geometry format**: `routeGeometries[*].coords` uses `[lat, lon]` pairs (not GeoJSON `[lon, lat]`). Frontend polyline rendering must respect this order.
-5. **`POST /api/bus_live` vs `GET /bus/live/{operator}`**: Two bus endpoints exist. The `POST /api/bus_live` is for the mock HTML frontend only. The React frontend should exclusively use `GET /bus/live/{operator}`.
+5. **`POST /api/bus_live` removed**: The duplicate endpoint was removed. All consumers (including the mock HTML frontend) now use `GET /bus/live/{operator}`.
 6. **CORS**: Backend allows `localhost:3000` and `localhost:5173`. Vite dev server (default 5173) is covered.
 7. **`/journey/plan` error shape**: On failure, returns `success: false` with `legs: null`, `meta: null`, `routeGeometries: null` — frontend hooks must gracefully handle null arrays.

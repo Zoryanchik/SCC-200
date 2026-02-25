@@ -375,13 +375,15 @@ Center on me
 label={`Nearest: ${nearestStop.name}`}
 variant="outlined"
 sx={{ borderRadius: '10px' }}
-/>
+/
+>
 <Chip
 label={`${(nearestStop.distance / 1000).toFixed(1)} km away`}
 color="warning"
 variant="outlined"
 sx={{ borderRadius: '10px' }}
-/>
+/
+>
 {locationStatus === 'watching' && (
 <Chip
 label="Following your location"

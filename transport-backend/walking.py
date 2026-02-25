@@ -60,12 +60,18 @@ class Walking:
             return {}
 
         # 2. Build OSRM /table request: source = user location,
-        #    destinations = candidate stops
+        #    destinations = candidate stops.
+        #
+        #    IMPORTANT — Coordinate order difference:
+        #      • Internal data uses (lat, lon) tuples throughout.
+        #      • OSRM expects "lon,lat" in its URL (GeoJSON / WGS-84 order).
+        #      • routeGeometries returned by api.py use [lat, lon] (Leaflet).
+        #    We reverse the order here for the OSRM request only.
 
-        coords_parts = [f"{lon},{lat}"]
+        coords_parts = [f"{lon},{lat}"]           # OSRM: lon,lat
         for s in candidates:
             slat, slon = self._coords[s]
-            coords_parts.append(f"{slon},{slat}")
+            coords_parts.append(f"{slon},{slat}")  # OSRM: lon,lat
         coord_str = ";".join(coords_parts)
 
         url = (

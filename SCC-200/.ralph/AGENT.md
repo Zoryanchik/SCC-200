@@ -48,7 +48,7 @@ cargo run
 - useLiveBusLocations hook debounces lat/lon changes (800ms) to prevent API spam during map panning
 - MapViewMap fires onMoveEnd with {lat, lon} on pan/zoom; parent passes center to useLiveBusLocations
 - Backend GET /bus/live/{operator}?lat=&lon= requires lat/lon; returns [{line, destination, lat, lon}]
-- POST /api/bus_live is mock-frontend-only; React frontend must use GET /bus/live/{operator}
+- POST /api/bus_live was removed (P3); all consumers now use GET /bus/live/{operator}
 - POST /journey/plan returns {success, legs[], meta, routeGeometries[]} — legs have from_stop/to_stop with name/lat/lon
 - routeGeometries coords use [lat, lon] order (NOT GeoJSON [lon, lat])
 - /search/stops returns mixed type:"stop" and type:"location" results; locations have atco_code: null

@@ -35,7 +35,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Add OSRM integration with walking fallback. **[Anton]**
 - [ ] Update frontend services and hooks to match API responses. **[Jamie]**
 - [ ] Add developer docs and Docker compose. **[Jamie]**
-- [ ] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
+- [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
 - [x] **P5:** Fix `/journey/plan` error response — returns `null` arrays instead of `[]`/`{}`, will crash frontend `.map()`.
 - [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173).
 
@@ -44,7 +44,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Harden production config (CORS, auth, rate limits). **[Jamie]**
 - [ ] Add performance caching for routing. **[John]**
 - [ ] Add analytics and frequent routes endpoint. **[Jamie]**
-- [ ] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
+- [x] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
 - [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict.
 
 ## Completed
@@ -123,8 +123,8 @@ Focus: Live data, routing infrastructure, and station features.
 
 | # | Task | Priority |
 |---|------|----------|
-| P3 | Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from GET) | **Medium** |
-| P4 | Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments | Low |
+| P3 | ~~Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from GET)~~ ✅ | **Medium** |
+| P4 | ~~Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments~~ ✅ | Low |
 | — | ~~Review mock FastAPI frontend for integration cues~~ (done) | ~~High~~ |
 | 8 | Add WebSocket/STOMP live updates adapter | Medium |
 | 9 | Ensure multi-leg route geometry export for map polylines | Medium |
