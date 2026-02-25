@@ -10,8 +10,11 @@ import Typography from '@mui/material/Typography';
 import IconButton from '@mui/material/IconButton';
 import Box from '@mui/material/Box';
 import { Cloud, CloudRain, Sun, Wind, Droplets, X } from 'lucide-react';
+import { fetchWeatherData } from '../../services/transportApi';
 
 export function WeatherWidget() {
+  const DEFAULT_LOCATION = { lat: 54.050556, lon: -2.800556 };
+  // Mock data so something shows up always
   const [weather, setWeather] = useState({
     temp: 12,
     condition: 'Partly Cloudy',
@@ -20,25 +23,44 @@ export function WeatherWidget() {
     icon: 'cloud'
   });
   const [visible, setVisible] = useState(true);
+  // Default to Lancaster
+  const [location, setLocation] = useState(DEFAULT_LOCATION);
 
-  // Simulate weather data update
+  // Get the current location, or default to lancaster if not available
+  const getLocation = () => {
+    navigator.geolocation.getCurrentPosition(
+        pos => setLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude }), 
+        () => setLocation(DEFAULT_LOCATION));
+  }
+
+  // Fetch the user's location every minute
   useEffect(() => {
-    const interval = setInterval(() => {
-      const temps = [8, 10, 12, 14, 13, 11];
-      const conditions = ['Cloudy', 'Partly Cloudy', 'Rainy', 'Sunny', 'Windy'];
-      const icons = ['cloud', 'cloudRain', 'sun'];
-      
-      setWeather({
-        temp: temps[Math.floor(Math.random() * temps.length)],
-        condition: conditions[Math.floor(Math.random() * conditions.length)],
-        humidity: Math.floor(Math.random() * 40) + 50,
-        windSpeed: Math.floor(Math.random() * 20) + 5,
-        icon: icons[Math.floor(Math.random() * icons.length)]
-      });
-    }, 60000); // Update every minute
+    getLocation();
+    const interval = setInterval(getLocation, 60000);
 
     return () => clearInterval(interval);
   }, []);
+
+  // Poll the server for weather and update
+  const updateWeather = async () => {
+    const result = await fetchWeatherData(location.lat, location.lon);
+
+    //TODO: Better icons for the weather
+    const icon = result.weather[0].main.toLowerCase().includes("cloud") ? 'cloud' : 
+      result.weather[0].maintoLowerCase().includes("rain") ? 'cloudRain' : 'sun';
+
+    setWeather({
+      temp: Math.round(result.main.temp),
+      humidity: result.main.humidity,
+      condition: result.weather[0].main,
+      windSpeed: result.wind.speed,
+      icon: icon,
+    });
+  };
+
+  useEffect(() => {
+    updateWeather();
+  }, [location]);
 
   const getWeatherIcon = () => {
     switch (weather.icon) {

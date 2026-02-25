@@ -101,7 +101,7 @@ app = FastAPI(title="Transport API", lifespan=lifespan)
 app.add_api_websocket_route("/ws/live", ws_live_endpoint)
 
 # -- CORS ------------------------------------------------------------------
-"""app.add_middleware(
+app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
@@ -112,7 +112,7 @@ app.add_api_websocket_route("/ws/live", ws_live_endpoint)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)"""
+)
 
 # -”€-”€ Health check -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
@@ -1074,6 +1074,39 @@ async def get_route(request: RouteRequest):
         return {"success": True, "route": result, "route_text": route_text}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+@app.get("/weather")
+async def route_weather(lat: float | None = None, lon: float | None = None):
+    if lat is None or lon is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "lat and lon are required"},
+        )
+    
+    fetch_url = f"https://transport.scc.lancs.ac.uk/weather?lat={lat}&lon={lon}"
+
+    import urllib
+
+    try:
+        with urllib.request.urlopen(fetch_url) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc)},
+        )
+    
+    weather_obj = data.get("weather", {})
+
+    weather_arr = weather_obj.get("weather", [])
+    wind = weather_obj.get("wind", {})
+    main = weather_obj.get("main", {})
+
+    return {
+        "weather": weather_arr,
+        "wind": wind,
+        "main": main,
+    }
 
 if __name__ == "__main__":
     import uvicorn
