@@ -5,8 +5,8 @@ import urllib.request
 
 # Default OSRM endpoint, configurable via the ``OSRM_URL`` environment
 # variable.  Containers can set this to e.g. ``http://osrm:5000``; host
-# development defaults to ``http://localhost:5001``.
-_DEFAULT_OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5001")
+# development defaults to ``http://localhost:5321``.
+_DEFAULT_OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5321")
 
 
 class Walking:
@@ -31,8 +31,8 @@ class Walking:
         merged-data space.
     osrm_base : str or None
         Base URL of a running OSRM foot-profile server.  Defaults to
-        the ``OSRM_URL`` environment variable, falling back to
-        ``http://localhost:5001``.
+    the ``OSRM_URL`` environment variable, falling back to
+    ``http://localhost:5321``.
     max_walk_seconds : int
         Maximum walk duration to consider (default 600 = 10 min).
     """

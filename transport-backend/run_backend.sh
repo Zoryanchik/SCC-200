@@ -33,14 +33,22 @@ done
 
 echo "Starting backend container (build if needed)..."
 
-# Detect container runtime for portability (prefer podman, fall back to docker)
+# Detect container runtime for portability (prefer podman if connected, fall back to docker)
+RUNTIME=""
 if command -v podman >/dev/null 2>&1; then
-  RUNTIME=podman
-elif command -v docker >/dev/null 2>&1; then
-  RUNTIME=docker
-else
-  echo "Error: neither podman nor docker is installed or on PATH." >&2
-  exit 2
+  if podman info >/dev/null 2>&1; then
+    RUNTIME=podman
+  else
+    echo "Podman found but not connected to a VM/service. Will attempt to use Docker if available."
+  fi
+fi
+if [ -z "$RUNTIME" ]; then
+  if command -v docker >/dev/null 2>&1; then
+    RUNTIME=docker
+  else
+    echo "Error: neither a working Podman nor Docker found. On macOS, Podman often requires 'podman machine init' and 'podman machine start'." >&2
+    exit 2
+  fi
 fi
 
 echo "Using container runtime: $RUNTIME"

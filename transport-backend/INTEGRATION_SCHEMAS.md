@@ -444,7 +444,7 @@ offer walking directions or show a degraded-mode indicator.
 
 ```json
 {
-  "osrm_url": "http://localhost:5001",
+  "osrm_url": "http://localhost:5321",
   "osrm_available": false,
   "max_walk_seconds": 600,
   "precomputed_stops": 1200,
