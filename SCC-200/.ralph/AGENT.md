@@ -56,6 +56,8 @@ cargo run
 - .env sets local default, .env.production sets https://transport.scc.lancs.ac.uk for builds, .env.local is gitignored for overrides
 - 5 endpoints called by frontend are not yet implemented: /rail/departures, /weather, /alerts, /pricing, /bus/times
 - Integration schemas documented in transport-backend/INTEGRATION_SCHEMAS.md
+- WS /ws/live provides STOMP 1.2 over WebSocket; ws_server.py broker polls BusLive every ~15s and pushes to /topic/BUS_MVT_ALL subscribers
+- Frontend liveUpdatesManager must set brokerURL to ws://localhost:5005/ws/live for local dev (default points at external STOMP server)
 
 ## Feature Development Quality Standards
 

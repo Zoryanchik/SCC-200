@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
 from time_utils import seconds_since_midnight
+from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +80,24 @@ async def lifespan(app: FastAPI):
             "Backend initialisation failed -€” endpoints requiring "
             "transport data will be unavailable: %s", exc,
         )
-    yield  # -† server is running
-    # Shutdown logic (if needed) goes here
+    # Configure and start the WebSocket/STOMP live-updates broker
+    try:
+        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10))
+        await ws_broker.start_polling()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("WebSocket broker startup failed: %s", exc)
+    yield  # — server is running
+    # Shutdown: stop the live-updates poll loop
+    try:
+        await ws_broker.stop_polling()
+    except Exception:  # pragma: no cover
+        pass
 
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
+
+# -- WebSocket/STOMP live updates endpoint --------------------------------
+app.add_api_websocket_route("/ws/live", ws_live_endpoint)
 
 # -- CORS ------------------------------------------------------------------
 """app.add_middleware(

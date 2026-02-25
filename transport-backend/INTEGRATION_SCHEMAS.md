@@ -265,6 +265,7 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 | `fetchLiveBusLocations()`    | `GET /bus/live/{operator}?lat=&lon=`     | ✅ Aligned     |
 | `searchStops()`              | `GET /search/stops?q=&limit=`            | ✅ Aligned     |
 | `getJourneyPlans()`          | `POST /journey/plan`                     | ✅ Aligned     |
+| `liveUpdatesManager`         | `WS /ws/live` (STOMP 1.2)               | ✅ Aligned     |
 | `fetchRailDepartures()`      | `GET /rail/departures/{station}`         | ❌ Not implemented |
 | `fetchWeatherData()`         | `GET /weather?lat=&lon=`                 | ❌ Not implemented |
 | `fetchServiceAlerts()`       | `GET /alerts`                            | ❌ Not implemented |
@@ -281,3 +282,82 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 5. **`POST /api/bus_live` removed**: The duplicate endpoint was removed. All consumers (including the mock HTML frontend) now use `GET /bus/live/{operator}`.
 6. **CORS**: Backend allows `localhost:3000` and `localhost:5173`. Vite dev server (default 5173) is covered.
 7. **`/journey/plan` error shape**: On failure, returns `success: false` with `legs: null`, `meta: null`, `routeGeometries: null` — frontend hooks must gracefully handle null arrays.
+8. **`WS /ws/live` STOMP broker**: Frontend `liveUpdatesManager` must set `brokerURL` to `ws://localhost:5005/ws/live` for local dev (default points at external server).
+
+---
+
+## 8. `WS /ws/live` — WebSocket/STOMP Live Updates
+
+**Purpose:** Real-time push of live transport data via STOMP 1.2 over WebSocket.
+
+### Connection
+
+```
+ws://localhost:5005/ws/live
+```
+
+The endpoint speaks STOMP 1.2 and is compatible with `@stomp/stompjs` v7.
+The frontend `liveUpdatesManager` can connect by passing the URL as `brokerURL`.
+
+### Supported STOMP Topics
+
+| Topic                      | Description                        | Broadcast Interval |
+|----------------------------|------------------------------------|--------------------|
+| `/topic/BUS_MVT_ALL`       | Live bus vehicle positions         | ~15 s (polling)    |
+| `/topic/TRAIN_MVT_ALL_TOC` | Train movement updates             | Placeholder        |
+| `/topic/TD_ALL_SIG_AREA`   | Train signal-area updates          | Placeholder        |
+| `/topic/SERVICE_ALERTS`    | Service disruption alerts          | Placeholder        |
+
+### `/topic/BUS_MVT_ALL` Message Shape
+
+```json
+{
+  "type": "bus_positions",
+  "count": 5,
+  "vehicles": [
+    {
+      "line": "1",
+      "destination": "Lancaster",
+      "lat": 54.046,
+      "lon": -2.798,
+      "operator": "Stagecoach Cumbria & North Lancashire",
+      "timestamp": 1740000000.0
+    }
+  ],
+  "timestamp": 1740000000.0
+}
+```
+
+### Client Protocol Flow
+
+```
+Client                           Server
+  |  CONNECT                        |
+  |  accept-version:1.2             |
+  |  heart-beat:4000,4000           |
+  | ─────────────────────────────►  |
+  |                                 |
+  |  CONNECTED                      |
+  |  version:1.2                    |
+  |  heart-beat:0,0                 |
+  | ◄─────────────────────────────  |
+  |                                 |
+  |  SUBSCRIBE                      |
+  |  id:sub-0                       |
+  |  destination:/topic/BUS_MVT_ALL |
+  | ─────────────────────────────►  |
+  |                                 |
+  |  MESSAGE (periodic)             |
+  |  subscription:sub-0             |
+  |  destination:/topic/BUS_MVT_ALL |
+  |  content-type:application/json  |
+  |  body: {…vehicles…}            |
+  | ◄─────────────────────────────  |
+  |                                 |
+  |  DISCONNECT                     |
+  |  receipt:rcpt-1                 |
+  | ─────────────────────────────►  |
+  |  RECEIPT                        |
+  |  receipt-id:rcpt-1              |
+  | ◄─────────────────────────────  |
+```

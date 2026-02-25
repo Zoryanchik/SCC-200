@@ -29,7 +29,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Implement `/rail/departures/{station}` endpoint.
 - [ ] Implement `/pricing` endpoint (distance-based stub ok).
 - [ ] Implement `/weather` and `/alerts` endpoints.
-- [ ] Add WebSocket or STOMP live updates adapter. **[Anton]**
+- [ ] Add WebSocket or STOMP live updates adapter. **[Anton]** ✅
 - [ ] Ensure multi-leg route geometry export for map polylines. **[Anton]**
 - [ ] Add station classification (P27) and filtering (P28). **[Anton]**
 - [ ] Add OSRM integration with walking fallback. **[Anton]**
@@ -126,7 +126,7 @@ Focus: Live data, routing infrastructure, and station features.
 | P3 | ~~Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from GET)~~ ✅ | **Medium** |
 | P4 | ~~Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments~~ ✅ | Low |
 | — | ~~Review mock FastAPI frontend for integration cues~~ (done) | ~~High~~ |
-| 8 | Add WebSocket/STOMP live updates adapter | Medium |
+| 8 | ~~Add WebSocket/STOMP live updates adapter~~ ✅ | Medium |
 | 9 | Ensure multi-leg route geometry export for map polylines | Medium |
 | 10+11 | Add station classification (P27) and filtering (P28) | Medium |
 | 13 | Add OSRM integration with walking fallback | Medium |
