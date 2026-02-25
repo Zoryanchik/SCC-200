@@ -32,7 +32,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Add WebSocket or STOMP live updates adapter. **[Anton]** ✅
 - [x] ~~Ensure multi-leg route geometry export for map polylines.~~ **[Anton]** ✅
 - [x] ~~Add station classification (P27) and filtering (P28).~~ **[Anton]** ✅
-- [ ] Add OSRM integration with walking fallback. **[Anton]**
+- [x] ~~Add OSRM integration with walking fallback.~~ **[Anton]** ✅
 - [ ] Update frontend services and hooks to match API responses. **[Jamie]**
 - [ ] Add developer docs and Docker compose. **[Jamie]**
 - [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
@@ -129,7 +129,7 @@ Focus: Live data, routing infrastructure, and station features.
 | 8 | ~~Add WebSocket/STOMP live updates adapter~~ ✅ | Medium |
 | 9 | Ensure multi-leg route geometry export for map polylines | ✅ Done |
 | 10+11 | ~~Add station classification (P27) and filtering (P28)~~ | ✅ Done |
-| 13 | Add OSRM integration with walking fallback | Medium |
+| 13 | ~~Add OSRM integration with walking fallback~~ | ✅ Done |
 
 ### Jamie — Frontend Integration & DevOps (7 tasks)
 Focus: Connecting the frontend to the new backend, docs, and hardening.

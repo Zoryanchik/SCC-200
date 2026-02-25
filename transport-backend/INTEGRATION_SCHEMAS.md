@@ -423,3 +423,91 @@ Client                           Server
   |  receipt-id:rcpt-1              |
   | ◄─────────────────────────────  |
 ```
+
+---
+
+## 10. `GET /walking/status`
+
+**Purpose:** Walking-engine health — reports OSRM availability, config, and
+precomputed transfer counts.  Useful for the frontend to decide whether to
+offer walking directions or show a degraded-mode indicator.
+
+### Response
+
+| Field               | Type    | Notes                                       |
+|---------------------|---------|---------------------------------------------|
+| `osrm_url`          | string  | Configured OSRM base URL                    |
+| `osrm_available`    | boolean | `true` if OSRM responds to a probe request  |
+| `max_walk_seconds`  | int     | Maximum walk duration considered (default 600) |
+| `precomputed_stops` | int     | Stops with outgoing precomputed transfers    |
+| `stops_with_coords` | int     | Stops with known coordinates                 |
+
+```json
+{
+  "osrm_url": "http://localhost:5001",
+  "osrm_available": false,
+  "max_walk_seconds": 600,
+  "precomputed_stops": 1200,
+  "stops_with_coords": 4500
+}
+```
+
+---
+
+## 11. `GET /walking/reachable?lat=<lat>&lon=<lon>&limit=<n>`
+
+**Purpose:** Return transit stops reachable by walking from an arbitrary
+location.  Uses OSRM when available; falls back to the precomputed
+inter-walk table augmented with haversine estimates.
+
+### Query Parameters
+
+| Param   | Type  | Default | Required | Notes                       |
+|---------|-------|---------|----------|-----------------------------|
+| `lat`   | float | —       | Yes      | Latitude of start point     |
+| `lon`   | float | —       | Yes      | Longitude of start point    |
+| `limit` | int   | `20`    | No       | Max stops to return         |
+
+### Response
+
+| Field            | Type    | Notes                                    |
+|------------------|---------|------------------------------------------|
+| `location`       | object  | `{lat, lon}` — echoed input              |
+| `osrm_available` | boolean | Whether OSRM was used for this request   |
+| `stops`          | array   | Nearby walkable stops sorted by time ↑   |
+
+Each stop:
+
+| Field          | Type        | Notes                              |
+|----------------|-------------|------------------------------------|
+| `stop_index`   | int         | Internal merged-data stop integer  |
+| `name`         | string      | Human-readable stop name           |
+| `walk_seconds` | int         | Walking time from the input point  |
+| `atco_code`    | string/null | NaPTAN ATCO code (null if unknown) |
+| `lat`          | number      | Latitude (omitted if unknown)      |
+| `lon`          | number      | Longitude (omitted if unknown)     |
+
+```json
+{
+  "location": {"lat": 54.048, "lon": -2.801},
+  "osrm_available": false,
+  "stops": [
+    {
+      "stop_index": 42,
+      "name": "Lancaster Bus Station",
+      "walk_seconds": 30,
+      "atco_code": "2500LAA15791",
+      "lat": 54.048,
+      "lon": -2.801
+    }
+  ]
+}
+```
+
+### Notes
+
+10. Walking fallback strategy: when OSRM is unreachable the engine uses the
+    precomputed inter-walk table (originally computed via OSRM during data
+    loading) augmented with haversine distance estimates at 1 m/s.  The
+    `osrm_available` field in the response tells the frontend which mode
+    was used.  Set `OSRM_URL` env var to point at a custom OSRM instance.

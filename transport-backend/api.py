@@ -324,6 +324,113 @@ async def stops_classify(classification: Optional[str] = None):
 
     return results
 
+# ── Walking / OSRM endpoints ────────────────────────────────────────
+
+
+@app.get("/walking/status")
+async def walking_status():
+    """Return walking-engine status (OSRM availability, config, counts).
+
+    Useful for the frontend to decide whether to offer walking
+    directions or to show a fallback indicator.
+    """
+    from fastapi.responses import JSONResponse
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        _timetable, _router, walking = get_router_for_date(date_str)
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Backend not initialized"},
+        )
+
+    return walking.status()
+
+
+@app.get("/walking/reachable")
+async def walking_reachable(
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    limit: int = 20,
+):
+    """Return stops reachable by walking from an arbitrary location.
+
+    Query params:
+        lat:   latitude of the starting point (required)
+        lon:   longitude of the starting point (required)
+        limit: max results to return (default 20)
+
+    Returns JSON with ``location``, ``osrm_available``, and a list of
+    nearby walkable ``stops`` sorted by walking time ascending.
+
+    The walking engine tries OSRM first; when OSRM is unreachable it
+    falls back to the precomputed inter-walk table augmented with
+    haversine distance estimates.  See ``walking.py`` for details.
+    """
+    from fastapi.responses import JSONResponse
+
+    if lat is None or lon is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "lat and lon query parameters are required"},
+        )
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        timetable, _router, walking = get_router_for_date(date_str)
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Backend not initialized"},
+        )
+
+    reachable = walking.reachable_stops((lat, lon))
+
+    merged = timetable.today
+    stop_coords = getattr(walking, "_coords", {})
+
+    # Resolve names and coords for each reachable stop
+    stops = []
+    for stop_int, walk_secs in reachable.items():
+        name = (merged.stop_metadata[stop_int]
+                if stop_int < len(merged.stop_metadata)
+                else f"stop#{stop_int}")
+        entry: Dict[str, Any] = {
+            "stop_index": stop_int,
+            "name": name,
+            "walk_seconds": walk_secs,
+        }
+        # Resolve ATCO code
+        bus_mapper = getattr(merged.bus_data, "map_stops", None)
+        bus_stop_count = len(merged.bus_data.stop_to_routes)
+        train_mapper = getattr(merged.train_data, "map_stops", None)
+        atco = None
+        if stop_int < bus_stop_count and bus_mapper:
+            try:
+                atco = bus_mapper.get_code(stop_int)
+            except Exception:
+                pass
+        elif train_mapper:
+            try:
+                atco = train_mapper.get_code(stop_int - bus_stop_count)
+            except Exception:
+                pass
+        entry["atco_code"] = atco
+
+        coord = stop_coords.get(stop_int)
+        if coord:
+            entry["lat"] = coord[0]
+            entry["lon"] = coord[1]
+        stops.append(entry)
+        if len(stops) >= limit:
+            break
+
+    return {
+        "location": {"lat": lat, "lon": lon},
+        "osrm_available": walking.osrm_available,
+        "stops": stops,
+    }
 
 # -”€-”€ Static files & frontend -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 

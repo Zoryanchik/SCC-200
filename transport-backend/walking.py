@@ -1,10 +1,24 @@
 import json
 import math
+import os
 import urllib.request
+
+# Default OSRM endpoint, configurable via the ``OSRM_URL`` environment
+# variable.  Containers can set this to e.g. ``http://osrm:5000``; host
+# development defaults to ``http://localhost:5001``.
+_DEFAULT_OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5001")
 
 
 class Walking:
     """Walking transfers powered by OSRM and a precomputed transfer table.
+
+    When OSRM is unreachable the class falls back to:
+
+    1. **Precomputed inter-walk table** — uses the nearest known stop
+       as a proxy and adds the precomputed transfers from that stop
+       (these were originally computed via OSRM during data loading).
+    2. **Haversine distance estimate** — straight-line distance at
+       ~1 m/s walking speed.
 
     Parameters
     ----------
@@ -15,19 +29,60 @@ class Walking:
     stop_coords : dict
         {stop_int: (lat, lon)} — coordinates for every stop in
         merged-data space.
-    osrm_base : str
-        Base URL of a running OSRM foot-profile server.
+    osrm_base : str or None
+        Base URL of a running OSRM foot-profile server.  Defaults to
+        the ``OSRM_URL`` environment variable, falling back to
+        ``http://localhost:5001``.
     max_walk_seconds : int
         Maximum walk duration to consider (default 600 = 10 min).
     """
 
     def __init__(self, inter_walk_table, stop_coords,
-                 osrm_base="http://localhost:5001",
+                 osrm_base=None,
                  max_walk_seconds=600):
         self._inter = inter_walk_table          # {stop_int: {stop_int: secs}}
         self._coords = stop_coords              # {stop_int: (lat, lon)}
-        self._osrm = osrm_base
+        self._osrm = osrm_base if osrm_base is not None else _DEFAULT_OSRM_URL
         self._max = max_walk_seconds
+        self._osrm_ok: bool | None = None       # None = not probed yet
+
+    # ── OSRM availability ────────────────────────────────────────
+
+    @property
+    def osrm_url(self) -> str:
+        """Return the configured OSRM base URL."""
+        return self._osrm
+
+    @property
+    def osrm_available(self) -> bool:
+        """Probe OSRM once and cache the result."""
+        if self._osrm_ok is None:
+            self._osrm_ok = self._probe_osrm()
+        return self._osrm_ok
+
+    def _probe_osrm(self) -> bool:
+        """Return True if OSRM responds to a nearest query."""
+        try:
+            url = self._osrm.rstrip("/") + "/nearest/v1/foot/0,0"
+            resp = urllib.request.urlopen(url, timeout=3)
+            resp.close()
+            return True
+        except Exception:
+            return False
+
+    def reset_osrm_probe(self):
+        """Clear the cached probe result so the next access re-checks."""
+        self._osrm_ok = None
+
+    def status(self) -> dict:
+        """Return a summary of walking-engine state."""
+        return {
+            "osrm_url": self._osrm,
+            "osrm_available": self.osrm_available,
+            "max_walk_seconds": self._max,
+            "precomputed_stops": len(self._inter),
+            "stops_with_coords": len(self._coords),
+        }
 
     # ── transfers between transit stops (precomputed) ────────────
 
@@ -83,15 +138,37 @@ class Walking:
             data = json.loads(resp.read())
             resp.close()
         except Exception:
-            # OSRM not available, fall back to distance-based estimate
+            # OSRM not available — deterministic fallback.
+            #
+            # Strategy:
+            #   1. Haversine estimate for every candidate stop.
+            #   2. Find the nearest candidate that is a KEY in the
+            #      precomputed inter_walk table, then add its
+            #      precomputed neighbours (these came from a prior OSRM
+            #      run and are therefore more accurate than haversine).
+            #   3. Merge, keeping the shorter time for any stop that
+            #      appears in both sets.
             result = {}
             for stop_int in candidates:
                 slat, slon = self._coords[stop_int]
-                # Rough walking time estimate: 1 m/s = 60 seconds per 60 meters
-                dist_m = math.sqrt((slat - lat)**2 + (slon - lon)**2) * 111000
+                dist_m = _haversine_m(lat, lon, slat, slon)
                 walk_time = int(dist_m / 1.0)  # 1 m/s walking speed
                 if walk_time <= self._max:
                     result[stop_int] = walk_time
+
+            # Augment with precomputed inter-walk table via nearest proxy
+            nearest_stop, nearest_secs = self._nearest_precomputed(lat, lon)
+            if nearest_stop is not None and nearest_secs <= self._max:
+                # The nearest precomputed stop is walkable — include it
+                result.setdefault(nearest_stop, nearest_secs)
+                result[nearest_stop] = min(result[nearest_stop], nearest_secs)
+
+                for nb_stop, nb_secs in self._inter.get(nearest_stop, {}).items():
+                    total = nearest_secs + nb_secs
+                    if total <= self._max:
+                        if nb_stop not in result or total < result[nb_stop]:
+                            result[nb_stop] = total
+
             sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
             # Include exact matches (stops at the user's exact location)
             sorted_result.update(exact_matches)
@@ -131,5 +208,42 @@ class Walking:
         except Exception:
             pass
         # Fallback: haversine distance, 1 m/s walking speed
-        dist_m = math.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2) * 111000
+        dist_m = _haversine_m(lat1, lon1, lat2, lon2)
         return int(dist_m / 1.0)
+
+    # ── private helpers ──────────────────────────────────────────
+
+    def _nearest_precomputed(self, lat, lon):
+        """Return (stop_int, walk_seconds) for the nearest precomputed stop.
+
+        Only considers stops that are **keys** in the inter-walk table
+        (i.e. stops that have outgoing precomputed transfers).
+        Returns ``(None, None)`` if the table is empty or no stop is
+        within ``max_walk_seconds``.
+        """
+        best_stop = None
+        best_secs = None
+        for stop_int in self._inter:
+            c = self._coords.get(stop_int)
+            if c is None:
+                continue
+            dist_m = _haversine_m(lat, lon, c[0], c[1])
+            secs = int(dist_m / 1.0)  # 1 m/s
+            if secs <= self._max and (best_secs is None or secs < best_secs):
+                best_stop = stop_int
+                best_secs = secs
+        return best_stop, best_secs
+
+
+# ── module-level utilities ───────────────────────────────────────────
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """Return the great-circle distance in metres between two points."""
+    R = 6_371_000  # Earth radius in metres
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = (math.sin(dphi / 2) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))

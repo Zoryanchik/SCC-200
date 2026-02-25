@@ -62,6 +62,9 @@ cargo run
 - Each transit leg has an intermediate_stops field: list of {name, lat, lon} for stops between boarding and alighting (exclusive of endpoints). Walking legs omit this field.
 - station_classifier.py computes stop classifications (hub/interchange/local/request_stop) from MergedData metrics: degree (routes), frequency (departures), interchange (distinct lines). Default thresholds tuned for NW England networks.
 - GET /stops/classify returns full classification data with metrics. GET /search/stops?classification=hub filters search results by class and excludes geocode locations. Classification is cached per-process via _classification_cache (ATCO→class dict).
+- Walking class (walking.py) uses OSRM_URL env var (default http://localhost:5001) configurable per container. osrm_available property probes once and caches. When OSRM is down, reachable_stops() falls back to precomputed inter-walk table (originally computed via OSRM during data loading) plus haversine estimates. _haversine_m() is a proper great-circle distance function.
+- main.py now passes OSRM_URL through walking_raw dict to build_for_date() so Walking() uses the configured URL, not the default. precompute_walking_transfers() also receives osrm_base explicitly.
+- GET /walking/status returns {osrm_url, osrm_available, max_walk_seconds, precomputed_stops, stops_with_coords}. GET /walking/reachable?lat=&lon= returns nearby walkable stops sorted by walk_seconds, with ATCO codes and coords resolved from merged-data.
 
 ## Feature Development Quality Standards
 

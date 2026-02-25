@@ -93,7 +93,7 @@ def initialize_base():
         loader.clear_walking_transfers()
     loader.download_stop_coords()
     if osrm_ok:
-        loader.precompute_walking_transfers()
+        loader.precompute_walking_transfers(osrm_base=OSRM_URL)
 
     # Build inter_walk table keyed by ATCO codes (will be remapped
     # to per-date integer IDs when the network is built)
@@ -103,6 +103,7 @@ def initialize_base():
     walking_raw = {
         "transfers": raw_transfers,   # {atco: {atco: secs}}
         "coords":    raw_coords,      # {atco: (lat, lon)}
+        "osrm_url":  OSRM_URL,        # propagated to Walking()
     }
 
     print(f"  ✓ Walking ready  ({len(raw_transfers)} stops with transfers, "
@@ -183,7 +184,8 @@ def build_for_date(loader, walking_raw, date_str, mode="both"):
         if s_int is not None:
             stop_coords[s_int] = (lat, lon)
 
-    walking = Walking(inter_table, stop_coords)
+    osrm_url = walking_raw.get("osrm_url")
+    walking = Walking(inter_table, stop_coords, osrm_base=osrm_url)
 
     print(f"  ✓ Timetable & Router ready for {date_str}")
     print(f"    Walking: {len(inter_table)} stops with transfers, "
