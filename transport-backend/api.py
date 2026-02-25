@@ -30,18 +30,6 @@ logger = logging.getLogger(__name__)
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-class BusLiveRequest(BaseModel):
-    lat: float
-    lon: float
-    lat_tol: float = 0.0003
-    lon_tol: float = 0.0003
-
-class BusLiveResponse(BaseModel):
-    success: bool
-    buses: Optional[List[Dict[str, Any]]] = None
-    error: Optional[str] = None
-
-
 # Routing request/response models
 class RouteRequest(BaseModel):
     start_lat: float
@@ -206,31 +194,6 @@ async def get_frontend():
     return FileResponse(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
     )
-
-@app.post("/api/bus_live", response_model=BusLiveResponse)
-async def get_live_buses(request: BusLiveRequest):
-    """Get live bus data near a location."""
-    try:
-        from bus_live import BusLive as BusLiveClass
-        bl = BusLiveClass(timeout=10)  # 10 second timeout for live data
-        results = bl.get_bus_live(request.lat, request.lon, lat_tol=request.lat_tol, lon_tol=request.lon_tol)
-
-        # Convert tuples to dictionaries for JSON response
-        buses = []
-        for line_ref, dest, lat, lon, operator in results:
-            buses.append({
-                "line_ref": line_ref,
-                "destination": dest,
-                "latitude": lat,
-                "longitude": lon,
-                "operator": operator
-            })
-
-        return BusLiveResponse(success=True, buses=buses)
-
-    except Exception as e:
-        return BusLiveResponse(success=False, error=str(e))
-
 
 @app.get("/bus/live/{operator}")
 async def bus_live_operator(

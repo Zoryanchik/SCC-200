@@ -1,6 +1,6 @@
 ﻿"""Tests for the FastAPI transport backend API.
 
-Covers /health, /api/bus_live, /api/route, format_route_text,
+Covers /health, /bus/live/{operator}, /api/route, format_route_text,
 get_router_for_date, and core app setup.
 
 Test strategy:
@@ -107,83 +107,6 @@ class TestAppMetadata:
         """The /health path in the OpenAPI schema must list a GET operation."""
         schema = client.get("/openapi.json").json()
         assert "get" in schema["paths"]["/health"]
-
-
-# â”€â”€ /api/bus_live endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-
-class TestBusLiveEndpoint:
-    """Validate the /api/bus_live POST endpoint."""
-
-    def test_bus_live_success(self, client: TestClient):
-        """POST /api/bus_live with valid coords returns bus data."""
-        # Configure the BusLive mock to return sample tuples
-        mock_bl_instance = MagicMock()
-        mock_bl_instance.get_bus_live.return_value = [
-            ("10", "City Centre", 53.4808, -2.2426, "FIRST"),
-            ("42", "Airport", 53.3530, -2.2750, "STAGE"),
-        ]
-        sys.modules["bus_live"].BusLive.return_value = mock_bl_instance
-
-        response = client.post("/api/bus_live", json={
-            "lat": 53.48,
-            "lon": -2.24,
-        })
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert len(data["buses"]) == 2
-        assert data["buses"][0]["line_ref"] == "10"
-        assert data["buses"][0]["destination"] == "City Centre"
-        assert data["buses"][1]["operator"] == "STAGE"
-
-    def test_bus_live_with_custom_tolerance(self, client: TestClient):
-        """POST /api/bus_live respects custom lat/lon tolerance."""
-        mock_bl_instance = MagicMock()
-        mock_bl_instance.get_bus_live.return_value = []
-        sys.modules["bus_live"].BusLive.return_value = mock_bl_instance
-
-        response = client.post("/api/bus_live", json={
-            "lat": 53.48,
-            "lon": -2.24,
-            "lat_tol": 0.01,
-            "lon_tol": 0.01,
-        })
-        assert response.status_code == 200
-        assert response.json()["success"] is True
-        # Verify tolerance values were passed through
-        call_kwargs = mock_bl_instance.get_bus_live.call_args
-        assert call_kwargs[1]["lat_tol"] == 0.01
-        assert call_kwargs[1]["lon_tol"] == 0.01
-
-    def test_bus_live_error_returns_failure(self, client: TestClient):
-        """POST /api/bus_live returns success=false on internal error."""
-        mock_bl_instance = MagicMock()
-        mock_bl_instance.get_bus_live.side_effect = ConnectionError("API down")
-        sys.modules["bus_live"].BusLive.return_value = mock_bl_instance
-
-        response = client.post("/api/bus_live", json={
-            "lat": 53.48,
-            "lon": -2.24,
-        })
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is False
-        assert "API down" in data["error"]
-
-    def test_bus_live_empty_results(self, client: TestClient):
-        """POST /api/bus_live returns empty list when no buses found."""
-        mock_bl_instance = MagicMock()
-        mock_bl_instance.get_bus_live.return_value = []
-        sys.modules["bus_live"].BusLive.return_value = mock_bl_instance
-
-        response = client.post("/api/bus_live", json={
-            "lat": 53.48,
-            "lon": -2.24,
-        })
-        data = response.json()
-        assert data["success"] is True
-        assert data["buses"] == []
 
 
 # â”€â”€ /api/route endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
