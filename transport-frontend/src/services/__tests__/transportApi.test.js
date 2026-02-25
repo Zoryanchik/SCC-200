@@ -337,9 +337,9 @@ describe('getJourneyPlans — POST /journey/plan', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBe('No route found');
-    expect(result.legs).toBeNull();
-    expect(result.meta).toBeNull();
-    expect(result.routeGeometries).toBeNull();
+    expect(result.legs).toStrictEqual([]);
+    expect(result.meta).toStrictEqual({});
+    expect(result.routeGeometries).toStrictEqual([]);
   });
 
   test('throws when fromStop/toStop lack lat/lon', async () => {

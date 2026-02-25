@@ -171,7 +171,13 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
-    return await response.json();
+    const responseJson = await response.json();
+    // Ensure that legs, meta, and routeGeometrics !== null | undefined
+    responseJson.legs ??= [];
+    responseJson.meta ??= {};
+    responseJson.routeGeometries ??= [];
+
+    return responseJson;
   } catch (error) {
     console.error('Error getting journey plans:', error);
     throw error;

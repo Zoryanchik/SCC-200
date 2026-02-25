@@ -36,7 +36,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Update frontend services and hooks to match API responses. **[Jamie]**
 - [ ] Add developer docs and Docker compose. **[Jamie]**
 - [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
-- [ ] **P5:** Fix `/journey/plan` error response — returns `null` arrays instead of `[]`/`{}`, will crash frontend `.map()`.
+- [x] **P5:** Fix `/journey/plan` error response — returns `null` arrays instead of `[]`/`{}`, will crash frontend `.map()`.
 - [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173).
 
 ## Low Priority
