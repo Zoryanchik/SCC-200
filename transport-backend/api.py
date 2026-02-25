@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
+from station_classifier import classify_all, classify_to_lookup
 from time_utils import seconds_since_midnight
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 
@@ -154,16 +155,33 @@ def geocode_locations(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 
 
 @app.get("/search/stops")
-async def search_stops(q: str = "", limit: int = 10):
+async def search_stops(
+    q: str = "",
+    limit: int = 10,
+    classification: Optional[str] = None,
+):
     """Search stops by name (case-insensitive substring match).
 
     Query params:
-        q:     search string (required for results)
-        limit: max results to return (default 10)
+        q:              search string (required for results)
+        limit:          max results to return (default 10)
+        classification: optional filter — one of hub, interchange,
+                        local, request_stop.  Only stops matching the
+                        class are returned (geocode locations are
+                        excluded when this filter is active).
 
-    Returns JSON list of {id, name, atco_code, lat, lon, type}.
+    Returns JSON list of {id, name, atco_code, lat, lon, type
+    [, classification]}.
     """
     from fastapi.responses import JSONResponse
+
+    _VALID_CLASSES = {"hub", "interchange", "local", "request_stop"}
+    if classification and classification not in _VALID_CLASSES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid classification '{classification}'. "
+                     f"Must be one of: {', '.join(sorted(_VALID_CLASSES))}"},
+        )
 
     if not q:
         return []
@@ -176,9 +194,24 @@ async def search_stops(q: str = "", limit: int = 10):
 
     try:
         loader = _base_cache["loader"]
-        stop_results = loader.search_stops(q, limit)
+        stop_results = loader.search_stops(q, limit if not classification else limit * 3)
         for stop in stop_results:
             stop["type"] = "stop"
+
+        # Apply classification filter when requested
+        if classification:
+            lookup = _get_classification_lookup()
+            filtered = []
+            for stop in stop_results:
+                atco = stop.get("atco_code")
+                cls = _resolve_stop_classification(atco, lookup)
+                if cls == classification:
+                    stop["classification"] = cls
+                    filtered.append(stop)
+                if len(filtered) >= limit:
+                    break
+            return filtered
+
         remaining = max(0, limit - len(stop_results))
         location_results = []
         if remaining > 0:
@@ -192,6 +225,104 @@ async def search_stops(q: str = "", limit: int = 10):
             status_code=500,
             content={"error": str(exc)},
         )
+
+
+# ── Station classification helpers ───────────────────────────────────
+_classification_cache: Optional[Dict[str, str]] = None
+
+
+def _get_classification_lookup() -> Dict[str, str]:
+    """Return {atco_code: classification} for all stops in today's network.
+
+    Lazily computed on first call; cached for the process lifetime.
+    Uses today's MergedData (via the first router cache entry, or builds
+    one for today's date if none exists yet).
+    """
+    global _classification_cache
+    if _classification_cache is not None:
+        return _classification_cache
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        timetable, _router, _walking = get_router_for_date(date_str)
+    except Exception:
+        return {}
+
+    merged = timetable.today
+    idx_lookup = classify_to_lookup(merged)
+
+    # Convert stop-int → ATCO code so we can match search results
+    atco_lookup: Dict[str, str] = {}
+    bus_mapper = getattr(merged.bus_data, "map_stops", None)
+    train_mapper = getattr(merged.train_data, "map_stops", None)
+    bus_stop_count = len(merged.bus_data.stop_to_routes)
+
+    for stop_int, cls in idx_lookup.items():
+        code = None
+        if stop_int < bus_stop_count and bus_mapper:
+            try:
+                code = bus_mapper.get_code(stop_int)
+            except Exception:
+                pass
+        elif train_mapper:
+            try:
+                code = train_mapper.get_code(stop_int - bus_stop_count)
+            except Exception:
+                pass
+        if code:
+            atco_lookup[code] = cls
+
+    _classification_cache = atco_lookup
+    return _classification_cache
+
+
+def _resolve_stop_classification(
+    atco_code: Optional[str],
+    lookup: Dict[str, str],
+) -> str:
+    """Return the classification for a stop, defaulting to request_stop."""
+    if not atco_code:
+        return "request_stop"
+    return lookup.get(atco_code, "request_stop")
+
+
+@app.get("/stops/classify")
+async def stops_classify(classification: Optional[str] = None):
+    """Return station classification data for all stops.
+
+    Query params:
+        classification: optional filter — if provided, only stops of
+                        that class are returned.
+
+    Returns JSON list of {stop_index, name, degree, frequency,
+    interchange, lines, classification}.
+    """
+    from fastapi.responses import JSONResponse
+
+    _VALID_CLASSES = {"hub", "interchange", "local", "request_stop"}
+    if classification and classification not in _VALID_CLASSES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid classification '{classification}'. "
+                     f"Must be one of: {', '.join(sorted(_VALID_CLASSES))}"},
+        )
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        timetable, _router, _walking = get_router_for_date(date_str)
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Backend not initialized"},
+        )
+
+    merged = timetable.today
+    results = classify_all(merged)
+
+    if classification:
+        results = [r for r in results if r["classification"] == classification]
+
+    return results
 
 
 # -”€-”€ Static files & frontend -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€

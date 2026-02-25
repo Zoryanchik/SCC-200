@@ -27,10 +27,11 @@ This document maps every backend endpoint to its **request contract** and
 **Purpose:** Autocomplete stop / location search (NaPTAN + Nominatim geocoder).
 
 ### Query Parameters
-| Param  | Type   | Default | Required |
-|--------|--------|---------|----------|
-| `q`    | string | `""`    | Yes      |
-| `limit`| int    | `10`    | No       |
+| Param            | Type   | Default | Required | Notes |
+|------------------|--------|---------|----------|-------|
+| `q`              | string | `""`    | Yes      |       |
+| `limit`          | int    | `10`    | No       |       |
+| `classification` | string | —       | No       | Filter by station class: `hub`, `interchange`, `local`, `request_stop`. When active, geocode locations are excluded. |
 
 ### Response — `Array<StopResult>`
 
@@ -44,6 +45,7 @@ Each item has:
 | `lat`       | number        | Latitude                                    |
 | `lon`       | number        | Longitude                                   |
 | `type`      | string        | `"stop"` or `"location"`                    |
+| `classification` | string\|undefined | Present when `?classification=` is used. One of `hub`, `interchange`, `local`, `request_stop`. |
 
 ```json
 [
@@ -278,6 +280,59 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 | `fetchBusTimes()`            | `GET /bus/times/{stopCode}`              | ❌ Not implemented |
 | `fetchBusArrivals()`         | `GET /bus/arrivals/{stopCode}`           | ❌ Not implemented |
 
+---
+
+## 9. `GET /stops/classify?classification=<class>`
+
+**Purpose:** Return station classification data for all stops based on network topology metrics.
+
+### Query Parameters
+| Param            | Type   | Default | Required | Notes |
+|------------------|--------|---------|----------|-------|
+| `classification` | string | —       | No       | Filter: `hub`, `interchange`, `local`, `request_stop` |
+
+### Response — `Array<ClassifiedStop>`
+
+Each item has:
+
+| Field            | Type     | Notes                                    |
+|------------------|----------|------------------------------------------|
+| `stop_index`     | int      | Internal merged stop index               |
+| `name`           | string   | Human-readable name                      |
+| `degree`         | int      | Number of distinct routes serving stop   |
+| `frequency`      | int      | Total daily departures through stop      |
+| `interchange`    | int      | Number of distinct service line-names    |
+| `lines`          | string[] | Sorted list of line names                |
+| `classification` | string   | `"hub"`, `"interchange"`, `"local"`, or `"request_stop"` |
+
+### Classification Rules
+
+| Class          | Rule                                       |
+|----------------|-------------------------------------------|
+| `hub`          | degree ≥ 5 **and** frequency ≥ 100         |
+| `interchange`  | interchange ≥ 3 **or** degree ≥ 4          |
+| `local`        | frequency ≥ 10                             |
+| `request_stop` | everything else                            |
+
+```json
+[
+  { "stop_index": 42, "name": "Lancaster Bus Station", "degree": 8, "frequency": 210, "interchange": 6, "lines": ["1", "2", "40", "41", "100", "X1"], "classification": "hub" },
+  { "stop_index": 7, "name": "Village Green", "degree": 1, "frequency": 4, "interchange": 1, "lines": ["87"], "classification": "request_stop" }
+]
+```
+
+### Error (400)
+```json
+{ "error": "Invalid classification 'mega_hub'. Must be one of: hub, interchange, local, request_stop" }
+```
+
+### Error (503) — backend not initialised
+```json
+{ "error": "Backend not initialized" }
+```
+
+---
+
 ### Key Integration Notes
 
 1. **API_BASE_URL mismatch**: Frontend `transportApi.js` uses `https://transport.scc.lancs.ac.uk` as base URL. For local dev, this must be changed to `http://localhost:5005` or a proxy configured in vite.
@@ -288,6 +343,8 @@ Serves `index.html` (Live Bus Data Viewer). Not consumed by React frontend.
 6. **CORS**: Backend allows `localhost:3000` and `localhost:5173`. Vite dev server (default 5173) is covered.
 7. **`/journey/plan` error shape**: On failure, returns `success: false` with `legs: null`, `meta: null`, `routeGeometries: null` — frontend hooks must gracefully handle null arrays.
 8. **`WS /ws/live` STOMP broker**: Frontend `liveUpdatesManager` must set `brokerURL` to `ws://localhost:5005/ws/live` for local dev (default points at external server).
+9. **Station classification**: `GET /stops/classify` computes classifications from today's network data. `GET /search/stops?classification=hub` filters search results by class. Classification is cached for the process lifetime.
+9. **Station classification**: `GET /stops/classify` computes classifications from today's network data. `GET /search/stops?classification=hub` filters search results by class. Classification is cached for the process lifetime.
 
 ---
 
