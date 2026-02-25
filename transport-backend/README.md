@@ -5,9 +5,9 @@ repository ships a small Lancashire PBF by default so you can run routing
 locally without downloading the full UK extract.
 
 Key points
-- OSRM routed server (HTTP) — expected at `http://localhost:5321` by default.
+- OSRM routed server (HTTP) — expected at `http://localhost:5012` by default.
   You can override this with the `OSRM_URL` environment variable (for example
-  `export OSRM_URL=http://127.0.0.1:5321`).
+  `export OSRM_URL=http://127.0.0.1:5012`).
 - Canonical local OSRM data directory: `transport-backend/osrm/data`. The
   helper script `transport-backend/osrm/run_osrm.sh` stores and reads PBF and
   `.osrm` files here by default.
@@ -25,7 +25,7 @@ Script location and defaults
 transport-backend/osrm/run_osrm.sh
 Default PBF: https://download.geofabrik.de/europe/united-kingdom/england/lancashire-latest.osm.pbf
 Default data dir: transport-backend/osrm/data
-Default host port: 5321
+Default host port: 5012
 ```
 
 Basic usage (from the repository root):
@@ -37,7 +37,7 @@ Basic usage (from the repository root):
 Override the PBF, data dir and port (positional args):
 
 ```bash
-./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5321
+./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5012
 ```
 
 Notes on container runtimes
@@ -52,7 +52,7 @@ Notes on container runtimes
 Running the backend
 
 Start the backend helper which will attempt to connect to the OSRM server at
-the URL provided by `OSRM_URL` (or `http://localhost:5321` by default):
+the URL provided by `OSRM_URL` (or `http://localhost:5012` by default):
 
 ```bash
 ./transport-backend/run_backend.sh
@@ -88,22 +88,22 @@ cd transport-backend
 
 ## OSRM (Routing) service
 
-This backend expects an OSRM routed server to be available at http://localhost:5321 by default. You can override the endpoint used by the backend with the `OSRM_URL` environment variable (for example `export OSRM_URL=http://127.0.0.1:5321`).
+This backend expects an OSRM routed server to be available at http://localhost:5012 by default. You can override the endpoint used by the backend with the `OSRM_URL` environment variable (for example `export OSRM_URL=http://127.0.0.1:5012`).
 
 Quick options to provide an OSRM instance:
 
-- Use a host container mapped to port 5321 (Docker or Podman):
+- Use a host container mapped to port 5012 (Docker or Podman):
 
 ```sh
-# Build or acquire an OSRM dataset and run the routed server (host port 5321 -> container 5000)
-docker run -d -p 5321:5000 -v /path/to/data:/data osrm/osrm-backend \
-	osrm-routed --algorithm mld /data/your-area.osrm
+# Build or acquire an OSRM dataset and run the routed server (host port 5012 -> container 5012)
+docker run -d -p 5012:5012 -v /path/to/data:/data osrm/osrm-backend \
+  osrm-routed --algorithm mld -p 5012 /data/your-area.osrm
 ```
 
 - If you're on macOS and prefer Podman note that Podman uses a small Linux VM. Either start that VM first (`podman machine init` then `podman machine start`) or use Docker as a fallback. The backend will read `OSRM_URL` and connect to the running service.
 
 Notes:
-- The default port previously used was 5001 for historical reasons — this repository now expects 5321 to avoid colliding with other local services.
+- The default port previously used was 5001 for historical reasons — this repository now expects 5012 to avoid colliding with other local services.
 - If you run OSRM in a container, make sure the container has access to the prepared `.osrm` files (from the extract/partition/customize steps).
 
 
@@ -117,10 +117,10 @@ downloading the same extract multiple times.
 first start podman virtual environment:
 ./run_backend.sh
 
-to run mock frontend:
-python3 api.py
+ to run mock frontend:
+ python3 api.py
 
-go to http://localhost:5005
+ go to http://localhost:5050
 
 
 Run main.py in terminal

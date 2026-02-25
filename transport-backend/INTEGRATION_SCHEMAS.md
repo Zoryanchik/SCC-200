@@ -335,14 +335,14 @@ Each item has:
 
 ### Key Integration Notes
 
-1. **API_BASE_URL mismatch**: Frontend `transportApi.js` uses `https://transport.scc.lancs.ac.uk` as base URL. For local dev, this must be changed to `http://localhost:5005` or a proxy configured in vite.
+1. **API_BASE_URL mismatch**: Frontend `transportApi.js` uses `https://transport.scc.lancs.ac.uk` as base URL. For local dev, this must be changed to `http://localhost:5050` or a proxy configured in vite.
 2. **`/bus/live/{operator}` response shape**: Backend returns `{line, destination, lat, lon}`. Frontend mock tests already use this shape — confirmed aligned.
 3. **`/search/stops` mixed types**: Backend returns both `type: "stop"` and `type: "location"` results. Frontend tests already handle this.
 4. **`/journey/plan` geometry format**: `routeGeometries[*].coords` uses `[lat, lon]` pairs (not GeoJSON `[lon, lat]`). Frontend polyline rendering must respect this order.
 5. **`POST /api/bus_live` removed**: The duplicate endpoint was removed. All consumers (including the mock HTML frontend) now use `GET /bus/live/{operator}`.
 6. **CORS**: Backend allows `localhost:3000` and `localhost:5173`. Vite dev server (default 5173) is covered.
 7. **`/journey/plan` error shape**: On failure, returns `success: false` with `legs: null`, `meta: null`, `routeGeometries: null` — frontend hooks must gracefully handle null arrays.
-8. **`WS /ws/live` STOMP broker**: Frontend `liveUpdatesManager` must set `brokerURL` to `ws://localhost:5005/ws/live` for local dev (default points at external server).
+8. **`WS /ws/live` STOMP broker**: Frontend `liveUpdatesManager` must set `brokerURL` to `ws://localhost:5050/ws/live` for local dev (default points at external server).
 9. **Station classification**: `GET /stops/classify` computes classifications from today's network data. `GET /search/stops?classification=hub` filters search results by class. Classification is cached for the process lifetime.
 9. **Station classification**: `GET /stops/classify` computes classifications from today's network data. `GET /search/stops?classification=hub` filters search results by class. Classification is cached for the process lifetime.
 
@@ -355,7 +355,7 @@ Each item has:
 ### Connection
 
 ```
-ws://localhost:5005/ws/live
+ws://localhost:5050/ws/live
 ```
 
 The endpoint speaks STOMP 1.2 and is compatible with `@stomp/stompjs` v7.
@@ -444,7 +444,7 @@ offer walking directions or show a degraded-mode indicator.
 
 ```json
 {
-  "osrm_url": "http://localhost:5321",
+  "osrm_url": "http://localhost:5012",
   "osrm_available": false,
   "max_walk_seconds": 600,
   "precomputed_stops": 1200,

@@ -427,7 +427,7 @@ def _build_mock_walking():
     mock_walking = MagicMock()
     mock_walking.osrm_available = False
     mock_walking.status.return_value = {
-        "osrm_url": "http://localhost:5321",
+    "osrm_url": "http://localhost:5012",
         "osrm_available": False,
         "max_walk_seconds": 600,
         "precomputed_stops": 10,
@@ -467,7 +467,7 @@ class TestWalkingStatusEndpoint:
             resp = client.get("/walking/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["osrm_url"] == "http://localhost:5321"
+        assert data["osrm_url"] == "http://localhost:5012"
         assert data["osrm_available"] is False
         assert data["max_walk_seconds"] == 600
         assert data["precomputed_stops"] == 10
