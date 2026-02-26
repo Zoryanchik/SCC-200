@@ -5,6 +5,7 @@ import pickle
 import re
 import sqlite3
 import ssl
+import urllib.error
 import tempfile
 import json
 import urllib.request
@@ -25,7 +26,25 @@ class BusLoader:
         creation time from each, and collects its download URL.
         """
         datasets = self._fetch_dataset_info()
-        return [d['download_url'] for d in datasets]
+
+        # If the local DB contains entries in dataset_meta, skip any
+        # download URLs that are already present. This avoids returning
+        # URLs we've already downloaded/recorded unless the caller wants
+        # to force-refresh via other paths.
+        existing_urls = set()
+        try:
+            if os.path.exists(self.db_path):
+                conn = sqlite3.connect(self.db_path)
+                cur = conn.cursor()
+                cur.execute("SELECT download_url FROM dataset_meta")
+                existing_urls = {row[0] for row in cur.fetchall()}
+                conn.close()
+        except Exception:
+            # If anything goes wrong reading the DB, fall back to
+            # returning all discovered URLs.
+            existing_urls = set()
+
+        return [d['download_url'] for d in datasets if d.get('download_url') not in existing_urls]
 
     def _fetch_dataset_info(self):
         """Return a list of dicts with source_url, download_url, modified
@@ -49,14 +68,24 @@ class BusLoader:
 
         datasets = []
         for src in sources:
-            resp = urllib.request.urlopen(src, context=ctx)
-            data = json.loads(resp.read())
+            try:
+                resp = urllib.request.urlopen(src, context=ctx, timeout=10)
+                data = json.loads(resp.read())
+            except Exception as exc:
+                print(f"Warning: failed to fetch index {src}: {exc}")
+                continue
             results = data.get('results', [])
             if not results:
                 continue
             latest = max(results, key=lambda r: r.get('created', ''))
             url = latest.get('url', '')
             if url:
+                # Validate the download URL is reachable before adding it to the list.
+                try:
+                    _ = urllib.request.urlopen(url, context=ctx, timeout=8).getcode()
+                except Exception as exc:
+                    print(f"Warning: download URL unreachable {url}: {exc}")
+                    continue
                 datasets.append({
                     'source_url': src,
                     'download_url': url,
@@ -64,8 +93,12 @@ class BusLoader:
                 })
 
         for src, desc in desc_sources:
-            resp = urllib.request.urlopen(src, context=ctx)
-            data = json.loads(resp.read())
+            try:
+                resp = urllib.request.urlopen(src, context=ctx, timeout=10)
+                data = json.loads(resp.read())
+            except Exception as exc:
+                print(f"Warning: failed to fetch index {src}: {exc}")
+                continue
             results = data.get('results', [])
             matched = [r for r in results if r.get('description') == desc]
             if not matched:
@@ -73,6 +106,11 @@ class BusLoader:
             latest = max(matched, key=lambda r: r.get('created', ''))
             url = latest.get('url', '')
             if url:
+                try:
+                    _ = urllib.request.urlopen(url, context=ctx, timeout=8).getcode()
+                except Exception as exc:
+                    print(f"Warning: download URL unreachable {url}: {exc}")
+                    continue
                 datasets.append({
                     'source_url': src,
                     'download_url': url,
@@ -111,7 +149,10 @@ class BusLoader:
 
         print(f"  {len(changed)} dataset(s) changed — reloading...")
         for ds in changed:
-            self.download_and_load(ds['download_url'])
+            success = self.download_and_load(ds['download_url'])
+            if not success:
+                print(f"  Warning: failed to download/load dataset {ds.get('download_url')}; skipping metadata update")
+                continue
             # save the new timestamp
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
@@ -467,14 +508,30 @@ class BusLoader:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        resp = urllib.request.urlopen(url, context=ctx)
-        data = resp.read()
-        print(f'Downloaded {len(data) / 1024 / 1024:.1f} MB')
+        try:
+            resp = urllib.request.urlopen(url, context=ctx, timeout=30)
+            data = resp.read()
+            print(f'Downloaded {len(data) / 1024 / 1024:.1f} MB')
+        except urllib.error.HTTPError as exc:
+            print(f"Error: HTTP error downloading {url}: {exc.code} {exc.reason}")
+            return False
+        except Exception as exc:
+            print(f"Error: failed to download {url}: {exc}")
+            return False
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                zf.extractall(tmp_dir)
-            self.load_folder(tmp_dir)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    zf.extractall(tmp_dir)
+                self.load_folder(tmp_dir)
+        except zipfile.BadZipFile:
+            print(f"Error: downloaded file from {url} is not a valid zip archive")
+            return False
+        except Exception as exc:
+            print(f"Error: failed to extract/load dataset from {url}: {exc}")
+            return False
+
+        return True
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None ):
