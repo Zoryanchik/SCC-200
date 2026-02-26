@@ -460,8 +460,8 @@ async def bus_live_operator(
     operator: str,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
-    latTol: float = 0.0003,
-    lonTol: float = 0.0003,
+    latTol: float = 0.01,
+    lonTol: float = 0.01,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
