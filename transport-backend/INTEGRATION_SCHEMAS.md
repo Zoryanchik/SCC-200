@@ -82,8 +82,8 @@ Each item has:
 |---------|-------|----------|----------|
 | `lat`   | float | —        | Yes      |
 | `lon`   | float | —        | Yes      |
-| `latTol`| float | `0.0003` | No       |
-| `lonTol`| float | `0.0003` | No       |
+| `latTol`| float | `0.01` | No       |
+| `lonTol`| float | `0.01` | No       |
 
 ### Response — `Array<BusPosition>`
 
