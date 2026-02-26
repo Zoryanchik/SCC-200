@@ -23,29 +23,29 @@ This document contains the full, actionable task list (19 items) with implementa
  - [x] Review mock FastAPI frontend (`api.py`, http://localhost:5050) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
 - [x] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend.
-- [ ] **P2:** Implement 6 missing backend endpoints called by frontend (rail, weather, alerts, pricing, bus times, bus arrivals).
+- [~] **P2:** Implement 6 missing backend endpoints called by frontend (rail, ~~weather~~, alerts, pricing, bus times, bus arrivals). *(weather done; rail, alerts, pricing, bus times, bus arrivals still missing)*
 
 ## Medium Priority
-- [ ] Implement `/rail/departures/{station}` endpoint.
-- [ ] Implement `/pricing` endpoint (distance-based stub ok).
-- [ ] Implement `/weather` and `/alerts` endpoints.
-- [ ] Add WebSocket or STOMP live updates adapter. **[Anton]** ✅
+- [ ] Implement `/rail/departures/{station}` endpoint. *(not implemented)*
+- [ ] Implement `/pricing` endpoint (distance-based stub ok). *(not implemented)*
+- [x] ~~Implement `/weather` and `/alerts` endpoints.~~ *(weather implemented via SCC proxy; alerts still missing)*
+- [x] ~~Add WebSocket or STOMP live updates adapter.~~ **[Anton]** ✅ *(StompBroker in ws_server.py, mounted at /ws/live)*
 - [x] ~~Ensure multi-leg route geometry export for map polylines.~~ **[Anton]** ✅
 - [x] ~~Add station classification (P27) and filtering (P28).~~ **[Anton]** ✅
 - [x] ~~Add OSRM integration with walking fallback.~~ **[Anton]** ✅
-- [ ] Update frontend services and hooks to match API responses. **[Jamie]**
-- [ ] Add developer docs and Docker compose. **[Jamie]**
+- [x] ~~Update frontend services and hooks to match API responses.~~ **[Jamie]** ✅ *(transportApi.js uses VITE_API_BASE_URL, calls correct endpoints for search/journey/bus/weather; some endpoints still missing backend handlers)*
+- [~] Add developer docs and Docker compose. **[Jamie]** *(READMEs and Dockerfile exist; docker-compose.yml still missing)*
 - [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
 - [x] **P5:** Fix `/journey/plan` error response — returns `null` arrays instead of `[]`/`{}`, will crash frontend `.map()`.
-- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173).
+- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173). *(not implemented — still hardcoded in api.py)*
 
 ## Low Priority
-- [ ] Ingest and parse train data to populate `TrainData`.
-- [ ] Harden production config (CORS, auth, rate limits). **[Jamie]**
-- [ ] Add performance caching for routing. **[John]**
-- [ ] Add analytics and frequent routes endpoint. **[Jamie]**
+- [x] ~~Ingest and parse train data to populate `TrainData`.~~ ✅ *(TrainData class implemented in train_data.py with DenseMapper-based mapping)*
+- [ ] Harden production config (CORS, auth, rate limits). **[Jamie]** *(not implemented — no auth, no rate limits, CORS hardcoded)*
+- [x] ~~Add performance caching for routing.~~ **[John]** ✅ *(_router_cache, _classification_cache, _base_cache all implemented in api.py)*
+- [ ] Add analytics and frequent routes endpoint. **[Jamie]** *(not implemented)*
 - [x] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
-- [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict.
+- [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict. *(still exists unwrapped in api.py)*
 
 ## Completed
 - [x] Scaffold FastAPI server and `/health` (with tests).
