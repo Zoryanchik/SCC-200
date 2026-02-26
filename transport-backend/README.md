@@ -120,7 +120,7 @@ first start podman virtual environment:
 to run mock frontend:
 python3 api.py
 
-go to http://localhost:5005
+go to http://localhost:5050
 
 
 Run main.py in terminal

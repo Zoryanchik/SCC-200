@@ -10,4 +10,6 @@ import uvicorn
 from api import app  # noqa: F401
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="localhost", port=5005, reload=True)
+    import os as _os
+    _port = int(_os.environ.get("BACKEND_PORT", _os.environ.get("PORT", "5050")))
+    uvicorn.run("api:app", host="0.0.0.0", port=_port, reload=True)

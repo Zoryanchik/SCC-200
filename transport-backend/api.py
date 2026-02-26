@@ -1118,7 +1118,9 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="localhost", port=5005)
+    import os as _os
+    _port = int(_os.environ.get("BACKEND_PORT", _os.environ.get("PORT", "5050")))
+    uvicorn.run(app, host="0.0.0.0", port=_port)
 
 
 
