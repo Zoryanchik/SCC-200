@@ -18,6 +18,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] add to frontend ui numbers of busses (implented in backend)
 - [ ] Circle bar for time when data will be updated for busses ( get read of loading btw make it more nice)
 - [ ] fix routing 
+- [ ] walking transfers?
 - [ ] implement fronterd for routing 
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
@@ -32,6 +33,8 @@ This document contains the full, actionable task list (19 items) with implementa
 
 ## Medium Priority
 - [ ] Implement `/rail/departures/{station}` endpoint. *(not implemented)*
+- [ ] Implement timetable/bus filtering 
+- [ ] 
 - [ ] Implement `/pricing` endpoint (distance-based stub ok). *(not implemented)*
 - [x] ~~Implement `/weather` and `/alerts` endpoints.~~ *(weather implemented via SCC proxy; alerts still missing)*
 - [x] ~~Add WebSocket or STOMP live updates adapter.~~ **[Anton]** ✅ *(StompBroker in ws_server.py, mounted at /ws/live)*
