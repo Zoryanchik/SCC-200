@@ -11,8 +11,14 @@ from time_utils import seconds_since_midnight, seconds_to_time
 import os
 from datetime import date as _date, timedelta as _timedelta
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-DB_PATH   = os.path.join(CACHE_DIR, "bus_timetable.db")
+# Allow overriding the cache directory via environment so the running
+# container can point the app at the mounted host cache (e.g. /app/cache).
+# If not set, fall back to the repo-relative `cache` directory.
+CACHE_DIR = os.environ.get(
+    "CACHE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache"),
+)
+DB_PATH = os.path.join(CACHE_DIR, "bus_timetable.db")
 
 
 def initialize_base():
@@ -26,96 +32,114 @@ def initialize_base():
     print("Initializing Transport Backend System")
     print("=" * 60)
 
-    # 1. Database & downloads ------------------------------------------
+    # Create cache directory and DB loader first — these are required
+    # even when network resources are unavailable so the app can run
+    # from an existing local cache.
     print("\n[1/2] Loading bus timetable data...")
     os.makedirs(CACHE_DIR, exist_ok=True)
     loader = BusLoader(DB_PATH)
-    loader.ensure_db()
-    loader.create_schema()
-
-    import sqlite3 as _sql
-    _conn = _sql.connect(DB_PATH)
-    _count = _conn.execute("SELECT COUNT(*) FROM route_stops").fetchone()[0]
-    _conn.close()
-    data_changed = False
-    if _count == 0:
-        print("  Database empty — downloading timetable data...")
-        try:
-            datasets = loader._fetch_dataset_info()
-        except Exception as exc:
-            print(f"  Warning: failed to fetch dataset index: {exc}")
-            datasets = []
-        print(f"  Got {len(datasets)} download URLs")
-        for ds in datasets:
-            try:
-                loader.download_and_load(ds['download_url'])
-                # save the new timestamp
-                conn = _sql.connect(DB_PATH)
-                conn.execute(
-                    "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
-                    (ds['source_url'], ds['download_url'], ds['modified']),
-                )
-                conn.commit()
-                conn.close()
-            except Exception as exc:
-                print(f"  Warning: failed to download/load dataset {ds.get('download_url')}: {exc}")
-                continue
-        print("  ✓ Timetable data loaded")
-        data_changed = True
-    else:
-        try:
-            data_changed = loader.check_for_updates()
-        except Exception as exc:
-            print(f"  Warning: check_for_updates failed: {exc}")
-            data_changed = False
-
-    print("  ✓ Database ready")
-
-    # 2. Walking — coords, precomputed transfers, OSRM ----------------
-    print("\n[2/2] Preparing walking data...")
-
-    import urllib.request as _ur
-    osrm_ok = False
-    # Allow the OSRM endpoint to be overridden by env var so containers can
-    # address an OSRM sidecar by name (e.g. http://osrm:5000) or use host
-    # networking. Default for local development is http://localhost:5012.
-    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
     try:
-        probe_url = OSRM_URL.rstrip("/") + "/nearest/v1/foot/0,0"
-        _r = _ur.urlopen(probe_url, timeout=3)
-        _r.close()
-        osrm_ok = True
-    except Exception:
-        osrm_ok = False
-
-    if not osrm_ok:
-        print(f"  ⚠  OSRM not reachable at {OSRM_URL}")
-        print("     Walking transfers will be unavailable.")
-        print("     To enable, run an OSRM server and ensure the backend can reach it.")
-        print("     Examples:")
-        print("       # Run OSRM on the host (backend running on host will reach it):")
-        print("       docker run -d -p 5012:5000 -v /path/to/data:/data \\")
-        print("         osrm/osrm-backend osrm-routed --algorithm mld /data/nw-england.osrm")
-        print("       # Run OSRM as a separate container and point backend to it:")
-        print("       docker network create scc-net || true")
-        print("       docker run -d --name osrm --network scc-net osrm/osrm-backend \\")
-        print("         osrm-routed --algorithm mld /data/nw-england.osrm")
-        print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5000")
-
-    if data_changed:
-        try:
-            loader.clear_walking_transfers()
-        except Exception as exc:
-            print(f"  Warning: clear_walking_transfers failed: {exc}")
-    try:
-        loader.download_stop_coords()
+        loader.ensure_db()
+        loader.create_schema()
     except Exception as exc:
-        print(f"  Warning: download_stop_coords failed: {exc}")
-    if osrm_ok:
+        print(f"  Warning: failed to ensure DB/schema: {exc}")
+
+    data_changed = False
+
+    # The following network-heavy steps may fail (HTTP 403, timeouts, etc.).
+    # Wrap them so initialisation never aborts — we will fall back to the
+    # on-disk cache where possible.
+    try:
+        import sqlite3 as _sql
+        _conn = _sql.connect(DB_PATH)
+        _count = _conn.execute("SELECT COUNT(*) FROM route_stops").fetchone()[0]
+        _conn.close()
+
+        if _count == 0:
+            print("  Database empty — attempting to download timetable data...")
+            try:
+                datasets = loader._fetch_dataset_info()
+            except Exception as exc:
+                print(f"  Warning: failed to fetch dataset index: {exc}")
+                datasets = []
+            print(f"  Got {len(datasets)} download URLs")
+            for ds in datasets:
+                try:
+                    loader.download_and_load(ds['download_url'])
+                    # save the new timestamp
+                    conn = _sql.connect(DB_PATH)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                        (ds['source_url'], ds['download_url'], ds['modified']),
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as exc:
+                    print(f"  Warning: failed to download/load dataset {ds.get('download_url')}: {exc}")
+                    continue
+            print("  ✓ Timetable data loaded (if downloads succeeded)")
+            data_changed = True
+        else:
+            try:
+                data_changed = loader.check_for_updates()
+            except Exception as exc:
+                print(f"  Warning: check_for_updates failed: {exc}")
+                data_changed = False
+
+        print("  ✓ Database ready")
+
+        # 2. Walking — coords, precomputed transfers, OSRM ----------------
+        print("\n[2/2] Preparing walking data...")
+
+        import urllib.request as _ur
+        import urllib.error as _ue
+        osrm_ok = False
+        # Allow the OSRM endpoint to be overridden by env var so containers can
+        # address an OSRM sidecar by name (e.g. http://osrm:5000) or use host
+        # networking. Default for local development is http://localhost:5012.
+        OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
         try:
-            loader.precompute_walking_transfers(osrm_base=OSRM_URL)
+            # Previously we probed the /nearest/foot endpoint which assumes a
+            # 'foot' profile was built. The official osrm-backend image in this
+            # repo extracts data with the car profile, so /nearest/foot may
+            # return an HTTP error even when the server is up. Instead probe
+            # the root '/' (or any URL) and treat any HTTP response (including
+            # HTTPError) as evidence the service is reachable.
+            probe_url = OSRM_URL.rstrip("/") + "/"
+            _r = _ur.urlopen(probe_url, timeout=3)
+            _r.close()
+            osrm_ok = True
+        except _ue.HTTPError:
+            # Server responded with an error status (400/404/etc.) — still
+            # indicates the OSRM process is reachable, so treat as OK.
+            osrm_ok = True
+        except Exception:
+            osrm_ok = False
+
+        if not osrm_ok:
+            print(f"  ⚠  OSRM not reachable at {OSRM_URL}")
+            print("     Walking transfers will be unavailable.")
+            print("     To enable, run an OSRM server and ensure the backend can reach it.")
+
+        if data_changed:
+            try:
+                loader.clear_walking_transfers()
+            except Exception as exc:
+                print(f"  Warning: clear_walking_transfers failed: {exc}")
+        try:
+            loader.download_stop_coords()
         except Exception as exc:
-            print(f"  Warning: precompute_walking_transfers failed: {exc}")
+            print(f"  Warning: download_stop_coords failed: {exc}")
+        if osrm_ok:
+            try:
+                loader.precompute_walking_transfers(osrm_base=OSRM_URL)
+            except Exception as exc:
+                print(f"  Warning: precompute_walking_transfers failed: {exc}")
+
+    except Exception as exc:
+        # Catch any unexpected errors during network/setup so the server
+        # still starts using whatever is persisted locally.
+        print(f"  Warning: initialization encountered an error: {exc}")
 
     # Build inter_walk table keyed by ATCO codes (will be remapped
     # to per-date integer IDs when the network is built)

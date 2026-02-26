@@ -12,5 +12,14 @@ COPY . /app
 
 EXPOSE 5050
 
+# Default cache dir inside the container. The start_container.sh helper also
+# exports CACHE_DIR=/app/cache and mounts the host cache to this path. Setting
+# the ENV here makes the behavior consistent when running the image directly.
+ENV CACHE_DIR=/app/cache
+
+# Ensure the directory exists in the image so mounts and permission fixes work
+# consistently across runtimes.
+RUN mkdir -p /app/cache
+
 # Run uvicorn to serve the FastAPI app on port 5050
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5050"]

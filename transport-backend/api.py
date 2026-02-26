@@ -74,6 +74,14 @@ async def lifespan(app: FastAPI):
     """
     global _base_cache
     try:
+        # Log which cache directory the app will use (helps when running in
+        # containers where CACHE_DIR is mounted to /app/cache).
+        cache_dir = os.environ.get("CACHE_DIR")
+        try:
+            cache_exists = bool(cache_dir and os.path.isdir(cache_dir))
+        except Exception:
+            cache_exists = False
+        logger.info("CACHE_DIR=%s exists=%s", cache_dir, cache_exists)
         from main import initialize_base
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover

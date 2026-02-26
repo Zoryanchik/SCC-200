@@ -44,7 +44,15 @@ class Walking:
         self._coords = stop_coords              # {stop_int: (lat, lon)}
         self._osrm = osrm_base if osrm_base is not None else _DEFAULT_OSRM_URL
         self._max = max_walk_seconds
-        self._osrm_ok: bool | None = None       # None = not probed yet
+        # Allow the environment to pre-declare OSRM reachability so we
+        # don't rely on in-container network probes which can be flaky
+        # in some host/container setups. OSRM_AVAILABLE=1 will set the
+        # probe result to True immediately.
+        env_flag = os.environ.get("OSRM_AVAILABLE")
+        if env_flag is not None and env_flag.lower() in ("1", "true", "yes"):  # type: ignore[attr-defined]
+            self._osrm_ok: bool | None = True
+        else:
+            self._osrm_ok: bool | None = None       # None = not probed yet
 
     # ── OSRM availability ────────────────────────────────────────
 
@@ -61,11 +69,23 @@ class Walking:
         return self._osrm_ok
 
     def _probe_osrm(self) -> bool:
-        """Return True if OSRM responds to a nearest query."""
+        """Return True if the OSRM server is reachable.
+
+        Previously this probed the /nearest/v1/foot endpoint with the
+        coordinate 0,0 which can time out or behave inconsistently for
+        servers that don't have global coverage. Probe the server root
+        instead and treat any HTTP response (including HTTPError) as a
+        positive reachability signal.
+        """
+        import urllib.error as _ue
         try:
-            url = self._osrm.rstrip("/") + "/nearest/v1/foot/0,0"
+            url = self._osrm.rstrip("/") + "/"
             resp = urllib.request.urlopen(url, timeout=3)
             resp.close()
+            return True
+        except _ue.HTTPError:
+            # Server responded with an error status (400/404/etc.) — still
+            # indicates the OSRM process is reachable, so treat as OK.
             return True
         except Exception:
             return False
