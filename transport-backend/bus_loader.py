@@ -1060,15 +1060,8 @@ class BusLoader:
         """
         conn = sqlite3.connect(self.db_path)
         # Gather already-processed source stops (for resume after interrupt)
-        try:
-            done_sources = {r[0] for r in conn.execute(
-                "SELECT DISTINCT from_atco FROM walking_transfers").fetchall()}
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet — create it and start fresh
-            conn.close()
-            self.create_schema()
-            done_sources = set()
-            conn = sqlite3.connect(self.db_path)
+        done_sources = {r[0] for r in conn.execute(
+            "SELECT DISTINCT from_atco FROM walking_transfers").fetchall()}
         conn.close()
 
         coords = self.get_all_stop_coords()
@@ -1176,28 +1169,16 @@ class BusLoader:
     def clear_walking_transfers(self):
         """Remove all precomputed walking transfers (e.g. after data update)."""
         conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute("DELETE FROM walking_transfers")
-            conn.execute("DELETE FROM stop_coords")
-            conn.commit()
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet — create the schema and return
-            conn.close()
-            self.create_schema()
-            return
+        conn.execute("DELETE FROM walking_transfers")
+        conn.execute("DELETE FROM stop_coords")
+        conn.commit()
         conn.close()
 
     def get_walking_transfers(self):
         """Return dict {from_atco: {to_atco: walk_seconds}}."""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        try:
-            cur.execute("SELECT from_atco, to_atco, walk_seconds FROM walking_transfers")
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet — create the schema and return empty
-            conn.close()
-            self.create_schema()
-            return {}
+        cur.execute("SELECT from_atco, to_atco, walk_seconds FROM walking_transfers")
         result = {}
         for from_a, to_a, secs in cur.fetchall():
             result.setdefault(from_a, {})[to_a] = secs

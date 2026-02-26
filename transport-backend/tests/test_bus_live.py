@@ -100,8 +100,8 @@ class TestBusLiveOperatorEndpoint:
             53.48,
             -2.24,
             urls=["https://transport.scc.lancs.ac.uk/bus/live/ARCT"],
-            lat_tol=0.01,
-            lon_tol=0.01,
+            lat_tol=0.0003,
+            lon_tol=0.0003,
         )
 
     def test_all_operator_uses_default_urls(self, client: TestClient):
@@ -116,8 +116,8 @@ class TestBusLiveOperatorEndpoint:
             53.48,
             -2.24,
             urls=None,
-            lat_tol=0.01,
-            lon_tol=0.01,
+            lat_tol=0.0003,
+            lon_tol=0.0003,
         )
 
     def test_passes_tolerances(self, client: TestClient):
