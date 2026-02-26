@@ -51,11 +51,11 @@ export const fetchBusTimes = async (stopCode) => {
  * @param {Object} options - Optional lat/lon/latTol/lonTol for geo-filtering
  * @param {number} [options.lat] - Center latitude
  * @param {number} [options.lon] - Center longitude
- * @param {number} [options.latTol=0.05] - Latitude tolerance (half-width)
- * @param {number} [options.lonTol=0.05] - Longitude tolerance (half-width)
+ * @param {number} [options.latTol=0.01] - Latitude tolerance (half-width)
+ * @param {number} [options.lonTol=0.01] - Longitude tolerance (half-width)
  * @returns {Promise<Array>} Array of bus location data
  */
-export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.05, lonTol = 0.05 } = {}) => {
+export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.01, lonTol = 0.01 } = {}) => {
   try {
     let url = `${API_BASE_URL}/bus/live/${operatorCode}`;
     if (typeof lat === 'number' && typeof lon === 'number') {
