@@ -12,7 +12,7 @@ Defaults and locations
 
 Prerequisites
 
-- Docker (the helper invokes `docker` by default)
+- Podman or Docker (the helper prefers Podman when available and falls back to Docker). On macOS start the Podman VM first with `podman machine init` and `podman machine start` if you want to use Podman.
 - A few GB free disk space for the PBF + OSRM intermediate files
 
 How the helper works
@@ -45,14 +45,13 @@ The router will be available at `http://localhost:5012` by default. Example rout
 curl "http://localhost:5012/route/v1/driving/-2.123,53.456;-2.234,53.567?overview=false"
 ```
 
-Podman users
+Podman / Docker behaviour
 
-If you prefer Podman, you can either run the container commands yourself under
-Podman or edit the script to replace `docker` with `podman`. On macOS make
-sure the Podman VM is initialized and started (`podman machine init` and
-`podman machine start`). If Podman is installed but the VM is not running,
-you may see connection errors; Docker is usually a reliable fallback in that
-case.
+The helper will use Podman when it is installed and usable, and will fall
+back to Docker when Podman is not available or not connected. On macOS the
+Podman runtime requires a small VM; initialise and start it with
+`podman machine init` and `podman machine start` if you plan to use Podman.
+If the Podman VM is not running the helper will try Docker as a fallback.
 
 Troubleshooting
 
@@ -61,9 +60,8 @@ Troubleshooting
 - If the PBF download fails, download the file manually and place it in the
   data directory with the same filename.
 
-If you'd like, I can add `--force`, checksum verification, or an explicit
-`--runtime` flag (`docker|podman`) to the helper — say “improve script” and I
-will implement that.
+If you'd like, I can add an explicit `--runtime` flag (`docker|podman`) or a
+`FORCE_RUNTIME` env override — tell me and I will implement that.
 
 # OSRM sample runner
 
@@ -87,7 +85,7 @@ Run with defaults (Lancashire PBF, data stored in `./data`, host port 5012):
 Specify an alternative PBF URL, data directory and port (in that order):
 
 ```bash
-./scripts/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5321
+./scripts/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5012
 ```
 
 Notes

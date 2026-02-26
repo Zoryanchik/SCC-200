@@ -42,29 +42,34 @@ Override the PBF, data dir and port (positional args):
 
 Notes on container runtimes
 
-- The helper script currently invokes `docker` to run the official
-  `osrm/osrm-backend` image. If you prefer Podman, you can run the same
-  commands under Podman or edit the script (replace `docker` with
-  `podman`). On macOS Podman uses a small Linux VM (`podman machine init` and
-  `podman machine start`) — if that VM is not started you may see connection
-  errors, in which case Docker is a simpler fallback.
+- The helper scripts prefer Podman when it is installed and available. If
+  Podman is not available or not connected, the scripts fall back to Docker.
+  On macOS Podman typically runs inside a small VM; if you are using Podman
+  make sure the VM is initialised (`podman machine init`) and started
+  (`podman machine start`). Docker is supported as a fallback and will be
+  used automatically when Podman is not usable.
 
 Running the backend
 
 Start the backend helper which will attempt to connect to the OSRM server at
-the URL provided by `OSRM_URL` (or `http://localhost:5012` by default):
+the URL provided by `OSRM_URL` (or `http://localhost:5012` by default). The
+backend listens on port 5050 by default (container and host mapping when
+using the helper):
 
 ```bash
 ./transport-backend/run_backend.sh
 ```
 
-Other notes
+- Other notes
 
 - The repository keeps an OSRM cache under `transport-backend/cache/osrm`.
   This directory is not checked in to Git.
 - Ensure the `transport-backend/osrm/data` directory is writable by the user
   running containers (permissions issues can cause the container to fail to
   write intermediate files).
+- The helper start script will create and attach containers to a user
+  network called `scc200-net` so the backend and OSRM instances can reach
+  each other by name (OSRM default container name: `scc200-osrm`).
 - If you'd like, I can add a troubleshooting section and a short
   `transport-backend/osrm/README.md` with common errors and quick fixes.
 # Development / small-area testing
@@ -92,19 +97,28 @@ This backend expects an OSRM routed server to be available at http://localhost:5
 
 Quick options to provide an OSRM instance:
 
-- Use a host container mapped to port 5321 (Docker or Podman):
+- Use the included helper to build and run OSRM (recommended):
 
 ```sh
-# Build or acquire an OSRM dataset and run the routed server (host port 5012 -> container 5000)
-docker run -d -p 5012:5000 -v /path/to/data:/data osrm/osrm-backend \
-	osrm-routed --algorithm mld /data/your-area.osrm
+# build data and run osrm (detached)
+./transport-backend/osrm/run_osrm.sh -d
 ```
 
-- If you're on macOS and prefer Podman note that Podman uses a small Linux VM. Either start that VM first (`podman machine init` then `podman machine start`) or use Docker as a fallback. The backend will read `OSRM_URL` and connect to the running service.
+- Or run the container manually (example using Podman/Docker):
+
+```sh
+# run an osrm-routed container with host port 5012 -> container 5012
+podman run -d --name scc200-osrm -p 5012:5012 -v /path/to/data:/data docker.io/osrm/osrm-backend \
+  osrm-routed --algorithm mld -p 5012 /data/your-area.osrm
+```
 
 Notes:
--- The default port previously used was 5001 for historical reasons — this repository now expects 5012 to avoid colliding with other local services.
-- If you run OSRM in a container, make sure the container has access to the prepared `.osrm` files (from the extract/partition/customize steps).
+
+- Default ports used by the repository:
+  - OSRM HTTP API: 5012 (host and container port by default)
+  - Backend service (FastAPI / uvicorn): 5050 (container and host mapping when using the helper)
+- If you run OSRM in a container, make sure the container has access to the prepared
+  `.osrm` files (from the extract/partition/customize steps).
 
 
 Using `--sample` is handy for quick iteration; once you need wider coverage you

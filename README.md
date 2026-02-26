@@ -33,17 +33,28 @@ This project addresses fragmented information across multiple transport operator
 - All AI-generated code must be clearly identified
 - Security audits against NCSC Software Security Code of Practice required
 - User testing requires SCC Ethics Committee approval
-- The backend expects an OSRM routed server at `http://localhost:5321` by default
+- The backend expects an OSRM routed server at `http://localhost:5012` by default
 	(override with the `OSRM_URL` environment variable). For local testing the
-	repository includes a Lancashire extract and helper scripts that default to
-	that PBF. The canonical local data directory is `transport-backend/osrm/data`.
+repository includes a Lancashire extract and helper scripts that default to
+that PBF. The canonical local data directory is `transport-backend/osrm/data`.
 
 	A helper script is available at `transport-backend/osrm/run_osrm.sh` which
-	downloads a PBF, prepares the OSRM files, and starts `osrm-routed`. The
-	helper uses Docker by default; if you prefer Podman, either run the
-	container commands under Podman or edit the script to use `podman`. When
-	running OSRM in a container map host port `5321` to the container port
-	`5321` (for example `-p 5321:5321` or `-p 5321:5000` depending on the image
-	configuration).
+	downloads a PBF, prepares the OSRM files, and starts `osrm-routed`.
+
+	Notes on runtimes and ports:
+
+	- Helper scripts prefer Podman when available and fall back to Docker if Podman is not usable. On macOS Podman typically runs in a small VM; initialise it with `podman machine init` and `podman machine start`.
+	- Default OSRM HTTP API port used by the helpers: `5012` (you can override with `OSRM_URL`).
+	- Backend service (FastAPI / uvicorn) listens on port `5050` by default when started by the helper; the helper maps the container port to host `5050`.
+
+	Example: build data and run OSRM (detached) and then start the backend helper:
+
+	```sh
+	# prepare and run OSRM (detached)
+	./transport-backend/osrm/run_osrm.sh -d
+
+	# start backend (attaches to same user network so backend can reach osrm by name)
+	./transport-backend/run_backend.sh
+	```
 
 For detailed project specifications, see [PROJECT_BRAIN.md](PROJECT_BRAIN.md).
