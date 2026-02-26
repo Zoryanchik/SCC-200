@@ -11,6 +11,62 @@ This document contains the full, actionable task list (19 items) with implementa
 
 ---
 
+Now create test for bus_loader (the file with the walking_transfers fix):
+
+Now let me create the bus_loader test:
+
+test_bus_loader.py
+
+Now let me run all tests to see the state:
+
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && python -m pytest tests/ --tb=short -q 2>&1 | tail -40
+The time_utils tests are failing because the module is mocked by earlier test files. I need to ensure the real module is imported. Let me check:
+
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && python -m pytest tests/test_time_utils.py tests/test_core.py tests/test_bus_loader.py --tb=short -q 2>&1 | tail -30
+All new tests pass in isolation. The issue is test ordering — the other test files mock time_utils etc. in sys.modules. I need to ensure my tests restore the real modules. Let me fix the test files to handle this:
+
+Edited
+test_time_utils.py+6-0
+Now fix the core test file similarly:
+
+Edited
+test_core.py+13-0
+And the bus_loader test:
+
+Edited
+test_bus_loader.py+10-0
+Now let's run all tests together:
+
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && python -m pytest tests/ --tb=short -q 2>&1 | tail -30
+All 362 tests pass. Now let me check coverage:
+
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && COVERAGE_FILE=/tmp/.coverage python -m pytest tests/ --cov=. --cov-report=term-missing --tb=short -q 2>&1 | tail -35
+We're at 78%. The main gaps are bus_live.py (0%), bus_loader.py (19%), main.py (0%), and raptor_router.py (55%). Let me add more tests to push past 85%:
+
+Created test_bus_live_real.py
+
+Created test_main.py
+
+Now let me add more raptor_router coverage and a main.py test:
+
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && python -m pytest tests/ --tb=short -q 2>&1 | tail -30
+One test in test_api.py is now failing because main.build_for_date is no longer a mock — it's the real function. This happens because test_main.py loaded the real main module into sys.modules, replacing the mock. I need to make the test_api.py test robust by ensuring its mock is applied before the call. Let me fix this:
+
+test_api.py
+
+The issue is that once test_main.py imports the real main module, sys.modules["main"] is the real one, so sys.modules["main"].build_for_date.return_value = ... no longer works. I need to patch it properly in test_api.py. Let me fix the test:
+
+Edited
+test_api.py+8-8
+Now I need to see the continuation of test_initializes_base_when_cache_is_none to fix the rest:
+
+test_api.py
+
+I see the issue — the with block and the calls after it are not properly indented. Let me fix that:
+
+Edited
+test_api.py+2-3
+cd "/home/frolova/h-drive/ComputerScience/Second Year/scc200/SCC-200/transport-backend" && source venv/bin/activate && python -m pytest tests/ --tb=short -q 2>&1 | tail -20
 ## Taskbar (status + priority)
 
 ## High Priority
@@ -19,6 +75,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [ ] Circle bar for time when data will be updated for busses ( get read of loading btw make it more nice)
 - [ ] fix routing 
 - [ ] implement fronterd for routing 
+- [ ] Add bus stations on Map front
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
 - [x] Implement `/bus/live/{operator}` endpoint (with tests).

@@ -1,9 +1,4 @@
-/**
- * HomePage — Main dashboard with journey search, service alerts, departures,
- * and suggested routes. The live transport map lives on its own /map route
- * (see map-view-page.jsx) and is NOT rendered here.
- */
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useCallback, lazy, Suspense } from "react";
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
@@ -19,12 +14,13 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
-import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates } from "../hooks/useTransportData";
+import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 
-// Fallback stop data — only shown in the autocomplete when the search API is unavailable
+const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
+
 const MOCK_STOPS = [
   { id: 1, name: "Lancaster Bus Station", code: "LAN001", lat: 54.048, lon: -2.801, type: "stop" },
   { id: 2, name: "Lancaster Train Station", code: "LAN002", lat: 54.049, lon: -2.807, type: "stop" },
@@ -33,7 +29,6 @@ const MOCK_STOPS = [
   { id: 5, name: "Blackpool North Station", code: "BLK001", lat: 53.816, lon: -3.050, type: "stop" }
 ];
 
-// Placeholder routes displayed before the user performs a search
 const MOCK_ROUTES = [
   {
     id: 1, duration: "45 mins", transfers: 1,
@@ -51,6 +46,14 @@ const MOCK_ROUTES = [
   }
 ];
 
+const MOCK_MARKERS = [
+  { id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
+  { id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
+  { id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
+];
+
+const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
+
 export default function HomePage() {
   const [fromLocation, setFromLocation] = useState("");
   const [toLocation, setToLocation] = useState("");
@@ -61,13 +64,102 @@ export default function HomePage() {
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation);
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation);
 
-  // Track errors so we only show mock/fallback data when the API actually fails,
-  // not when it returns an empty result (which is valid — e.g. no buses running).
-  const { alerts: serviceAlerts, loading: alertsLoading, error: alertsError } = useServiceAlerts();
-  const { data: departures, loading: departuresLoading, error: departuresError } = useLiveDepartures("LAN");
+  const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
+  const { data: departures, loading: departuresLoading } = useLiveDepartures("LAN");
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState(MOCK_ROUTES);
+
+  // ---- Map + live-bus state (merged from map-view-page) ----
+  const [markers, setMarkers] = useState(MOCK_MARKERS);
+  const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
+  const [openPopupId, setOpenPopupId] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+
+  /** Called by MapViewMap whenever the user finishes panning / zooming. */
+  const handleMoveEnd = useCallback(({ lat, lon }) => {
+    setMapCenter({ lat, lon });
+  }, []);
+
+  // Debounced live bus data tied to the current map center
+  const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations("SCCU", {
+    lat: mapCenter.lat,
+    lon: mapCenter.lon,
+    refreshInterval: 30000,
+    debounceMs: 800,
+  });
+  const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 30000);
+  const { data: liveBusUpdate } = useLiveUpdates("bus");
+
+  // Update markers when real bus API data arrives
+  useEffect(() => {
+    if (
+      (Array.isArray(busLocations) && busLocations.length > 0) ||
+      (Array.isArray(trainDepartures) && trainDepartures.length > 0)
+    ) {
+      const newMarkers = [];
+      let id = 1;
+      if (Array.isArray(busLocations)) {
+        busLocations.forEach((bus) => {
+          newMarkers.push({
+            id: id++,
+            position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
+            name: bus.name || "Bus " + (bus.id || ""),
+            type: "bus",
+            status: bus.status || "On time",
+            routeNumber: bus.routeNumber || bus.route,
+          });
+        });
+      }
+      if (Array.isArray(trainDepartures)) {
+        trainDepartures.forEach((train) => {
+          newMarkers.push({
+            id: id++,
+            position: [train.latitude || train.lat, train.longitude || train.lon],
+            name: train.station || train.name || "Train Station",
+            type: "train",
+            status: train.status || (train.delayMinutes ? "Delayed " + train.delayMinutes + " mins" : "On time"),
+            destination: train.destination,
+            departureTime: train.departureTime || train.scheduledTime,
+          });
+        });
+      }
+      setMarkers(newMarkers);
+    }
+  }, [busLocations, trainDepartures]);
+
+  // Merge live WebSocket bus updates into markers
+  useEffect(() => {
+    const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : liveBusUpdate ? [liveBusUpdate] : [];
+    const normalized = updates
+      .map((item) => {
+        const lat = item?.latitude ?? item?.lat;
+        const lon = item?.longitude ?? item?.lon;
+        if (typeof lat !== "number" || typeof lon !== "number") return null;
+        return {
+          id: item?.vehicleId || item?.id || "bus-" + lat + "-" + lon,
+          position: [lat, lon],
+          name: item?.name || ("Bus " + (item?.route || "")).trim(),
+          type: "bus",
+          status: item?.status || "On time",
+          routeNumber: item?.routeNumber || item?.route,
+        };
+      })
+      .filter(Boolean);
+    if (normalized.length === 0) return;
+    setMarkers((prev) => {
+      const next = new Map(prev.map((m) => [m.id, m]));
+      for (const item of normalized) next.set(item.id, { ...next.get(item.id), ...item });
+      return Array.from(next.values());
+    });
+  }, [liveBusUpdate]);
+
+  const filteredMarkers = useMemo(
+    () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
+    [markers, filters.showBuses, filters.showTrains]
+  );
+  // ---- end map state ----
 
   const getCoordsFromOption = (option) => {
     if (!option || typeof option === "string") return null;
@@ -105,34 +197,24 @@ export default function HomePage() {
     });
   }, [liveAlertUpdate]);
 
-  // Departure display logic:
-  //  1. API returned data → map and show it
-  //  2. API returned [] with no error → show "no departures" message
-  //  3. API failed → fall back to hardcoded mock data
   const liveDepartures = useMemo(() => {
-    if (Array.isArray(departures) && departures.length > 0) {
-      return departures.slice(0, 3).map((dep, idx) => ({
-        id: idx + 1,
-        type: dep.type || "bus",
-        route: dep.routeNumber || dep.route || "\u2014",
-        destination: dep.destination || dep.to || "Unknown",
-        time: dep.minutesToDeparture ? dep.minutesToDeparture + " mins" : dep.time || "\u2014",
-        status: dep.status || (dep.delayMinutes ? "Delayed " + dep.delayMinutes + " mins" : "On time"),
-      }));
+    if (!Array.isArray(departures) || departures.length === 0) {
+      return [
+        { id: 1, type: "bus", route: "2", destination: "Blackpool", time: "2 mins", status: "On time" },
+        { id: 2, type: "train", route: "Northern", destination: "Manchester", time: "5 mins", status: "Delayed 3 mins" },
+        { id: 3, type: "bus", route: "100", destination: "Morecambe", time: "8 mins", status: "On time" },
+      ];
     }
-    // API returned empty array (no departures right now) — show empty
-    if (!departuresError) return [];
-    // API failed — use fallback mock data
-    return [
-      { id: 1, type: "bus", route: "2", destination: "Blackpool", time: "2 mins", status: "On time" },
-      { id: 2, type: "train", route: "Northern", destination: "Manchester", time: "5 mins", status: "Delayed 3 mins" },
-      { id: 3, type: "bus", route: "100", destination: "Morecambe", time: "8 mins", status: "On time" },
-    ];
-  }, [departures, departuresError]);
+    return departures.slice(0, 3).map((dep, idx) => ({
+      id: idx + 1,
+      type: dep.type || "bus",
+      route: dep.routeNumber || dep.route || "\u2014",
+      destination: dep.destination || dep.to || "Unknown",
+      time: dep.minutesToDeparture ? dep.minutesToDeparture + " mins" : dep.time || "\u2014",
+      status: dep.status || (dep.delayMinutes ? "Delayed " + dep.delayMinutes + " mins" : "On time"),
+    }));
+  }, [departures]);
 
-  // Alerts: merge WebSocket live alerts with REST API alerts.
-  // Show "no alerts" when the API succeeded but returned nothing.
-  // Only fall back to mock alerts on actual API errors.
   const alerts = useMemo(() => {
     const apiAlerts =
       Array.isArray(serviceAlerts) && serviceAlerts.length > 0
@@ -144,18 +226,15 @@ export default function HomePage() {
         : [];
     const combined = [...liveAlerts, ...apiAlerts];
     if (combined.length > 0) return combined.slice(0, 3);
-    // API returned empty (no alerts) — show nothing unless API errored
-    if (!alertsError) return [];
-    // API failed — show fallback alerts
     return [
       { id: 1, severity: "warning", message: "M6 delays between J33-J36: 15 mins" },
       { id: 2, severity: "info", message: "Bus route 2 diversion via King Street" },
     ];
-  }, [serviceAlerts, liveAlerts, alertsError]);
+  }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
-    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : [];
-    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : [];
+    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : MOCK_STOPS;
+    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : MOCK_STOPS;
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
@@ -189,6 +268,10 @@ export default function HomePage() {
     );
   };
 
+  const MapFallback = () => (
+    <Skeleton variant="rounded" sx={{ width: "100%", height: { xs: 350, md: 450 } }} />
+  );
+
   return (
     <Stack spacing={{ xs: 2, md: 3 }}>
       <Paper
@@ -211,6 +294,77 @@ export default function HomePage() {
             size="small"
           />
         </Stack>
+      </Paper>
+
+      {/* ---- Inline live transport map ---- */}
+      <Paper
+        elevation={0}
+        sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
+      >
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
+          <MapPin size={20} color="#6366F1" />
+          <Typography variant="subtitle1" fontWeight={700}>
+            Live Transport Map
+          </Typography>
+        </Stack>
+
+        <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
+          <Box
+            data-testid="filter-buses"
+            onClick={() => setFilters((f) => ({ ...f, showBuses: !f.showBuses }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showBuses ? "#6366F1" : "transparent",
+              color: filters.showBuses ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Bus size={18} /> Buses {filteredMarkers.filter((m) => m.type === "bus").length}
+          </Box>
+          <Box
+            data-testid="filter-trains"
+            onClick={() => setFilters((f) => ({ ...f, showTrains: !f.showTrains }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showTrains ? "#10B981" : "transparent",
+              color: filters.showTrains ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
+          </Box>
+        </Stack>
+
+        <Suspense fallback={<MapFallback />}>
+          <Box sx={{ height: { xs: 350, md: 450 }, borderRadius: "12px", overflow: "hidden" }}>
+            <MapViewMap
+              filteredMarkers={filteredMarkers}
+              openPopupId={openPopupId}
+              onOpenPopup={setOpenPopupId}
+              onClosePopup={() => setOpenPopupId(null)}
+              userLocation={null}
+              nearestStop={null}
+              busLoading={busLoading}
+              trainLoading={trainLoading}
+              onMapReady={setMapInstance}
+              onMoveEnd={handleMoveEnd}
+            />
+          </Box>
+        </Suspense>
       </Paper>
 
       {/* ---- Alerts ---- */}
@@ -453,12 +607,8 @@ export default function HomePage() {
                       <Skeleton key={i} height={80} variant="rounded" />
                     ))}
                   </Stack>
-                ) : liveDepartures.length > 0 ? (
-                  liveDepartures.map((dep) => <DepartureCard key={dep.id} departure={dep} />)
                 ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    No departures available right now.
-                  </Typography>
+                  liveDepartures.map((dep) => <DepartureCard key={dep.id} departure={dep} />)
                 )}
               </Stack>
             </Stack>

@@ -247,11 +247,11 @@ class TestGetRouterForDate:
         mock_timetable = MagicMock()
         mock_router = MagicMock()
         mock_walking = MagicMock()
-        sys.modules["main"].build_for_date.return_value = (
-            mock_timetable, mock_router, mock_walking,
-        )
 
-        result = get_router_for_date("2026-02-16")
+        with patch("api.build_for_date", return_value=(
+            mock_timetable, mock_router, mock_walking,
+        )):
+            result = get_router_for_date("2026-02-16")
         assert result == (mock_timetable, mock_router, mock_walking)
         # Should now be cached
         assert "2026-02-16" in api_module._router_cache
@@ -263,13 +263,12 @@ class TestGetRouterForDate:
             "loader": MagicMock(),
             "walking_raw": MagicMock(),
         })
-        sys.modules["main"].initialize_base = mock_init
-        sys.modules["main"].build_for_date.return_value = (
-            MagicMock(), MagicMock(), MagicMock(),
-        )
-
-        get_router_for_date("2026-02-17")
-        mock_init.assert_called_once()
+        with patch("api.initialize_base", mock_init), \
+             patch("api.build_for_date", return_value=(
+                 MagicMock(), MagicMock(), MagicMock(),
+             )):
+            get_router_for_date("2026-02-17")
+            mock_init.assert_called_once()
 
 
 # â”€â”€ format_route_text tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
