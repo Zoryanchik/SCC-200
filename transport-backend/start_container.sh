@@ -153,6 +153,30 @@ if [ "${WAIT_FOR_OSRM:-1}" = "1" ] && [ "${USE_HOST_NETWORK:-0}" != "1" ]; then
 fi
 
 echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"
-$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE"
+
+# Choose what the container PID1 should run.
+# Default behaviour: run `python api.py` as PID1 so the process you interact with
+# inside the container is the application process (matches the manual steps we
+# performed earlier). This avoids confusion where the image CMD (uvicorn) is
+# already running and a second attempt to start the app inside the same container
+# causes "address already in use" errors.
+#
+# To change behaviour:
+# - Set USE_IMAGE_CMD=1 to run the image's default CMD (the Dockerfile sets
+#   uvicorn as the image CMD). This is useful for production-like runs.
+# - Set DEV_MODE=1 to start the container with `sleep infinity` as PID1 so you
+#   can `exec` into it and run processes interactively.
+
+if [ "${USE_IMAGE_CMD:-0}" = "1" ]; then
+  echo "Starting container using image default CMD (uvicorn)"
+  $RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE"
+elif [ "${DEV_MODE:-0}" = "1" ]; then
+  echo "DEV_MODE=1: starting container with PID1='sleep infinity' for interactive use"
+  $RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE" sleep infinity
+else
+  echo "Default: starting container with PID1='python api.py' (override with USE_IMAGE_CMD=1 to use image CMD)"
+  # Start python as PID1 so `cat /proc/1/cmdline` shows python api.py
+  $RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE" python api.py
+fi
 
 echo "Container started (id: $($RUNTIME ps -l --format '{{.ID}}' 2>/dev/null))."

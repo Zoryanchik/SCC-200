@@ -12,7 +12,8 @@ IMAGE=transport-backend:local
 CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
-USE_SHELL=1
+# By default we do NOT open an interactive shell. Pass --shell or -s to open one.
+USE_SHELL=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --shell|-s)
@@ -56,10 +57,12 @@ echo "Using container runtime: $RUNTIME"
 # Delegate container build/start to the helper which handles SELinux labels
 "$HERE/start_container.sh"
 
-echo "Waiting for /health to respond (timeout ~90s)..."
+# Respect BACKEND_PORT if the caller set it; otherwise default to 5050.
+PORT="${BACKEND_PORT:-5050}"
+echo "Waiting for /health to respond (timeout ~90s) on http://localhost:$PORT/health..."
 for i in {1..30}; do
-  if curl -sS http://localhost:5050/health >/dev/null 2>&1; then
-    echo "\nBackend is ready at http://localhost:5050/health"
+  if curl -sS "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+    echo "\nBackend is ready — visit: http://localhost:${PORT}"
     if [ "$USE_SHELL" -eq 1 ]; then
       echo "Opening an interactive shell inside $CONTAINER (press Ctrl+D to exit)..."
       if [ "$RUNTIME" = "podman" ]; then
@@ -75,4 +78,5 @@ for i in {1..30}; do
 done
 
 echo "\nTimed out waiting for backend to become ready. Tail the logs with: $RUNTIME logs -f $CONTAINER"
+echo "If the container started with a different BACKEND_PORT, re-run with BACKEND_PORT=<port> ./run_backend.sh"
 exit 1
