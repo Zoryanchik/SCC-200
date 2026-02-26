@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./transport-backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./transport-backend:/app:delegated
+    depends_on:
+      - osrm
+
+  frontend:
+    build:
+      context: ./transport-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://backend:8000
+    volumes:
+      - ./transport-frontend:/app:delegated
+    command: ["sh", "-c", "npm run dev -- --host 0.0.0.0"]
+
+  osrm:
+    image: osrm/osrm-backend:5.26
+    # Note: This is a helpful dev stub but requires a preprocessed .osrm dataset to be useful.
+    # For production you should run an OSRM instance with an extracted dataset or remove this service.
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
