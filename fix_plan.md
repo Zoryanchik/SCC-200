@@ -14,6 +14,11 @@ This document contains the full, actionable task list (19 items) with implementa
 ## Taskbar (status + priority)
 
 ## High Priority
+- [ ] Strange ui problem when you zoom on a map only busees in this specifc are showen(filter problem), all other ones dissapear
+- [ ] add to frontend ui numbers of busses (implented in backend)
+- [ ] Circle bar for time when data will be updated for busses ( get read of loading btw make it more nice)
+- [ ] fix routing 
+- [ ] implement fronterd for routing 
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
 - [x] Implement `/bus/live/{operator}` endpoint (with tests).

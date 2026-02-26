@@ -1,3 +1,9 @@
+/**
+ * MapViewPage — Full-screen live transport map with bus/train markers,
+ * user geolocation, and real-time WebSocket updates.
+ * Mock markers are shown until the API responds; the warning banner
+ * only appears when BOTH bus and train APIs fail.
+ */
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
@@ -39,6 +45,9 @@ showTrains: true
 });
 const [openPopupId, setOpenPopupId] = useState(null);
 const [apiError, setApiError] = useState(null);
+// Tracks whether the user is seeing placeholder markers or real API data.
+// Starts true — flipped to false once any API call succeeds.
+const [usingMockData, setUsingMockData] = useState(true);
 const [userLocation, setUserLocation] = useState(null);
 const [locationStatus, setLocationStatus] = useState('idle');
 const [locationError, setLocationError] = useState(null);
@@ -65,19 +74,16 @@ const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdate
 
 // Update markers when real API data arrives
 useEffect(() => {
-console.log('Bus API Response:', { busLocations, busError });
-console.log('Train API Response:', { trainDepartures, trainError });
+// Check if the API actually returned data (even if empty arrays)
+const busResponded = Array.isArray(busLocations) && !busError;
+const trainResponded = Array.isArray(trainDepartures) && !trainError;
 
-// Only update if we have real data from the API
-if ((Array.isArray(busLocations) && busLocations.length > 0) || 
-    (Array.isArray(trainDepartures) && trainDepartures.length > 0)) {
-
-console.log('Received real data from API, updating markers...');
+if (busResponded || trainResponded) {
+// API responded successfully - build markers from real data
 const newMarkers = [];
 let id = 1;
 
-// Add bus locations
-if (Array.isArray(busLocations) && busLocations.length > 0) {
+if (Array.isArray(busLocations)) {
 busLocations.forEach(bus => {
 newMarkers.push({
 id: id++,
@@ -90,15 +96,14 @@ routeNumber: bus.routeNumber || bus.route
 });
 }
 
-// Add train departures
-if (Array.isArray(trainDepartures) && trainDepartures.length > 0) {
+if (Array.isArray(trainDepartures)) {
 trainDepartures.forEach(train => {
 newMarkers.push({
 id: id++,
 position: [train.latitude || train.lat, train.longitude || train.lon],
 name: train.station || train.name || 'Train Station',
 type: 'train',
-status: train.status || train.delayMinutes ? `Delayed ${train.delayMinutes} mins` : 'On time',
+status: train.status || (train.delayMinutes ? `Delayed ${train.delayMinutes} mins` : 'On time'),
 destination: train.destination,
 departureTime: train.departureTime || train.scheduledTime
 });
@@ -107,9 +112,11 @@ departureTime: train.departureTime || train.scheduledTime
 
 setMarkers(newMarkers);
 setApiError(null);
-} else if (busError || trainError) {
-// Show error message but keep mock data
-setApiError('Using demo data - API temporarily unavailable');
+setUsingMockData(false);
+} else if (busError && trainError) {
+// Both APIs failed - keep mock data and show a warning
+setApiError('Unable to reach the transport API. Showing demo data.');
+setUsingMockData(true);
 }
 }, [busLocations, trainDepartures, busError, trainError]);
 
@@ -262,10 +269,10 @@ Real-time bus and train locations across Lancashire
 </Typography>
 </Paper>
 
-{apiError && (
+{apiError && usingMockData && (
 <Alert severity="warning" sx={{ borderRadius: '12px' }}>
 <Typography variant="body2">
-Note: Using mock data as fallback. To see real data, ensure the API at <code>https://transport.scc.lancs.ac.uk</code> is accessible. Error: {apiError}
+{apiError}
 </Typography>
 </Alert>
 )}
