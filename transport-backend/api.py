@@ -1120,6 +1120,8 @@ if __name__ == "__main__":
     import uvicorn
     import os as _os
     _port = int(_os.environ.get("BACKEND_PORT", _os.environ.get("PORT", "5050")))
+    # Emit a clear startup message so container logs show which port was chosen.
+    print(f"Starting uvicorn (api:app) on 0.0.0.0:{_port} (BACKEND_PORT={_os.environ.get('BACKEND_PORT')}, PORT={_os.environ.get('PORT')})")
     uvicorn.run(app, host="0.0.0.0", port=_port)
 
 

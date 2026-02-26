@@ -21,5 +21,8 @@ ENV CACHE_DIR=/app/cache
 # consistently across runtimes.
 RUN mkdir -p /app/cache
 
+# Default backend port (can be overridden at runtime by BACKEND_PORT)
+ENV BACKEND_PORT=5050
+
 # Run uvicorn to serve the FastAPI app on port 5050
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5050"]
+CMD ["sh", "-lc", "exec uvicorn api:app --host 0.0.0.0 --port ${BACKEND_PORT:-5050}"]
