@@ -1,3 +1,22 @@
+First start OSRM server:
+./osrm/run_osrm.sh
+
+Open a new terminal, run backend container:
+./run_backend.sh
+
+Inside the container, run mock-frontend:
+python3 api.py
+
+To visit mock-frontend:
+go to localhost:5050
+(please note uvicorn runs on localhost:5005,
+but to visite the page go to localhost:5050)
+
+
+
+
+
+
 # Development and local testing (transport-backend)
 
 This directory contains backend helpers and small-area test utilities. The
