@@ -70,4 +70,3 @@ transport-backend/cache/
 # OSRM dataset (local)
 data/
 transport-backend/osrm/data/
-transport-backend/.coverage*
