@@ -98,6 +98,11 @@ fi
 # This helps `api.py` / `main.py` find the mounted cache when running
 # inside the container (it will default to /app/cache).
 ENV_FLAGS="$ENV_FLAGS -e CACHE_DIR=/app/cache"
+# Ensure BACKEND_PORT is set inside the container so uvicorn uses the
+# expected port. Allow users to override BACKEND_PORT in their environment.
+BACKEND_PORT="${BACKEND_PORT:-5050}"
+echo "Forwarding BACKEND_PORT into container: $BACKEND_PORT"
+ENV_FLAGS="$ENV_FLAGS -e BACKEND_PORT=$BACKEND_PORT"
 if [ "${USE_HOST_NETWORK:-0}" = "1" ]; then
   echo "Using host networking for container (USE_HOST_NETWORK=1)"
   RUN_FLAGS="$RUN_FLAGS --network host"
