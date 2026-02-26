@@ -143,7 +143,7 @@ class BusLive:
         return results
 
 
-def get_bus_live(lat, lon, urls=None, lat_tol=0.0003, lon_tol=0.0003, timeout=10):
+def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=10):
     """Convenience wrapper for BusLive.get_bus_live."""
     bl = BusLive(urls=urls, timeout=timeout)
     return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol)
