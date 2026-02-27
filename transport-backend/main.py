@@ -76,9 +76,9 @@ def initialize_base():
         _r = _ur.urlopen(probe_url, timeout=3)
         _r.close()
         osrm_ok = True
+    except _ue.HTTPError:
+        osrm_ok = True
     except _ue.URLError:
-        osrm_ok = True  # treat URLError (e.g. connection refused) as evidence of unreachability
-    except Exception:
         osrm_ok = False
 
     if not osrm_ok:
