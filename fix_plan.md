@@ -14,11 +14,11 @@ This document contains the full, actionable task list (19 items) with implementa
 ## Taskbar (status + priority)
 
 ## High Priority
-- [ ] Strange ui problem when you zoom on a map only busees in this specifc are showen(filter problem), all other ones dissapear
-- [ ] add to frontend ui numbers of busses (implented in backend)
+- [x] Strange ui problem when you zoom on a map only busees in this specifc are showen(filter problem), all other ones dissapear
+- [?] add to frontend ui numbers of busses (implented in backend)
 - [ ] Circle bar for time when data will be updated for busses ( get read of loading btw make it more nice)
-- [ ] fix routing 
-- [ ] walking transfers?
+- [x] fix routing 
+- [x] walking transfers?
 - [ ] implement fronterd for routing 
 - [x] Scaffold FastAPI server and `/health` (with tests).
 - [x] Implement `/search/stops` endpoint (with tests).
@@ -53,7 +53,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] ~~Add performance caching for routing.~~ **[John]** ✅ *(_router_cache, _classification_cache, _base_cache all implemented in api.py)*
 - [ ] Add analytics and frequent routes endpoint. **[Jamie]** *(not implemented)*
 - [x] **P4:** Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in `routeGeometries` (add code comments).
-- [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict. *(still exists unwrapped in api.py)*
+- [?] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict. *(still exists unwrapped in api.py)*
 
 ## Completed
 - [x] Scaffold FastAPI server and `/health` (with tests).
