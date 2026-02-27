@@ -418,12 +418,20 @@ async def bus_live_operator(
             content={"error": str(exc)},
         )
 
+    # Log a sample of results for debugging operator field presence
+    try:
+        # plain print to ensure output appears in container logs for debugging
+        print("DEBUG /bus/live: returning {} results; sample: {}".format(len(results), repr(results[:3])))
+    except Exception:
+        print("DEBUG /bus/live: returning results (unable to repr sample)")
+
     return [
         {
             "line": line_ref,
             "destination": dest,
             "lat": lat_v,
             "lon": lon_v,
+            "operator": _operator,
         }
         for line_ref, dest, lat_v, lon_v, _operator in results
     ]

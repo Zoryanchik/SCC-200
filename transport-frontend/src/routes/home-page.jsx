@@ -102,13 +102,44 @@ export default function HomePage() {
       let id = 1;
       if (Array.isArray(busLocations)) {
         busLocations.forEach((bus) => {
+          const lat = bus.latitude ?? bus.lat;
+          const lon = bus.longitude ?? bus.lon;
+          // copy backend-provided fields into meta but exclude coords
+          const meta = { ...bus };
+          // Remove coordinate fields and any fields already shown in the header
+          delete meta.lat;
+          delete meta.lon;
+          delete meta.latitude;
+          delete meta.longitude;
+          // Avoid duplicating displayed fields in the popup
+          delete meta.line;
+          delete meta.destination;
+
+          // Extract operator robustly and keep it separate from the display name
+          let operatorName = null;
+          if (bus?.operator) {
+            if (typeof bus.operator === 'string') operatorName = bus.operator;
+            else if (typeof bus.operator === 'object') {
+              operatorName = bus.operator.name || bus.operator.operator_name || bus.operator.operatorName || null;
+            }
+          }
+          operatorName = operatorName || bus?.operator_name || bus?.operatorName || bus?.operator_ref || bus?.operatorRef || null;
+          // Remove any operator-like keys from meta so it doesn't duplicate
+          ['operator', 'operator_name', 'operatorName', 'operator_ref', 'operatorRef'].forEach((k) => delete meta[k]);
+
+          const displayName = (bus.line ? String(bus.line) : '')
+                              + (bus.destination ? (' → ' + bus.destination) : '')
+                              || (bus.name || `Bus ${bus.id || ''}`);
+
           newMarkers.push({
             id: id++,
-            position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
-            name: bus.name || "Bus " + (bus.id || ""),
+            position: [lat, lon],
+            name: displayName,
             type: "bus",
             status: bus.status || "On time",
-            routeNumber: bus.routeNumber || bus.route,
+            routeNumber: bus.routeNumber || bus.route || bus.line,
+            operator: operatorName,
+            meta: meta,
           });
         });
       }

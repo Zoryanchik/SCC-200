@@ -174,7 +174,7 @@ export default function MapViewMap({
 											{marker.name}
 										</Typography>
 										<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-											{marker.type === 'bus' ? '\U0001f68c Bus Station' : '\U0001f682 Train Station'}
+											{marker.type === 'bus' ? '\U0001f68c Bus' : '\U0001f682 Train'}
 										</Typography>
 										<Box sx={{
 											display: 'inline-block',
@@ -188,6 +188,29 @@ export default function MapViewMap({
 										}}>
 											{marker.status === 'On time' ? '\u2713' : '\u26a0'} {marker.status}
 										</Box>
+										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
+										{marker.operator && (
+											// force a full-width break before operator so it is always on its own line
+											<Box sx={{ width: '100%', mt: 1 }}>
+												<Typography variant="body2" sx={{ display: 'block', mb: 0.5 }}>
+													<strong>Operator</strong>: {String(marker.operator)}
+												</Typography>
+											</Box>
+										)}
+										{marker.meta && Object.keys(marker.meta).length > 0 && (
+											<Box sx={{ mt: 1 }}>
+												{Object.entries(marker.meta)
+													.filter(([k]) => {
+														const kk = String(k).toLowerCase();
+														return !['lat', 'lon', 'latitude', 'longitude', 'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname'].includes(kk);
+													})
+													.map(([key, value]) => (
+														<Typography key={key} variant="body2" sx={{ mb: 0.5 }}>
+															<strong>{key.replace(/_/g, ' ')}:</strong> {String(value)}
+														</Typography>
+													))}
+											</Box>
+										)}
 									</Box>
 								</Popup>
 							)}

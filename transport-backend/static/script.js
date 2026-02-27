@@ -37,6 +37,7 @@ document.getElementById('busLiveForm').addEventListener('submit', async function
                 data.forEach((bus, index) => {
                     resultText += `${index + 1}. Line: ${bus.line}\n`;
                     resultText += `   Destination: ${bus.destination}\n`;
+                    resultText += `   Operator: ${bus.operator}\n`;
                     resultText += `   Location: ${bus.lat.toFixed(6)}, ${bus.lon.toFixed(6)}\n\n`;
                 });
                 resultDiv.textContent = resultText;
