@@ -23,14 +23,28 @@ from pydantic import BaseModel
 
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
-from station_classifier import classify_all, classify_to_lookup
 from time_utils import seconds_since_midnight
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
+from station_classifier import classify_all, classify_to_lookup
 
 logger = logging.getLogger(__name__)
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+#Remove later if useless
+"""class BusLiveRequest(BaseModel):
+    lat: float
+    lon: float
+    lat_tol: float = 0.0003
+    lon_tol: float = 0.0003
+
+class BusLiveResponse(BaseModel):
+    success: bool
+    buses: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None"""
+
 
 # Routing request/response models
 class RouteRequest(BaseModel):
@@ -74,14 +88,6 @@ async def lifespan(app: FastAPI):
     """
     global _base_cache
     try:
-        # Log which cache directory the app will use (helps when running in
-        # containers where CACHE_DIR is mounted to /app/cache).
-        cache_dir = os.environ.get("CACHE_DIR")
-        try:
-            cache_exists = bool(cache_dir and os.path.isdir(cache_dir))
-        except Exception:
-            cache_exists = False
-        logger.info("CACHE_DIR=%s exists=%s", cache_dir, cache_exists)
         from main import initialize_base
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
@@ -101,7 +107,7 @@ async def lifespan(app: FastAPI):
         await ws_broker.stop_polling()
     except Exception:  # pragma: no cover
         pass
-
+    
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
 
@@ -205,7 +211,7 @@ async def search_stops(
         stop_results = loader.search_stops(q, limit if not classification else limit * 3)
         for stop in stop_results:
             stop["type"] = "stop"
-
+        
         # Apply classification filter when requested
         if classification:
             lookup = _get_classification_lookup()
@@ -332,113 +338,6 @@ async def stops_classify(classification: Optional[str] = None):
 
     return results
 
-# ── Walking / OSRM endpoints ────────────────────────────────────────
-
-
-@app.get("/walking/status")
-async def walking_status():
-    """Return walking-engine status (OSRM availability, config, counts).
-
-    Useful for the frontend to decide whether to offer walking
-    directions or to show a fallback indicator.
-    """
-    from fastapi.responses import JSONResponse
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    try:
-        _timetable, _router, walking = get_router_for_date(date_str)
-    except Exception:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Backend not initialized"},
-        )
-
-    return walking.status()
-
-
-@app.get("/walking/reachable")
-async def walking_reachable(
-    lat: Optional[float] = None,
-    lon: Optional[float] = None,
-    limit: int = 20,
-):
-    """Return stops reachable by walking from an arbitrary location.
-
-    Query params:
-        lat:   latitude of the starting point (required)
-        lon:   longitude of the starting point (required)
-        limit: max results to return (default 20)
-
-    Returns JSON with ``location``, ``osrm_available``, and a list of
-    nearby walkable ``stops`` sorted by walking time ascending.
-
-    The walking engine tries OSRM first; when OSRM is unreachable it
-    falls back to the precomputed inter-walk table augmented with
-    haversine distance estimates.  See ``walking.py`` for details.
-    """
-    from fastapi.responses import JSONResponse
-
-    if lat is None or lon is None:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "lat and lon query parameters are required"},
-        )
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    try:
-        timetable, _router, walking = get_router_for_date(date_str)
-    except Exception:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Backend not initialized"},
-        )
-
-    reachable = walking.reachable_stops((lat, lon))
-
-    merged = timetable.today
-    stop_coords = getattr(walking, "_coords", {})
-
-    # Resolve names and coords for each reachable stop
-    stops = []
-    for stop_int, walk_secs in reachable.items():
-        name = (merged.stop_metadata[stop_int]
-                if stop_int < len(merged.stop_metadata)
-                else f"stop#{stop_int}")
-        entry: Dict[str, Any] = {
-            "stop_index": stop_int,
-            "name": name,
-            "walk_seconds": walk_secs,
-        }
-        # Resolve ATCO code
-        bus_mapper = getattr(merged.bus_data, "map_stops", None)
-        bus_stop_count = len(merged.bus_data.stop_to_routes)
-        train_mapper = getattr(merged.train_data, "map_stops", None)
-        atco = None
-        if stop_int < bus_stop_count and bus_mapper:
-            try:
-                atco = bus_mapper.get_code(stop_int)
-            except Exception:
-                pass
-        elif train_mapper:
-            try:
-                atco = train_mapper.get_code(stop_int - bus_stop_count)
-            except Exception:
-                pass
-        entry["atco_code"] = atco
-
-        coord = stop_coords.get(stop_int)
-        if coord:
-            entry["lat"] = coord[0]
-            entry["lon"] = coord[1]
-        stops.append(entry)
-        if len(stops) >= limit:
-            break
-
-    return {
-        "location": {"lat": lat, "lon": lon},
-        "osrm_available": walking.osrm_available,
-        "stops": stops,
-    }
 
 # -”€-”€ Static files & frontend -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
 
@@ -455,13 +354,42 @@ async def get_frontend():
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
     )
 
+
+#Remove later if useless
+"""
+@app.post("/api/bus_live", response_model=BusLiveResponse)
+async def get_live_buses(request: BusLiveRequest):
+    #Get live bus data near a location.
+    try:
+        from bus_live import BusLive as BusLiveClass
+        bl = BusLiveClass(timeout=10)  # 10 second timeout for live data
+        results = bl.get_bus_live(request.lat, request.lon, lat_tol=request.lat_tol, lon_tol=request.lon_tol)
+
+        # Convert tuples to dictionaries for JSON response
+        buses = []
+        for line_ref, dest, lat, lon, operator in results:
+            buses.append({
+                "line_ref": line_ref,
+                "destination": dest,
+                "latitude": lat,
+                "longitude": lon,
+                "operator": operator
+            })
+
+        return BusLiveResponse(success=True, buses=buses)
+
+    except Exception as e:
+        return BusLiveResponse(success=False, error=str(e))
+"""
+
+
 @app.get("/bus/live/{operator}")
 async def bus_live_operator(
     operator: str,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
-    latTol: float = 0.01,
-    lonTol: float = 0.01,
+    latTol: float = 0.0003,
+    lonTol: float = 0.0003,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
@@ -655,17 +583,6 @@ def build_journey_plan_response(route_result, merged, stop_coords):
 
     Returns:
         dict with keys: success, legs, meta, routeGeometries
-
-    .. note:: **Coordinate order convention**
-
-       All ``routeGeometries[*].coords`` arrays use **[lat, lon]** order,
-       which is what Leaflet's ``L.polyline()`` expects.
-
-       This is **NOT** GeoJSON order — GeoJSON uses ``[longitude, latitude]``.
-       If the frontend ever switches to GeoJSON-based rendering (e.g.
-       ``L.geoJSON()``), the coords must be transposed.
-
-       Internal stop_coords dict also stores ``(lat, lon)`` tuples.
     """
     from time_utils import seconds_to_time
     import math
@@ -703,13 +620,11 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                              if total_arrival else None),
         }]
 
-        # Geometry coords use [lat, lon] order (Leaflet convention),
-        # NOT GeoJSON [lon, lat]. See docstring above.
         coords = []
         if len(start) >= 2:
-            coords.append([start[0], start[1]])  # [lat, lon]
+            coords.append([start[0], start[1]])
         if len(dest) >= 2:
-            coords.append([dest[0], dest[1]])     # [lat, lon]
+            coords.append([dest[0], dest[1]])
 
         geometries = ([{
             "id": "walk-0",
@@ -758,87 +673,6 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             return None
         return seconds_to_time(int(secs))
 
-    def _get_transit_coords(from_stop, to_stop, info, stop_coords):
-        """Extract all intermediate stop coordinates for a transit leg.
-
-        Uses the ``day`` (MergedData) and ``journey`` id stored in the
-        RAPTOR result to look up the full journey stop sequence, then
-        returns **[lat, lon]** pairs for every stop between the boarding
-        and alighting positions (inclusive).
-
-        Falls back to a simple 2-point line if the journey data is
-        unavailable.
-        """
-        day = info.get("day")
-        journey_id = info.get("journey")
-
-        # Fallback: just use boarding + alighting coords
-        def _two_point():
-            pts = []
-            fc = stop_coords.get(from_stop)
-            tc = stop_coords.get(to_stop)
-            if fc:
-                pts.append([fc[0], fc[1]])
-            if tc:
-                pts.append([tc[0], tc[1]])
-            return pts
-
-        if day is None or journey_id is None:
-            return _two_point()
-
-        try:
-            jt = day.journey_times[journey_id]
-            jsi = day.journey_stop_index[journey_id]
-        except (IndexError, AttributeError, TypeError):
-            return _two_point()
-
-        from_pos = jsi.get(from_stop)
-        to_pos = jsi.get(to_stop)
-        if from_pos is None or to_pos is None or from_pos >= to_pos:
-            return _two_point()
-
-        # Extract coords for every stop between boarding and alighting
-        coords = []
-        for stop_id, _atime, _dtime in jt[from_pos: to_pos + 1]:
-            c = stop_coords.get(stop_id)
-            if c:
-                coords.append([c[0], c[1]])
-
-        return coords if coords else _two_point()
-
-    def _get_intermediate_stop_names(from_stop, to_stop, info, merged, stop_coords):
-        """Return a list of intermediate stop dicts between boarding and alighting.
-
-        Each dict has ``{name, lat, lon}`` (lat/lon omitted if unknown).
-        The boarding and alighting stops themselves are **excluded** — they
-        are already in ``from_stop`` / ``to_stop`` on the leg.
-        """
-        day = info.get("day")
-        journey_id = info.get("journey")
-        if day is None or journey_id is None:
-            return []
-
-        try:
-            jt = day.journey_times[journey_id]
-            jsi = day.journey_stop_index[journey_id]
-        except (IndexError, AttributeError, TypeError):
-            return []
-
-        from_pos = jsi.get(from_stop)
-        to_pos = jsi.get(to_stop)
-        if from_pos is None or to_pos is None or to_pos - from_pos <= 1:
-            return []
-
-        stops = []
-        for stop_id, _atime, _dtime in jt[from_pos + 1: to_pos]:
-            entry = {"name": _stop_name(stop_id)}
-            c = stop_coords.get(stop_id)
-            if c:
-                entry["lat"] = c[0]
-                entry["lon"] = c[1]
-            stops.append(entry)
-        return stops
-
     _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#e53935"}
     legs = []
     geometries = []
@@ -868,14 +702,13 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "departure_time": None,
             "arrival_time": _time_str(ordered[0][1]["arrival_time"]),
         })
-        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
-        wc = [[start_point[0], start_point[1]]]  # [lat, lon]
+        wc = [[start_point[0], start_point[1]]]
         if first_coord:
-            wc.append([first_coord[0], first_coord[1]])  # [lat, lon]
+            wc.append([first_coord[0], first_coord[1]])
         geometries.append({
             "id": f"walk-{geo_idx}",
             "name": f"Walk to {first_name}",
-            "coords": wc,  # [[lat, lon], ...]
+            "coords": wc,
             "color": "#888888",
         })
         geo_idx += 1
@@ -932,16 +765,9 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             else:
                 leg["duration_seconds"] = None
 
-            # Attach intermediate stops for the leg (all stops between
-            # boarding and alighting, exclusive of endpoints which are
-            # already in from_stop / to_stop).
-            leg["intermediate_stops"] = _get_intermediate_stop_names(
-                prev_int, curr_int, curr_info, merged, stop_coords)
-
         legs.append(leg)
 
         # -- geometry for this leg --
-        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
         color = _COLOR.get(transport, "#666666")
         if transport == "walking":
             geo_name = "Walk"
@@ -949,19 +775,11 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             geo_name = f"{transport.title()} {line_name}"
         else:
             geo_name = transport.title() if transport else "Unknown"
-
-        # For transit legs, extract ALL intermediate stop coords from the
-        # journey so the polyline follows the actual route, not just a
-        # straight line between boarding and alighting stops.
-        if transport != "walking":
-            coords = _get_transit_coords(
-                prev_int, curr_int, curr_info, stop_coords)
-        else:
-            coords = []
-            if prev_coord:
-                coords.append([prev_coord[0], prev_coord[1]])
-            if curr_coord:
-                coords.append([curr_coord[0], curr_coord[1]])
+        coords = []
+        if prev_coord:
+            coords.append([prev_coord[0], prev_coord[1]])
+        if curr_coord:
+            coords.append([curr_coord[0], curr_coord[1]])
 
         geometries.append({
             "id": f"{transport}-{geo_idx}",
@@ -992,15 +810,14 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                 ordered[-1][1]["arrival_time"]),
             "arrival_time": _time_str(total_arrival),
         })
-        # Coords are [lat, lon] (Leaflet order), NOT GeoJSON [lon, lat].
         wc = []
         if last_coord:
-            wc.append([last_coord[0], last_coord[1]])  # [lat, lon]
-        wc.append([destination_point[0], destination_point[1]])  # [lat, lon]
+            wc.append([last_coord[0], last_coord[1]])
+        wc.append([destination_point[0], destination_point[1]])
         geometries.append({
             "id": f"walk-{geo_idx}",
             "name": "Walk to destination",
-            "coords": wc,  # [[lat, lon], ...]
+            "coords": wc,
             "color": "#888888",
         })
 
@@ -1083,6 +900,7 @@ async def get_route(request: RouteRequest):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
 @app.get("/weather")
 async def route_weather(lat: float | None = None, lon: float | None = None):
     if lat is None or lon is None:
@@ -1116,13 +934,10 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
         "main": main,
     }
 
+
 if __name__ == "__main__":
     import uvicorn
-    import os as _os
-    _port = int(_os.environ.get("BACKEND_PORT", _os.environ.get("PORT", "5050")))
-    # Emit a clear startup message so container logs show which port was chosen.
-    print(f"Starting uvicorn (api:app) on 0.0.0.0:{_port} (BACKEND_PORT={_os.environ.get('BACKEND_PORT')}, PORT={_os.environ.get('PORT')})")
-    uvicorn.run(app, host="0.0.0.0", port=_port)
+    uvicorn.run(app, host="localhost", port=5005)
 
 
 

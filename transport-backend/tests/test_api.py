@@ -109,8 +109,6 @@ class TestAppMetadata:
         assert "get" in schema["paths"]["/health"]
 
 
-# â”€â”€ /api/route endpoint tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 
 class TestRouteEndpoint:
     """Validate the /api/route POST endpoint."""
