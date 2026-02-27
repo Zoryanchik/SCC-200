@@ -3,6 +3,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Ensure common utilities are available (curl is used at runtime)
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends curl \
+	&& rm -rf /var/lib/apt/lists/*
+
 # Copy and install requirements first for better layer caching
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt

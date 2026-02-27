@@ -80,6 +80,21 @@ fi
 
 DOCKER_IMAGE="docker.io/osrm/osrm-backend:latest"
 
+echo "Checking for image $DOCKER_IMAGE..."
+# Ensure we have a fresh image when using podman. For Docker keep existing behaviour.
+if $RUNTIME image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
+  if [ "$RUNTIME" = "podman" ]; then
+    echo "Image found locally and runtime is podman — removing and pulling latest $DOCKER_IMAGE..."
+    $RUNTIME rmi -f "$DOCKER_IMAGE" >/dev/null 2>&1 || true
+    $RUNTIME pull "$DOCKER_IMAGE"
+  else
+    echo "Image found locally: $DOCKER_IMAGE"
+  fi
+else
+  echo "Image not found locally — pulling $DOCKER_IMAGE..."
+  $RUNTIME pull "$DOCKER_IMAGE"
+fi
+
 echo "Step 1: osrm-extract (profile=$PROFILE) -> $NAME.osrm"
 # If profile-specific osrm file already exists, skip; otherwise run extract
 if [ ! -f "$DATA_DIR/$NAME.osrm" ]; then

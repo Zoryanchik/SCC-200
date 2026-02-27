@@ -38,11 +38,19 @@ if [ "$RUNTIME" = "podman" ]; then
 fi
 
 echo "Checking for image $IMAGE..."
-if ! $RUNTIME image inspect "$IMAGE" >/dev/null 2>&1; then
+if $RUNTIME image inspect "$IMAGE" >/dev/null 2>&1; then
+  # If we're using podman prefer to remove and rebuild to avoid stale images
+  if [ "$RUNTIME" = "podman" ]; then
+    echo "Image found locally and runtime is podman — removing and rebuilding $IMAGE (this may take a minute)..."
+    # force remove existing image if present; ignore errors
+    $RUNTIME rmi -f "$IMAGE" >/dev/null 2>&1 || true
+    $RUNTIME build -t "$IMAGE" .
+  else
+    echo "Image found locally: $IMAGE"
+  fi
+else
   echo "Image not found locally — building $IMAGE (this may take a minute)..."
   $RUNTIME build -t "$IMAGE" .
-else
-  echo "Image found locally: $IMAGE"
 fi
 
 
