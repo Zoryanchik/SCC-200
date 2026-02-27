@@ -1,6 +1,8 @@
 import math
 import bisect
+from typing import List, Any, Set, Optional, Tuple
 from walking import Walking
+from modes import WALKING, int_to_name, all_transit_modes, name_to_int
 
 class RaptorRouter:
     def __init__( self, yesterday, today, tomorrow ):
@@ -11,40 +13,48 @@ class RaptorRouter:
     def route( self,
                n_transfer_limit: int,
                walking: Walking,
-               start_date: str,
                start_time: int,
-               start_point: str,
-               destination: str,
-               allowed_modes: set = None ) -> dict:
+               start_point: Tuple[float, float],
+               destination: Tuple[float, float],
+               allowed_modes: Optional[Set[Any]] = None ) -> dict:
         #creat a list of dicts of stops storing earliest arrival time, previous stop,
         #type of transport from previous stop, and journey id 
         inf = math.inf
-        reach_stops = list( range( len( self.today.stop_to_routes ) ) )
-        for stop in range( len( reach_stops ) ):
-            reach_stops[ stop ] = { "prev_stop": None,
-                                    "arrival_time": inf,
-                                    "type": None,
-                                    "journey": None,
-                                    "day": None }
+        # internal representation: list entries [prev_stop, arrival_time, type, journey, day]
+        reach_stops = list(range(len(self.today.stop_to_routes)))
+        for stop in range(len(reach_stops)):
+            reach_stops[stop] = [None, inf, None, None, None]
         n_transfer = -1
         initial_stops = walking.reachable_stops( start_point )
         switch_a = []
         switch_b = []
         for stop, walk_time in initial_stops.items():
-            reach_stops[ stop ][ "arrival_time" ] = start_time + walk_time
-            reach_stops[ stop ][ "type" ] = "walking"
+            reach_stops[stop][1] = start_time + walk_time
+            reach_stops[stop][2] = WALKING
             if stop not in switch_a:
                 switch_a.append( stop )
+        # Normalize allowed_modes: accept either string names or int codes
         if allowed_modes is None:
-            allowed_modes = {"bus", "train"}
-        self.recursive_raptor( start_date,
-                               n_transfer,
-                               n_transfer_limit,
-                               reach_stops,
-                               walking,
-                               switch_a,
-                               switch_b,
-                               allowed_modes )
+            allowed_modes = all_transit_modes()
+        else:
+            normalized = set()
+            for m in allowed_modes:
+                if isinstance(m, str):
+                    mi = name_to_int(m)
+                    if mi is not None:
+                        normalized.add(mi)
+                elif isinstance(m, int):
+                    normalized.add(m)
+            allowed_modes = normalized
+        self.recursive_raptor(
+            n_transfer,
+            n_transfer_limit,
+            reach_stops,
+            walking,
+            switch_a,
+            switch_b,
+            allowed_modes,
+        )
         final_stops = walking.reachable_stops( destination )
         if not final_stops:
             return {}
@@ -54,8 +64,8 @@ class RaptorRouter:
         best_final_stop = None
         best_total_arrival = math.inf
         for stop, walk_time in final_stops.items():
-            if reach_stops[stop]["type"] != "walking" and reach_stops[stop]["arrival_time"] < math.inf:
-                total_arrival = reach_stops[stop]["arrival_time"] + walk_time
+            if reach_stops[stop][2] != WALKING and reach_stops[stop][1] < math.inf:
+                total_arrival = reach_stops[stop][1] + walk_time
                 if total_arrival < best_total_arrival:
                     best_total_arrival = total_arrival
                     best_final_stop = stop
@@ -87,8 +97,16 @@ class RaptorRouter:
             if track in visited:
                 break
             visited.add(track)
-            fastest_route[ track ] = reach_stops[ track ]
-            track = reach_stops[ track ][ "prev_stop" ]
+            # convert internal list representation into the dict returned to callers
+            fastest_route[track] = {
+                "prev_stop": reach_stops[track][0],
+                "arrival_time": reach_stops[track][1],
+                # convert internal int code back to external string name
+                "mode": int_to_name(reach_stops[track][2]),
+                "journey": reach_stops[track][3],
+                "day": reach_stops[track][4],
+            }
+            track = reach_stops[track][0]
 
         # Identify the origin stop (first stop reached by initial walk)
         origin_stop = None
@@ -141,14 +159,13 @@ class RaptorRouter:
 
 
     def recursive_raptor( self,
-                          start_date,
                           n_transfer: int,
                           transfer_limit: int,
-                          reach_stops: dict,
+                          reach_stops: List[List[Any]],
                           walking: Walking,
                           switch_a: list,
                           switch_b: list,
-                          allowed_modes: set ):
+                          allowed_modes: Set[int] ):
         if len( switch_a ) == 0 or n_transfer == transfer_limit:
             return
         else:
@@ -177,23 +194,24 @@ class RaptorRouter:
             for stop in switch_b:
                 walk_stops = walking.inter_walk( stop )
                 for walk_stop in walk_stops:
-                    walk_arrival = reach_stops[ stop ][ "arrival_time" ] + walk_stops[ walk_stop ]
-                    if reach_stops[ walk_stop ][ "arrival_time" ] > walk_arrival:
-                        reach_stops[ walk_stop ][ "arrival_time" ] = walk_arrival
-                        reach_stops[ walk_stop ][ "prev_stop" ] = stop
-                        reach_stops[ walk_stop ][ "type" ] = "walking"
+                    walk_arrival = reach_stops[stop][1] + walk_stops[walk_stop]
+                    if reach_stops[walk_stop][1] > walk_arrival:
+                        reach_stops[walk_stop][1] = walk_arrival
+                        reach_stops[walk_stop][0] = stop
+                        reach_stops[walk_stop][2] = WALKING
                         walking_additions.add( walk_stop )
             for w in walking_additions:
                 if w not in switch_b:
                     switch_b.append(w)
-            self.recursive_raptor( start_date,
-                                   n_transfer,
-                                   transfer_limit,
-                                   reach_stops,
-                                   walking,
-                                   switch_b,
-                                   switch_a,
-                                   allowed_modes )
+            self.recursive_raptor(
+                n_transfer,
+                transfer_limit,
+                reach_stops,
+                walking,
+                switch_b,
+                switch_a,
+                allowed_modes,
+            )
             
     def first_journey( self, network, route, stop, reach_stops, switch_b, allowed_modes ):
         # Use precomputed route_stop_departures for O(log n) lookup
@@ -204,7 +222,7 @@ class RaptorRouter:
         if not stop_deps:
             return None
 
-        arrival_start = reach_stops[stop]["arrival_time"] + 90
+        arrival_start = reach_stops[stop][1] + 90
         # Binary search for first departure >= arrival
         idx = bisect.bisect_left(stop_deps, (arrival_start,))
 
@@ -224,12 +242,12 @@ class RaptorRouter:
             for subsequent_point, subsequent_a_time, subsequent_d_time in journey_times[start_pos + 1:]:
                 if subsequent_point == stop:
                     continue                        # don't loop back to boarding stop
-                if subsequent_a_time < reach_stops[subsequent_point]["arrival_time"]:
-                    reach_stops[subsequent_point]["arrival_time"] = subsequent_a_time
-                    reach_stops[subsequent_point]["prev_stop"] = stop
-                    reach_stops[subsequent_point]["type"] = network.journey_type(first_journey)
-                    reach_stops[subsequent_point]["journey"] = first_journey
-                    reach_stops[subsequent_point]["day"] = network
+                if subsequent_a_time < reach_stops[subsequent_point][1]:
+                    reach_stops[subsequent_point][1] = subsequent_a_time
+                    reach_stops[subsequent_point][0] = stop
+                    reach_stops[subsequent_point][2] = network.journey_type(first_journey)
+                    reach_stops[subsequent_point][3] = first_journey
+                    reach_stops[subsequent_point][4] = network
                     if subsequent_point not in switch_b:
                         switch_b.append(subsequent_point)
             return first_journey

@@ -306,7 +306,7 @@ def print_route(route_result, merged):
         # Resolve stop name / code
         stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
-        transport = info["type"] if info["type"] else "origin"
+        transport = info.get("mode") if info.get("mode") else "origin"
 
         if i == 0:
             print(f"  ● {stop_label}")
@@ -444,7 +444,6 @@ def main():
             result = router.route(
                 n_transfer_limit=max_transfers,
                 walking=walking,
-                start_date=date_str,
                 start_time=start_seconds,
                 start_point=start_loc,
                 destination=end_loc,

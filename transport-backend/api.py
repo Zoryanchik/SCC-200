@@ -26,6 +26,7 @@ from main import build_for_date
 from time_utils import seconds_since_midnight
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
+from modes import name_to_int, all_transit_modes
 
 logger = logging.getLogger(__name__)
 
@@ -554,7 +555,8 @@ def format_route_text(route_result, merged):
     for i, (stop_int, info) in enumerate(legs):
         stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
-        transport = info.get("type") or "origin"
+        # Support both new 'mode' key and legacy 'type' key in route dicts
+        transport = info.get("mode") or info.get("type") or "origin"
 
         if i == 0:
             out.append(f"  - {stop_label}")
@@ -637,7 +639,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                    if len(dest) >= 2 else None)
 
         legs = [{
-            "type": "walking",
+            "mode": "walking",
             "from_stop": from_loc,
             "to_stop": to_loc,
             "duration_seconds": total_walk,
@@ -720,7 +722,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             to_loc["lat"] = first_coord[0]
             to_loc["lon"] = first_coord[1]
         legs.append({
-            "type": "walking",
+            "mode": "walking",
             "from_stop": {"name": "Start", "lat": start_point[0],
                           "lon": start_point[1]},
             "to_stop": to_loc,
@@ -743,7 +745,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
     for i in range(1, len(ordered)):
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
-        transport = curr_info.get("type", "") or "unknown"
+        transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
         prev_name = _stop_name(prev_int)
         curr_name = _stop_name(curr_int)
         prev_coord = stop_coords.get(prev_int)
@@ -759,7 +761,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             to_loc["lon"] = curr_coord[1]
 
         leg = {
-            "type": transport,
+            "mode": transport,
             "from_stop": from_loc,
             "to_stop": to_loc,
             "arrival_time": _time_str(curr_info["arrival_time"]),
@@ -826,7 +828,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             from_loc["lat"] = last_coord[0]
             from_loc["lon"] = last_coord[1]
         legs.append({
-            "type": "walking",
+            "mode": "walking",
             "from_stop": from_loc,
             "to_stop": {"name": "Destination",
                         "lat": destination_point[0],
@@ -885,7 +887,6 @@ async def journey_plan(request: JourneyPlanRequest):
         result = router.route(
             n_transfer_limit=max_transfers,
             walking=walking,
-            start_date=date_str,
             start_time=start_seconds,
             start_point=start_point,
             destination=destination,
@@ -915,7 +916,6 @@ async def get_route(request: RouteRequest):
         result = router.route(
             n_transfer_limit=max_transfers,
             walking=walking,
-            start_date=date_str,
             start_time=start_seconds,
             start_point=start_point,
             destination=destination,

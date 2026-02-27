@@ -1,5 +1,6 @@
 from bus_data import BusData
 from train_data import TrainData
+from modes import BUS, TRAIN
 
 class MergedData:
     def __init__( self, bus_data: BusData, train_data: TrainData, stop_name_fn=None, time_offset=0 ):
@@ -166,5 +167,9 @@ class MergedData:
             route_stop_departures = []
         return Empty()
 
-    def journey_type( self, journey_id_int: int ) -> str:
-        return "bus" if journey_id_int < len( self.bus_data.journey_times ) else "train"
+    def journey_type( self, journey_id_int: int ) -> int:
+        """Return an integer code for the journey's transport type.
+
+        BUS if the journey id belongs to the bus dataset, else TRAIN.
+        """
+        return BUS if journey_id_int < len(self.bus_data.journey_times) else TRAIN

@@ -216,7 +216,7 @@ class TestJourneyPlanWalkingOnly:
         data = resp.json()
         assert data["success"] is True
         assert len(data["legs"]) == 1
-        assert data["legs"][0]["type"] == "walking"
+        assert data["legs"][0]["mode"] == "walking"
 
     def test_walking_only_geometry_has_coords(self, client):
         """Walking-only geometry has start and end coordinates."""
@@ -258,14 +258,14 @@ class TestJourneyPlanMultiLeg:
         0: {
             "arrival_time": 36060,
             "prev_stop": None,
-            "type": None,
+            "mode": None,
             "journey": None,
             "day": None,
         },
         1: {
             "arrival_time": 36500,
             "prev_stop": 0,
-            "type": "bus",
+            "mode": "bus",
             "journey": 1,
             "day": None,
             "journey_info": {"line_name": "NW:10"},
@@ -276,7 +276,7 @@ class TestJourneyPlanMultiLeg:
         2: {
             "arrival_time": 36900,
             "prev_stop": 1,
-            "type": "walking",
+            "mode": "walking",
             "journey": None,
             "day": None,
         },
@@ -317,7 +317,7 @@ class TestJourneyPlanMultiLeg:
     def test_multi_leg_bus_leg_has_line_name(self, client):
         """Bus leg should include parsed line_name."""
         data = self._post(client).json()
-        bus_legs = [l for l in data["legs"] if l["type"] == "bus"]
+        bus_legs = [l for l in data["legs"] if l["mode"] == "bus"]
         assert len(bus_legs) >= 1
         assert bus_legs[0]["line_name"] == "10"
 
@@ -446,7 +446,7 @@ class TestBuildJourneyPlanResponse:
         result = build_journey_plan_response(route, MagicMock(), {})
         assert result["success"] is True
         assert len(result["legs"]) == 1
-        assert result["legs"][0]["type"] == "walking"
+        assert result["legs"][0]["mode"] == "walking"
         assert len(result["routeGeometries"]) >= 1
 
     def test_walking_only_no_arrival(self):
@@ -487,14 +487,14 @@ class TestBuildJourneyPlanResponse:
             0: {
                 "arrival_time": 36060,
                 "prev_stop": None,
-                "type": None,
+                "mode": None,
                 "journey": None,
                 "day": None,
             },
             1: {
                 "arrival_time": 36500,
                 "prev_stop": 0,
-                "type": "bus",
+                "mode": "bus",
                 "journey": 1,
                 "day": None,
                 "journey_info": {"line_name": "NW:42"},
@@ -514,7 +514,7 @@ class TestBuildJourneyPlanResponse:
         assert result["success"] is True
         assert len(result["legs"]) >= 2
         # Bus leg should have line_name parsed (split on ':')
-        bus_legs = [l for l in result["legs"] if l["type"] == "bus"]
+        bus_legs = [l for l in result["legs"] if l["mode"] == "bus"]
         assert bus_legs[0]["line_name"] == "42"
         # Geometries should have coordinates
         for geo in result["routeGeometries"]:
@@ -545,9 +545,9 @@ class TestBuildJourneyPlanResponse:
         merged.stop_metadata = ["A", "B"]
         stop_coords = {0: (54.0, -2.8), 1: (54.1, -2.9)}
         route = {
-            0: {"arrival_time": 36000, "prev_stop": None, "type": None,
+            0: {"arrival_time": 36000, "prev_stop": None, "mode": None,
                 "journey": None, "day": None},
-            1: {"arrival_time": 36600, "prev_stop": 0, "type": "train",
+            1: {"arrival_time": 36600, "prev_stop": 0, "mode": "train",
                 "journey": 1, "day": None, "journey_info": None,
                 "journey_origin": "", "journey_destination": "",
                 "board_departure": 36100},
@@ -566,7 +566,7 @@ class TestBuildJourneyPlanResponse:
         merged = MagicMock()
         merged.stop_metadata = ["X"]
         route = {
-            0: {"arrival_time": float("inf"), "prev_stop": None, "type": None,
+            0: {"arrival_time": float("inf"), "prev_stop": None, "mode": None,
                 "journey": None, "day": None},
             "_meta": {},
         }
