@@ -5,6 +5,8 @@ start/end points and departure time, and prints the route result.
 """
 
 from bus_loader import BusLoader
+from walking_loader import WalkingLoader
+from train_loader import TrainLoader
 from timetable import Timetable
 from walking import Walking
 from time_utils import seconds_since_midnight, seconds_to_time
@@ -12,7 +14,10 @@ import os
 from datetime import date as _date, timedelta as _timedelta
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-DB_PATH   = os.path.join(CACHE_DIR, "bus_timetable.db")
+# Separate DB files for bus, train and walking
+BUS_DB_PATH   = os.path.join(CACHE_DIR, "bus_database.db")
+TRAIN_DB_PATH = os.path.join(CACHE_DIR, "train_database.db")
+WALK_DB_PATH  = os.path.join(CACHE_DIR, "walking_database.db")
 
 
 def initialize_base():
@@ -27,36 +32,65 @@ def initialize_base():
     print("=" * 60)
 
     # 1. Database & downloads ------------------------------------------
-    print("\n[1/2] Loading bus timetable data...")
+    print("\n[1/2] Initialising bus, walking and train stores (concurrent)...")
     os.makedirs(CACHE_DIR, exist_ok=True)
-    loader = BusLoader(DB_PATH)
-    loader.ensure_db()
-    loader.create_schema()
 
+    # We'll run bus, walking (download only), and train init concurrently.
+    from concurrent.futures import ThreadPoolExecutor
     import sqlite3 as _sql
-    _conn = _sql.connect(DB_PATH)
-    _count = _conn.execute("SELECT COUNT(*) FROM route_stops").fetchone()[0]
-    _conn.close()
-    data_changed = False
-    if _count == 0:
-        print("  Database empty — downloading timetable data...")
-        datasets = loader._fetch_dataset_info()
-        print(f"  Got {len(datasets)} download URLs")
-        for ds in datasets:
-            loader.download_and_load(ds['download_url'])
-            conn = _sql.connect(DB_PATH)
-            conn.execute(
-                "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
-                (ds['source_url'], ds['download_url'], ds['modified']),
-            )
-            conn.commit()
-            conn.close()
-        print("  ✓ Timetable data loaded")
-        data_changed = True
-    else:
-        data_changed = loader.check_for_updates()
 
-    print("  ✓ Database ready")
+    def _bus_task():
+        loader = BusLoader(BUS_DB_PATH, walking_db_path=WALK_DB_PATH)
+        loader.ensure_db()
+        loader.create_schema()
+        conn = _sql.connect(BUS_DB_PATH)
+        _count = conn.execute("SELECT COUNT(*) FROM bus_route_stops").fetchone()[0]
+        conn.close()
+        data_changed = False
+        if _count == 0:
+            print("  Bus DB empty — downloading timetable data...")
+            datasets = loader._fetch_dataset_info()
+            print(f"  Got {len(datasets)} download URLs")
+            for ds in datasets:
+                loader.download_and_load(ds['download_url'])
+                conn = _sql.connect(BUS_DB_PATH)
+                conn.execute(
+                    "INSERT OR REPLACE INTO bus_dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                    (ds['source_url'], ds['download_url'], ds['modified']),
+                )
+                conn.commit()
+                conn.close()
+            print("  ✓ Timetable data loaded")
+            data_changed = True
+        else:
+            data_changed = loader.check_for_updates()
+        print("  ✓ Bus DB ready")
+        return loader, data_changed
+
+    def _walking_download_task():
+        wl = WalkingLoader(WALK_DB_PATH)
+        wl.create_schema()
+        wl.download_stop_coords()
+        return wl
+
+    def _train_task():
+        tl = TrainLoader(TRAIN_DB_PATH)
+        tl.ensure_db()
+        tl.create_schema()
+        print("  ✓ Train DB ready")
+        return tl
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        bus_fut = ex.submit(_bus_task)
+        walk_fut = ex.submit(_walking_download_task)
+        train_fut = ex.submit(_train_task)
+
+        # Wait for bus and walking download to finish; train is a lightweight init
+        loader, data_changed = bus_fut.result()
+        walking_loader = walk_fut.result()
+        train_loader = train_fut.result()
+
+    print("  ✓ Databases initialised")
 
     # 2. Walking — coords, precomputed transfers, OSRM ----------------
     print("\n[2/2] Preparing walking data...")
@@ -95,16 +129,24 @@ def initialize_base():
         print("         osrm-routed --algorithm mld -p 5012 /data/nw-england.osrm")
         print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5012")
 
+    # Walking operations moved to WalkingLoader
+    walking_loader = WalkingLoader(WALK_DB_PATH)
+    # Ensure walking DB schema exists
+    walking_loader.create_schema()
     if data_changed:
-        loader.clear_walking_transfers()
-    loader.download_stop_coords()
+        walking_loader.clear_walking_transfers()
+    walking_loader.download_stop_coords()
+    # Start precompute in background so startup is non-blocking.
     if osrm_ok:
-        loader.precompute_walking_transfers()
+        walking_loader.start_precompute_background(osrm_base=OSRM_URL)
+    else:
+        # If OSRM is not available, run the haversine fallback in background
+        walking_loader.start_precompute_background(use_fallback=True)
 
     # Build inter_walk table keyed by ATCO codes (will be remapped
     # to per-date integer IDs when the network is built)
-    raw_transfers = loader.get_walking_transfers()
-    raw_coords    = loader.get_all_stop_coords()
+    raw_transfers = walking_loader.get_walking_transfers()
+    raw_coords    = walking_loader.get_all_stop_coords()
 
     walking_raw = {
         "transfers": raw_transfers,   # {atco: {atco: secs}}
@@ -121,6 +163,7 @@ def initialize_base():
     return {
         "loader": loader,
         "walking_raw": walking_raw,
+        "walking_loader": walking_loader,
     }
 
 
@@ -141,24 +184,42 @@ def build_for_date(loader, walking_raw, date_str, mode="both"):
     tomorrow_str  = (query + _timedelta(days=1)).isoformat()
 
     print(f"\n  Building network for {date_str} …")
-    print(f"    Loading yesterday ({yesterday_str}) …", end=" ", flush=True)
-    bus_yesterday = loader.load_busdata_for_date(yesterday_str)
-    print(f"{len(bus_yesterday.map_journeys)} journeys")
+    # Load bus and train data for yesterday/today/tomorrow concurrently so
+    # they can be merged quickly into the Timetable. Train loading is
+    # currently lightweight (placeholder) but this keeps the pattern
+    # consistent when a fuller TrainLoader is implemented.
+    from concurrent.futures import ThreadPoolExecutor
 
-    print(f"    Loading today     ({date_str}) …", end=" ", flush=True)
-    bus_today = loader.load_busdata_for_date(date_str)
-    print(f"{len(bus_today.map_journeys)} journeys")
+    train_loader = TrainLoader(TRAIN_DB_PATH)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        print(f"    Loading yesterday ({yesterday_str}) …", end=" ", flush=True)
+        bus_y_f = ex.submit(loader.load_busdata_for_date, yesterday_str)
+        train_y_f = ex.submit(train_loader.load_traindata_for_date, yesterday_str)
 
-    print(f"    Loading tomorrow  ({tomorrow_str}) …", end=" ", flush=True)
-    bus_tomorrow = loader.load_busdata_for_date(tomorrow_str)
-    print(f"{len(bus_tomorrow.map_journeys)} journeys")
+        print(f"    Loading today     ({date_str}) …", end=" ", flush=True)
+        bus_t_f = ex.submit(loader.load_busdata_for_date, date_str)
+        train_t_f = ex.submit(train_loader.load_traindata_for_date, date_str)
 
-    train_data = None  # placeholder
+        print(f"    Loading tomorrow  ({tomorrow_str}) …", end=" ", flush=True)
+        bus_m_f = ex.submit(loader.load_busdata_for_date, tomorrow_str)
+        train_m_f = ex.submit(train_loader.load_traindata_for_date, tomorrow_str)
+
+        bus_yesterday = bus_y_f.result()
+        train_yesterday = train_y_f.result()
+        print(f"{len(bus_yesterday.map_journeys)} journeys")
+
+        bus_today = bus_t_f.result()
+        train_today = train_t_f.result()
+        print(f"{len(bus_today.map_journeys)} journeys")
+
+        bus_tomorrow = bus_m_f.result()
+        train_tomorrow = train_m_f.result()
+        print(f"{len(bus_tomorrow.map_journeys)} journeys")
 
     timetable = Timetable(
-        bus_yesterday, train_data,
-        bus_today,     train_data,
-        bus_tomorrow,  train_data,
+        bus_yesterday, train_yesterday,
+        bus_today,     train_today,
+        bus_tomorrow,  train_tomorrow,
         stop_name_fn=loader.get_stop_names_bulk,
     )
     timetable.build_network(mode)

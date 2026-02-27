@@ -61,7 +61,8 @@ export NETWORK_NAME
 echo "Waiting for /health to respond (timeout ~300s)..."
 for i in {1..100}; do
   if curl -sS http://localhost:5050/health >/dev/null 2>&1; then
-    echo "\nBackend is ready at http://localhost:5050"
+    echo
+    echo "Backend is ready at http://localhost:5050"
     if [ "$USE_SHELL" -eq 1 ]; then
       echo "Opening an interactive shell inside $CONTAINER (press Ctrl+D to exit)..."
       if [ "$RUNTIME" = "podman" ]; then
@@ -76,5 +77,6 @@ for i in {1..100}; do
   sleep 3
 done
 
-echo "\nTimed out waiting for backend to become ready. Tail the logs with: $RUNTIME logs -f $CONTAINER"
+echo
+echo "Timed out waiting for backend to become ready. Tail the logs with: $RUNTIME logs -f $CONTAINER"
 exit 1

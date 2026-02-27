@@ -10,6 +10,8 @@ RUN apt-get update \
 
 # Copy and install requirements first for better layer caching
 COPY requirements.txt /app/requirements.txt
+# Upgrade pip inside the image to avoid runtime "new release available" notices
+RUN python3 -m pip install --upgrade pip
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy project files

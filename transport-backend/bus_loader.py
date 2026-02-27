@@ -13,10 +13,12 @@ import zipfile
 from bus_data import BusData
 
 class BusLoader:
-    def __init__( self, db_path, user=None, password=None ):
+    def __init__( self, db_path, user=None, password=None, walking_db_path=None ):
         self.db_path = db_path
         self.user = user
         self.password = password
+        # Optional separate walking DB (contains stop_coords and walking_transfers)
+        self.walking_db_path = walking_db_path
 
     def get_download_urls(self):
         """Return a list of dataset download URLs.
@@ -95,7 +97,7 @@ class BusLoader:
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT source_url, modified FROM dataset_meta")
+        cur.execute("SELECT source_url, modified FROM bus_dataset_meta")
         stored = {row[0]: row[1] for row in cur.fetchall()}
         conn.close()
 
@@ -116,7 +118,7 @@ class BusLoader:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             cur.execute(
-                "INSERT OR REPLACE INTO dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                "INSERT OR REPLACE INTO bus_dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
                 (ds['source_url'], ds['download_url'], ds['modified']),
             )
             conn.commit()
@@ -135,59 +137,49 @@ class BusLoader:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.executescript('''
-            CREATE TABLE IF NOT EXISTS route_stops (
+            CREATE TABLE IF NOT EXISTS bus_route_stops (
                 route_id   CHAR(12),
                 atco_code  CHAR(12),
                 stop_order INTEGER NOT NULL,
                 PRIMARY KEY (route_id, atco_code)
             );
-            CREATE TABLE IF NOT EXISTS journey_routes (
+            CREATE TABLE IF NOT EXISTS bus_journey_routes (
                 journey_id CHAR(12) PRIMARY KEY,
                 route_id   TEXT NOT NULL,
                 line_name  TEXT,
                 destination_display TEXT
             );
-            CREATE TABLE IF NOT EXISTS journey_times (
+            CREATE TABLE IF NOT EXISTS bus_journey_times (
                 journey_id     CHAR(12),
                 atco_code      CHAR(12),
                 arrival_time   INTEGER NOT NULL,
                 PRIMARY KEY (journey_id, atco_code)
             );
-            CREATE TABLE IF NOT EXISTS stop_names (
+            CREATE TABLE IF NOT EXISTS bus_stop_names (
                 atco_code   CHAR(12) PRIMARY KEY,
                 common_name TEXT NOT NULL,
                 indicator   TEXT,
                 locality    TEXT
             );
-            CREATE TABLE IF NOT EXISTS stop_coords (
-                atco_code   CHAR(12) PRIMARY KEY,
-                lat         REAL NOT NULL,
-                lon         REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS walking_transfers (
-                from_atco   CHAR(12) NOT NULL,
-                to_atco     CHAR(12) NOT NULL,
-                walk_seconds INTEGER NOT NULL,
-                PRIMARY KEY (from_atco, to_atco)
-            );
-            CREATE TABLE IF NOT EXISTS dataset_meta (
+            -- stop coordinates and walking transfers are now stored in a separate walking DB
+            CREATE TABLE IF NOT EXISTS bus_dataset_meta (
                 source_url   TEXT PRIMARY KEY,
                 download_url TEXT NOT NULL,
                 modified     TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS service_operating_period (
+            CREATE TABLE IF NOT EXISTS bus_service_operating_period (
                 service_code TEXT NOT NULL,
                 start_date   TEXT NOT NULL,
                 end_date     TEXT,
                 PRIMARY KEY (service_code)
             );
-            CREATE TABLE IF NOT EXISTS serviced_org_working_days (
+            CREATE TABLE IF NOT EXISTS bus_serviced_org_working_days (
                 service_code     TEXT NOT NULL,
                 start_date   TEXT NOT NULL,
                 end_date     TEXT NOT NULL,
                 PRIMARY KEY (service_code, start_date, end_date)
             );
-            CREATE TABLE IF NOT EXISTS journey_operating_profile (
+            CREATE TABLE IF NOT EXISTS bus_journey_operating_profile (
                 journey_id   CHAR(12) NOT NULL,
                 service_code TEXT NOT NULL,
                 days_of_week INTEGER NOT NULL DEFAULT 0,
@@ -491,35 +483,35 @@ class BusLoader:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.executemany(
-            "INSERT OR REPLACE INTO route_stops (route_id, atco_code, stop_order) VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (?,?,?)",
             route_stops
         )
         cursor.executemany(
-            "INSERT OR REPLACE INTO journey_routes (journey_id, route_id, line_name, destination_display) VALUES (?,?,?,?)",
+            "INSERT OR REPLACE INTO bus_journey_routes (journey_id, route_id, line_name, destination_display) VALUES (?,?,?,?)",
             journey_routes
         )
         cursor.executemany(
-            "INSERT OR REPLACE INTO journey_times (journey_id, atco_code, arrival_time) VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO bus_journey_times (journey_id, atco_code, arrival_time) VALUES (?,?,?)",
             journey_times
         )
         if stop_names:
             cursor.executemany(
-                "INSERT OR REPLACE INTO stop_names (atco_code, common_name, indicator, locality) VALUES (?,?,?,?)",
+                "INSERT OR REPLACE INTO bus_stop_names (atco_code, common_name, indicator, locality) VALUES (?,?,?,?)",
                 stop_names
             )
         if service_ops:
             cursor.executemany(
-                "INSERT OR REPLACE INTO service_operating_period (service_code, start_date, end_date) VALUES (?,?,?)",
+                "INSERT OR REPLACE INTO bus_service_operating_period (service_code, start_date, end_date) VALUES (?,?,?)",
                 service_ops
             )
         if serviced_orgs:
             cursor.executemany(
-                "INSERT OR REPLACE INTO serviced_org_working_days (service_code, start_date, end_date) VALUES (?,?,?)",
+                "INSERT OR REPLACE INTO bus_serviced_org_working_days (service_code, start_date, end_date) VALUES (?,?,?)",
                 serviced_orgs
             )
         if journey_ops:
             cursor.executemany(
-                "INSERT OR REPLACE INTO journey_operating_profile (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working) VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO bus_journey_operating_profile (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working) VALUES (?,?,?,?,?,?,?)",
                 journey_ops
             )
         conn.commit()
@@ -531,17 +523,17 @@ class BusLoader:
         cursor = conn.cursor()
 
         # --- count distinct entities for initial sizing ---
-        cursor.execute("SELECT COUNT(DISTINCT route_id) FROM route_stops")
+        cursor.execute("SELECT COUNT(DISTINCT route_id) FROM bus_route_stops")
         num_routes = cursor.fetchone()[0] or 0
-        cursor.execute("SELECT COUNT(DISTINCT journey_id) FROM journey_routes")
+        cursor.execute("SELECT COUNT(DISTINCT journey_id) FROM bus_journey_routes")
         num_journeys = cursor.fetchone()[0] or 0
-        cursor.execute("SELECT COUNT(DISTINCT atco_code) FROM route_stops")
+        cursor.execute("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
         num_stops = cursor.fetchone()[0] or 0
 
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
 
         # --- 1. load route_stops: route_id -> ordered list of atco_codes ---
-        cursor.execute("SELECT route_id, atco_code FROM route_stops ORDER BY route_id, stop_order")
+        cursor.execute("SELECT route_id, atco_code FROM bus_route_stops ORDER BY route_id, stop_order")
         current_route = None
         stops_buf = []
         for route_id, atco_code in cursor.fetchall():
@@ -555,7 +547,7 @@ class BusLoader:
             bd.add_route_stop(current_route, stops_buf)
 
         # --- 2. load journey_routes: route_id -> list of journey_ids ---
-        cursor.execute("SELECT route_id, journey_id FROM journey_routes ORDER BY route_id")
+        cursor.execute("SELECT route_id, journey_id FROM bus_journey_routes ORDER BY route_id")
         current_route = None
         journeys_buf = []
         for route_id, journey_id in cursor.fetchall():
@@ -569,7 +561,7 @@ class BusLoader:
             bd.add_route_journeys(current_route, journeys_buf)
 
         # --- 3. load journey_times: journey_id -> list of (atco_code, arrival) ---
-        cursor.execute("SELECT journey_id, atco_code, arrival_time FROM journey_times ORDER BY journey_id, arrival_time")
+        cursor.execute("SELECT journey_id, atco_code, arrival_time FROM bus_journey_times ORDER BY journey_id, arrival_time")
         current_journey = None
         times_buf = []
         for journey_id, atco_code, arrival_time in cursor.fetchall():
@@ -584,7 +576,7 @@ class BusLoader:
 
         # --- 4. populate route_metadata and journey_metadata ---------------
         # journey_routes has (journey_id, route_id, line_name, destination_display)
-        cursor.execute("SELECT journey_id, route_id, line_name, destination_display FROM journey_routes")
+        cursor.execute("SELECT journey_id, route_id, line_name, destination_display FROM bus_journey_routes")
         route_line_names = {}   # route_id -> line_name (first seen)
         for journey_id, route_id, line_name, destination_display in cursor.fetchall():
             # journey metadata
@@ -627,12 +619,12 @@ class BusLoader:
 
         # 1. Load serviced org working-day ranges
         service_ranges = {}   # service_code -> [(start, end), ...]
-        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM serviced_org_working_days"):
+        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_serviced_org_working_days"):
             service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
 
         # 1b. Load service operating periods (coarse outer boundary)
         svc_periods = {}  # service_code -> (start_date | None, end_date | None)
-        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM service_operating_period"):
+        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
             try:
                 sp_s = _date.fromisoformat(sd) if sd else None
                 sp_e = _date.fromisoformat(ed) if ed else None
@@ -643,7 +635,7 @@ class BusLoader:
         # 1c. Hard ceiling for open-ended services: use the latest
         #     explicitly-defined end date anywhere in the DB.
         row = cur.execute(
-            "SELECT MAX(end_date) FROM journey_operating_profile WHERE end_date != ''"
+            "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
         ).fetchone()
         max_end_str = row[0] if row and row[0] else None
         hard_ceiling = _date.fromisoformat(max_end_str) if max_end_str else None
@@ -652,7 +644,7 @@ class BusLoader:
         valid_journeys = set()
         cur.execute(
             "SELECT journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working "
-            "FROM journey_operating_profile"
+            "FROM bus_journey_operating_profile"
         )
         for j_id, svc_code, dow_mask, op_start, op_end, org_ref, org_working in cur.fetchall():
             # a) Date range check — journey-level, with service-period fallback
@@ -706,7 +698,7 @@ class BusLoader:
         placeholders = ','.join('?' * len(valid_journeys))
         valid_list = list(valid_journeys)
         cur.execute(
-            f"SELECT DISTINCT route_id FROM journey_routes WHERE journey_id IN ({placeholders})",
+            f"SELECT DISTINCT route_id FROM bus_journey_routes WHERE journey_id IN ({placeholders})",
             valid_list,
         )
         valid_routes = {r[0] for r in cur.fetchall()}
@@ -714,7 +706,7 @@ class BusLoader:
         # Count for sizing
         num_routes = len(valid_routes)
         num_journeys = len(valid_journeys)
-        cur.execute("SELECT COUNT(DISTINCT atco_code) FROM route_stops")
+        cur.execute("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
         num_stops = cur.fetchone()[0] or 0
 
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
@@ -723,7 +715,7 @@ class BusLoader:
         route_placeholders = ','.join('?' * len(valid_routes))
         valid_routes_list = list(valid_routes)
         cur.execute(
-            f"SELECT route_id, atco_code FROM route_stops WHERE route_id IN ({route_placeholders}) ORDER BY route_id, stop_order",
+            f"SELECT route_id, atco_code FROM bus_route_stops WHERE route_id IN ({route_placeholders}) ORDER BY route_id, stop_order",
             valid_routes_list,
         )
         current_route = None
@@ -740,7 +732,7 @@ class BusLoader:
 
         # 3b. journey_routes — only valid journeys
         cur.execute(
-            f"SELECT route_id, journey_id FROM journey_routes WHERE journey_id IN ({placeholders}) ORDER BY route_id",
+            f"SELECT route_id, journey_id FROM bus_journey_routes WHERE journey_id IN ({placeholders}) ORDER BY route_id",
             valid_list,
         )
         current_route = None
@@ -757,7 +749,7 @@ class BusLoader:
 
         # 3c. journey_times — only valid journeys
         cur.execute(
-            f"SELECT journey_id, atco_code, arrival_time FROM journey_times WHERE journey_id IN ({placeholders}) ORDER BY journey_id, arrival_time",
+            f"SELECT journey_id, atco_code, arrival_time FROM bus_journey_times WHERE journey_id IN ({placeholders}) ORDER BY journey_id, arrival_time",
             valid_list,
         )
         current_journey = None
@@ -774,7 +766,7 @@ class BusLoader:
 
         # 3d. metadata
         cur.execute(
-            f"SELECT journey_id, route_id, line_name, destination_display FROM journey_routes WHERE journey_id IN ({placeholders})",
+            f"SELECT journey_id, route_id, line_name, destination_display FROM bus_journey_routes WHERE journey_id IN ({placeholders})",
             valid_list,
         )
         route_line_names = {}
@@ -807,7 +799,7 @@ class BusLoader:
         """Return the common name for a single ATCO code, or None."""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT common_name FROM stop_names WHERE atco_code = ?", (atco_code,))
+        cur.execute("SELECT common_name FROM bus_stop_names WHERE atco_code = ?", (atco_code,))
         row = cur.fetchone()
         conn.close()
         return row[0] if row else None
@@ -823,7 +815,7 @@ class BusLoader:
         cur = conn.cursor()
         placeholders = ','.join('?' for _ in atco_codes)
         cur.execute(
-            f"SELECT atco_code, common_name FROM stop_names WHERE atco_code IN ({placeholders})",
+            f"SELECT atco_code, common_name FROM bus_stop_names WHERE atco_code IN ({placeholders})",
             list(atco_codes)
         )
         result = {row[0]: row[1] for row in cur.fetchall()}
@@ -834,7 +826,7 @@ class BusLoader:
         """Return the number of unique stop names in the database."""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM stop_names")
+        cur.execute("SELECT COUNT(*) FROM bus_stop_names")
         count = cur.fetchone()[0]
         conn.close()
         return count
@@ -855,28 +847,46 @@ class BusLoader:
         """
         if not query:
             return []
+        # 1) Query stop names from the bus DB
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
-            """
-            SELECT sn.atco_code, sn.common_name, sc.lat, sc.lon
-            FROM stop_names sn
-            LEFT JOIN stop_coords sc ON sn.atco_code = sc.atco_code
-            WHERE LOWER(sn.common_name) LIKE LOWER(?)
-            LIMIT ?
-            """,
+            "SELECT atco_code, common_name FROM bus_stop_names WHERE LOWER(common_name) LIKE LOWER(?) LIMIT ?",
             (f"%{query}%", limit),
         )
+        rows = cur.fetchall()
+        conn.close()
+
+        if not rows:
+            return []
+
+        atcos = [r[0] for r in rows]
+
+        # 2) Fetch coordinates from the walking DB if available, else fall back to no-coords
+        coords_map = {}
+        wdb = self.walking_db_path
+        if wdb:
+            try:
+                wconn = sqlite3.connect(wdb)
+                wcur = wconn.cursor()
+                placeholders = ','.join('?' for _ in atcos)
+                wcur.execute(f"SELECT atco_code, lat, lon FROM stop_coords WHERE atco_code IN ({placeholders})", atcos)
+                for atco, lat, lon in wcur.fetchall():
+                    coords_map[atco] = (lat, lon)
+                wconn.close()
+            except Exception:
+                coords_map = {}
+
         results = []
-        for i, row in enumerate(cur.fetchall()):
+        for i, (atco, name) in enumerate(rows):
+            latlon = coords_map.get(atco, (None, None))
             results.append({
                 "id": i,
-                "name": row[1],
-                "atco_code": row[0],
-                "lat": row[2],
-                "lon": row[3],
+                "name": name,
+                "atco_code": atco,
+                "lat": latlon[0],
+                "lon": latlon[1],
             })
-        conn.close()
         return results
 
     # ── Pickle cache ─────────────────────────────────────────────
@@ -923,207 +933,5 @@ class BusLoader:
 
     # ── NaPTAN stop coordinates ──────────────────────────────────
 
-    def download_stop_coords(self):
-        """Download NaPTAN CSV and populate stop_coords for all ATCO codes
-        present in our stop_names table.  Skips if coords already populated.
-        Caches the CSV locally so it only downloads once."""
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        existing = cur.execute("SELECT COUNT(*) FROM stop_coords").fetchone()[0]
-        needed   = cur.execute("SELECT COUNT(*) FROM stop_names").fetchone()[0]
-        if existing >= needed and needed > 0:
-            conn.close()
-            return                              # already populated
-        our_codes = {r[0] for r in cur.execute("SELECT atco_code FROM stop_names").fetchall()}
-        conn.close()
-
-        import csv, subprocess
-        csv_path = os.path.join(os.path.dirname(self.db_path), "naptan.csv")
-
-        # Download only if local file missing / too small
-        if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 1_000_000:
-            print("  Downloading NaPTAN coordinates (≈100 MB)...")
-            url = "https://naptan.api.dft.gov.uk/v1/access-nodes?dataFormat=csv"
-            ret = subprocess.run(["curl", "-sS", "-L", "-o", csv_path, url],
-                                 timeout=180)
-            if ret.returncode != 0:
-                raise RuntimeError("NaPTAN download failed (curl error)")
-        else:
-            print("  Using cached NaPTAN CSV...")
-
-        print(f"  Parsing {os.path.getsize(csv_path)//1024}KB...")
-        rows = []
-        with open(csv_path, encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            col = {name: i for i, name in enumerate(header)}
-            i_atco = col["ATCOCode"]
-            i_lat  = col["Latitude"]
-            i_lon  = col["Longitude"]
-            for line in reader:
-                atco = line[i_atco]
-                if atco in our_codes:
-                    try:
-                        lat = float(line[i_lat])
-                        lon = float(line[i_lon])
-                        rows.append((atco, lat, lon))
-                    except (ValueError, IndexError):
-                        pass
-
-        conn = sqlite3.connect(self.db_path)
-        conn.executemany(
-            "INSERT OR REPLACE INTO stop_coords (atco_code, lat, lon) VALUES (?,?,?)",
-            rows,
-        )
-        conn.commit()
-        conn.close()
-        print(f"  ✓ Coordinates loaded for {len(rows)}/{len(our_codes)} stops")
-
-    def get_all_stop_coords(self):
-        """Return dict {atco_code: (lat, lon)} for all stops with coords."""
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT atco_code, lat, lon FROM stop_coords")
-        result = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-        conn.close()
-        return result
-
-    # ── OSRM walking transfer precomputation ─────────────────────
-
-    def precompute_walking_transfers(self, osrm_base="http://localhost:5012",
-                                      max_walk_seconds=600,
-                                      bbox_margin=0.012):
-        """Precompute walking transfers between nearby stops using OSRM.
-
-        For each stop, finds other stops within *bbox_margin* degrees
-        (~1.3 km), queries OSRM /table endpoint for walking durations,
-        and stores pairs ≤ *max_walk_seconds* in the walking_transfers table.
-
-        Supports resume: skips stops already processed, commits every 500 stops.
-        """
-        conn = sqlite3.connect(self.db_path)
-        # Gather already-processed source stops (for resume after interrupt)
-        done_sources = {r[0] for r in conn.execute(
-            "SELECT DISTINCT from_atco FROM walking_transfers").fetchall()}
-        conn.close()
-
-        coords = self.get_all_stop_coords()
-        if not coords:
-            print("  ✗ No stop coordinates — run download_stop_coords first")
-            return
-
-        atco_list = list(coords.keys())
-        lat_list = [coords[a][0] for a in atco_list]
-        lon_list = [coords[a][1] for a in atco_list]
-
-        # Build a simple spatial index: sort by lat for fast neighbor search
-        import math
-        indexed = sorted(range(len(atco_list)), key=lambda i: lat_list[i])
-        sorted_lats = [lat_list[i] for i in indexed]
-
-        print(f"  Precomputing walking transfers for {len(atco_list)} stops"
-              f" ({len(done_sources)} already done)...")
-        transfers = []
-        processed = 0
-        total_found = 0
-
-        # Process in groups: for each stop find nearby stops, batch-query OSRM
-        for idx_pos, src_idx in enumerate(indexed):
-            src_atco = atco_list[src_idx]
-            if src_atco in done_sources:
-                continue
-
-            src_lat = lat_list[src_idx]
-            src_lon = lon_list[src_idx]
-
-            # Binary search for lat range
-            lo = bisect.bisect_left(sorted_lats, src_lat - bbox_margin)
-            hi = bisect.bisect_right(sorted_lats, src_lat + bbox_margin)
-
-            neighbors = []
-            for j in range(lo, hi):
-                nb_idx = indexed[j]
-                if nb_idx == src_idx:
-                    continue
-                if abs(lon_list[nb_idx] - src_lon) <= bbox_margin:
-                    neighbors.append(nb_idx)
-
-            if not neighbors:
-                continue
-
-            # Query OSRM /table with source as first coord, neighbors as rest
-            all_indices = [src_idx] + neighbors
-            coord_str = ";".join(
-                f"{lon_list[i]},{lat_list[i]}" for i in all_indices
-            )
-            osrm_url = (
-                f"{osrm_base}/table/v1/foot/{coord_str}"
-                f"?sources=0&annotations=duration"
-            )
-            try:
-                resp = urllib.request.urlopen(osrm_url, timeout=10)
-                data = json.loads(resp.read())
-                resp.close()
-            except Exception:
-                continue
-
-            if data.get("code") != "Ok":
-                continue
-
-            durations = data["durations"][0]  # single source row
-            for k, dur in enumerate(durations):
-                if k == 0:
-                    continue                    # skip self
-                if dur is None or dur > max_walk_seconds:
-                    continue
-                nb_idx = all_indices[k]
-                dst_atco = atco_list[nb_idx]
-                transfers.append((src_atco, dst_atco, int(dur)))
-
-            processed += 1
-            if processed % 500 == 0:
-                # Commit batch to survive interrupts
-                conn = sqlite3.connect(self.db_path)
-                conn.executemany(
-                    "INSERT OR REPLACE INTO walking_transfers "
-                    "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
-                    transfers,
-                )
-                conn.commit()
-                conn.close()
-                total_found += len(transfers)
-                transfers = []
-                print(f"    [{processed}/{len(atco_list) - len(done_sources)}]"
-                      f" {total_found} transfers saved")
-
-        # Final batch
-        if transfers:
-            conn = sqlite3.connect(self.db_path)
-            conn.executemany(
-                "INSERT OR REPLACE INTO walking_transfers "
-                "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
-                transfers,
-            )
-            conn.commit()
-            conn.close()
-            total_found += len(transfers)
-        print(f"  ✓ {total_found} walking transfers stored")
-
-    def clear_walking_transfers(self):
-        """Remove all precomputed walking transfers (e.g. after data update)."""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("DELETE FROM walking_transfers")
-        conn.execute("DELETE FROM stop_coords")
-        conn.commit()
-        conn.close()
-
-    def get_walking_transfers(self):
-        """Return dict {from_atco: {to_atco: walk_seconds}}."""
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT from_atco, to_atco, walk_seconds FROM walking_transfers")
-        result = {}
-        for from_a, to_a, secs in cur.fetchall():
-            result.setdefault(from_a, {})[to_a] = secs
-        conn.close()
-        return result
+    # Walking-related functions have been moved to `walking_loader.py`.
+    # Use WalkingLoader(db_path) for NaPTAN download and walking precomputation.

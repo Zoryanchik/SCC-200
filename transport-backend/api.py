@@ -137,6 +137,29 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/status")
+async def status():
+    """Return background precompute status (walking)."""
+    from fastapi.responses import JSONResponse
+
+    if _base_cache is None:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    wl = _base_cache.get("walking_loader")
+    if wl is None:
+        return {"walking_precompute": None}
+
+    return {
+        "walking_precompute": {
+            "running": bool(getattr(wl, "precomputing", False)),
+            "use_fallback": bool(getattr(wl, "precompute_use_fallback", False)),
+            "total": int(getattr(wl, "precompute_total", 0)),
+            "processed": int(getattr(wl, "precompute_processed", 0)),
+            "inserted": int(getattr(wl, "precompute_inserted", 0)),
+        }
+    }
+
+
 # -- Stop search ---------------------------------------------------------------
 
 
