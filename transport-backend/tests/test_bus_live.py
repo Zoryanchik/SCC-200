@@ -86,6 +86,7 @@ class TestBusLiveOperatorEndpoint:
             "destination": "City Centre",
             "lat": 53.48,
             "lon": -2.24,
+            "operator": "Stagecoach",
         }
 
     def test_operator_builds_url(self, client: TestClient):

@@ -110,9 +110,10 @@ class Walking:
                 result[s] = 0
             sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
             return sorted_result
-
-        if data.get("code") != "Ok":
-            # OSRM returned an error — fall back to haversine estimates for candidates
+        # Treat any non-Ok (case-insensitive) OSRM `code` as a failure and fall
+        # back to haversine estimates. This guards against server errors that
+        # still return JSON with a non-Ok status field.
+        if str(data.get("code", "")).lower() != "ok":
             result = {}
             for stop_int in candidates:
                 slat, slon = self._coords[stop_int]
@@ -154,7 +155,8 @@ class Walking:
             resp = urllib.request.urlopen(url, timeout=10)
             data = json.loads(resp.read())
             resp.close()
-            if data.get("code") == "Ok" and data["routes"]:
+            # Treat non-Ok codes as failures and fall back below
+            if str(data.get("code", "")).lower() == "ok" and data.get("routes"):
                 return int(data["routes"][0]["duration"])
         except Exception:
             pass
