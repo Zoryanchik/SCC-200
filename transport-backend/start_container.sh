@@ -137,6 +137,18 @@ else
 fi
 
 echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mounted to $CACHE_DIR"
-$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE"
+
+# Build a startup script string to run inside the container. Keep it in a
+# double-quoted shell variable so we can safely pass it as the argument to
+# '/bin/sh -c'. Avoid nesting single quotes inside the variable which makes
+# the value hard to pass to the runtime correctly.
+START_SCRIPT="if [ -f /app/setup_raptor.py ]; then echo '[startup] running setup_raptor.py --inplace'; python3 /app/setup_raptor.py build_ext --inplace || echo '[startup] setup_raptor failed'; fi; \
+if [ -f /app/setup_walking.py ]; then echo '[startup] running setup_walking.py --inplace'; python3 /app/setup_walking.py build_ext --inplace || echo '[startup] setup_walking failed'; fi; \
+echo '[startup] launching uvicorn'; exec uvicorn api:app --host 0.0.0.0 --port 5050"
+
+# Run the container and pass the startup script as the command to execute.
+# We use '/bin/sh -c "$START_SCRIPT"' so the whole script runs inside the
+# container's shell. Quoting is important here to avoid word-splitting issues.
+$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE" /bin/sh -c "$START_SCRIPT"
 
 echo "Container started (id: $($RUNTIME ps -l --format '{{.ID}}' 2>/dev/null))."
