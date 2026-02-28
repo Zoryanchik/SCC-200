@@ -64,6 +64,15 @@ class RouteResponse(BaseModel):
     error: Optional[str] = None
 
 
+class AddressRouteRequest(BaseModel):
+    start: str
+    end: str
+    date: str
+    time: str  # HH:MM:SS
+    max_transfers: int = 5
+    mode: str = "both"
+
+
 # Journey plan request/response models
 class StopLocation(BaseModel):
     lat: float
@@ -165,14 +174,41 @@ async def status():
 
 
 
-def geocode_locations(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+def geocode_locations(query: str, limit: int = 5, county: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Query Nominatim and return candidates.
+
+    If `county` is provided the results are filtered to items whose
+    address contains the county string (case-insensitive). When a
+    county is requested the lookup is also restricted to countrycode
+    'gb' to improve relevance for Lancashire-like counties.
+    """
     if not query or limit <= 0:
         return []
-    params = urlencode({"format": "json", "q": query, "limit": str(limit), "addressdetails": "0"})
-    url = f"https://nominatim.openstreetmap.org/search?{params}"
-    request = UrllibRequest(url, headers={"User-Agent": "transport-backend/1.0"})
-    with urlopen(request, timeout=5) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+
+    params = {"format": "json", "q": query, "limit": str(limit), "addressdetails": "1"}
+    skip_county_filter = False
+    # Special-case short/brand queries (e.g. 'Morrisons'): if a county
+    # is supplied, append the county to the query so Nominatim returns
+    # localised store results, and skip the later strict address
+    # substring filtering which can be over-strict for POIs.
+    if county and query.strip().lower() == "morrisons":
+        params["q"] = f"{query} {county}"
+        skip_county_filter = True
+
+    if county:
+        # Prefer UK results when a UK county is requested
+        params["countrycodes"] = "gb"
+
+    url = f"https://nominatim.openstreetmap.org/search?{urlencode(params)}"
+    # Use requests to simplify TLS handling in developer environments.
+    # Disable verification here for developer convenience when system CA
+    # bundles are missing. In production consider enabling verification.
+    import requests
+    headers = {"User-Agent": "transport-backend/1.0"}
+    resp = requests.get(url, headers=headers, timeout=5, verify=False)
+    resp.raise_for_status()
+    payload = resp.json()
+
     results = []
     for idx, item in enumerate(payload):
         try:
@@ -180,6 +216,19 @@ def geocode_locations(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             lon = float(item.get("lon"))
         except (TypeError, ValueError):
             continue
+
+        # If county filtering requested, prefer entries where the
+        # address has a matching county/state value or display_name
+        if county and not skip_county_filter:
+            addr = item.get("address", {}) or {}
+            # Build a combined string of all address fields to increase
+            # the chance of matching counties which may appear in
+            # different address components (city, town, state, county).
+            addr_combined = " ".join([str(v) for v in addr.values() if v]).lower()
+            if county.lower() not in addr_combined and county.lower() not in (item.get("display_name") or "").lower():
+                # Skip non-matching items
+                continue
+
         name = item.get("display_name") or item.get("name") or query
         results.append({
             "id": f"loc:{idx}",
@@ -925,6 +974,65 @@ async def get_route(request: RouteRequest):
         return {"success": True, "route": result, "route_text": route_text}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/api/route_by_address")
+async def route_by_address(request: AddressRouteRequest):
+    """Resolve textual start/end locations using Nominatim then run the normal router.
+
+    Returns the same shape as `/api/route` (success + route + route_text) on success.
+    """
+    try:
+        # Geocode start
+        start_q = (request.start or "").strip()
+        end_q = (request.end or "").strip()
+        if not start_q or not end_q:
+            return {"success": False, "error": "start and end must be non-empty strings"}
+
+        start_hits = geocode_locations(start_q, limit=1)
+        if not start_hits:
+            return {"success": False, "error": f"Could not geocode start: {start_q}"}
+        end_hits = geocode_locations(end_q, limit=1)
+        if not end_hits:
+            return {"success": False, "error": f"Could not geocode end: {end_q}"}
+
+        start_point = (float(start_hits[0]["lat"]), float(start_hits[0]["lon"]))
+        destination = (float(end_hits[0]["lat"]), float(end_hits[0]["lon"]))
+
+        date_str = request.date
+        time_str = request.time
+        max_transfers = request.max_transfers
+        allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
+        start_seconds = seconds_since_midnight(time_str)
+
+        timetable, router, walking = get_router_for_date(date_str)
+        result = router.route(
+            n_transfer_limit=max_transfers,
+            walking=walking,
+            start_time=start_seconds,
+            start_point=start_point,
+            destination=destination,
+            allowed_modes=allowed_modes,
+        )
+        route_text = format_route_text(result, timetable.today)
+        return {"success": True, "route": result, "route_text": route_text}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/api/geocode")
+async def api_geocode(q: str = "", limit: int = 5, county: Optional[str] = None):
+    """Return Nominatim candidates for a textual query.
+
+    Example: /api/geocode?q=Lancaster&limit=5
+    """
+    try:
+        if not q:
+            return JSONResponse(status_code=400, content={"error": "q query param required"})
+        results = geocode_locations(q, limit=limit, county=county)
+        return {"success": True, "candidates": results}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
 
 
 @app.get("/weather")

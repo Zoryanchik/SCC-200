@@ -2,7 +2,32 @@
 // browser will treat leading '/' paths as file URLs (which fail when
 // the backend is running on http). Detect that case and fall back to
 // the local backend address used in development.
-const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5050' : '';
+const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5005' : '';
+
+// Ensure date/time inputs for the address route form have sensible defaults so
+// browser validation doesn't prevent the JS handler from running when the user
+// clicks "Find Route by Address".
+try {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const timeHMS = `${hh}:${mm}:${ss}`;
+
+    const addrDate = document.getElementById('route_addr_date');
+    if (addrDate && !addrDate.value) addrDate.value = today;
+    const addrTime = document.getElementById('route_addr_time');
+    if (addrTime && !addrTime.value) addrTime.value = timeHMS;
+
+    // Also set defaults for the numeric route form if empty
+    const mainDate = document.getElementById('route_date');
+    if (mainDate && !mainDate.value) mainDate.value = today;
+    const mainTime = document.getElementById('route_time');
+    if (mainTime && !mainTime.value) mainTime.value = `${hh}:${mm}`; // input[type=time] may accept HH:MM
+} catch (err) {
+    // non-fatal; if DOM elements are missing just continue
+}
 
 document.getElementById('busLiveForm').addEventListener('submit', async function(e) {
     e.preventDefault();
@@ -31,7 +56,7 @@ document.getElementById('busLiveForm').addEventListener('submit', async function
             latTol: formData.lat_tol,
             lonTol: formData.lon_tol
         });
-        const response = await fetch(`/bus/live/all?${params}`);
+        const response = await fetch(`${API_BASE}/bus/live/all?${params}`);
         const data = await response.json();
 
         resultDiv.style.display = 'block';
@@ -91,7 +116,7 @@ if (routeForm) {
         };
 
         try {
-            const response = await fetch('/api/route', {
+            const response = await fetch(`${API_BASE}/api/route`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -149,4 +174,139 @@ function formatRouteResult(route) {
         });
     out += legs.join('\n');
     return out;
+}
+
+// Route by address handler
+const routeAddrForm = document.getElementById('routeAddressForm');
+if (routeAddrForm) {
+    routeAddrForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const submitButton = this.querySelector('button[type="submit"]');
+        const loadingDiv = document.getElementById('route-addr-loading');
+        const resultDiv = document.getElementById('route-addr-result');
+
+        submitButton.disabled = true;
+        loadingDiv.style.display = 'block';
+        resultDiv.style.display = 'none';
+
+        const formData = {
+            start: document.getElementById('start_addr').value,
+            end: document.getElementById('end_addr').value,
+            date: document.getElementById('route_addr_date').value,
+            time: document.getElementById('route_addr_time').value + ':00',
+            max_transfers: parseInt(document.getElementById('max_transfers_addr').value),
+            mode: document.getElementById('mode_addr').value
+        };
+
+        try {
+            // First fetch geocode candidates for both start and end
+            const sq = encodeURIComponent(formData.start);
+            const eq = encodeURIComponent(formData.end);
+            // Request only Lancashire candidates to avoid results from other countries
+            const sResp = await fetch(`${API_BASE}/api/geocode?q=${sq}&limit=5&county=Lancashire`);
+            const eResp = await fetch(`${API_BASE}/api/geocode?q=${eq}&limit=5&county=Lancashire`);
+            const sJson = await sResp.json();
+            const eJson = await eResp.json();
+
+            if (!sJson.success || !eJson.success) {
+                throw new Error('Geocoding failed for one or both addresses');
+            }
+
+            const startCandidates = sJson.candidates || [];
+            const endCandidates = eJson.candidates || [];
+
+            // Populate selects
+            const startSel = document.getElementById('start_candidates');
+            const endSel = document.getElementById('end_candidates');
+            startSel.innerHTML = '';
+            endSel.innerHTML = '';
+
+            startCandidates.forEach((c, i) => {
+                const opt = document.createElement('option');
+                opt.value = `${c.lat},${c.lon}`;
+                opt.textContent = `${c.name} (${c.lat.toFixed(5)}, ${c.lon.toFixed(5)})`;
+                startSel.appendChild(opt);
+            });
+            endCandidates.forEach((c, i) => {
+                const opt = document.createElement('option');
+                opt.value = `${c.lat},${c.lon}`;
+                opt.textContent = `${c.name} (${c.lat.toFixed(5)}, ${c.lon.toFixed(5)})`;
+                endSel.appendChild(opt);
+            });
+
+            // Show candidate area and keep original form displayed so user can change
+            document.getElementById('route-addr-candidates').style.display = 'block';
+            resultDiv.style.display = 'none';
+        } catch (err) {
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result error';
+            resultDiv.textContent = `Network error: ${err.message}`;
+        } finally {
+            submitButton.disabled = false;
+            loadingDiv.style.display = 'none';
+        }
+    });
+}
+
+// Compute route from selected candidates
+const computeBtn = document.getElementById('compute_route_from_candidates');
+if (computeBtn) {
+    computeBtn.addEventListener('click', async function() {
+        const startSel = document.getElementById('start_candidates');
+        const endSel = document.getElementById('end_candidates');
+        const resultDiv = document.getElementById('route-addr-result');
+        const loadingDiv = document.getElementById('route-addr-loading');
+
+        if (!startSel.value || !endSel.value) {
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result error';
+            resultDiv.textContent = 'Please pick both a start and end candidate.';
+            return;
+        }
+
+        const [s_lat, s_lon] = startSel.value.split(',').map(Number);
+        const [e_lat, e_lon] = endSel.value.split(',').map(Number);
+
+        // Read other params from the form
+        const date = document.getElementById('route_addr_date').value;
+        const time = document.getElementById('route_addr_time').value + ':00';
+        const max_transfers = parseInt(document.getElementById('max_transfers_addr').value);
+        const mode = document.getElementById('mode_addr').value;
+
+        loadingDiv.style.display = 'block';
+        resultDiv.style.display = 'none';
+
+        try {
+            const payload = {
+                start_lat: s_lat,
+                start_lon: s_lon,
+                end_lat: e_lat,
+                end_lon: e_lon,
+                date: date,
+                time: time,
+                max_transfers: max_transfers,
+                mode: mode
+            };
+            const resp = await fetch(`${API_BASE}/api/route`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            resultDiv.style.display = 'block';
+            if (data.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = data.route_text || formatRouteResult(data.route);
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `Error: ${data.error}`;
+            }
+        } catch (err) {
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result error';
+            resultDiv.textContent = `Network error: ${err.message}`;
+        } finally {
+            loadingDiv.style.display = 'none';
+        }
+    });
 }
