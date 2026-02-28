@@ -17,8 +17,8 @@ class RaptorRouter:
                start_point: Tuple[float, float],
                destination: Tuple[float, float],
                allowed_modes: Optional[Set[Any]] = None ) -> dict:
-        #creat a list of dicts of stops storing earliest arrival time, previous stop,
-        #type of transport from previous stop, and journey id 
+        #creat a list of lists of stops storing earliest arrival time, previous stop,
+        #mode of transport from previous stop, and journey id 
         inf = math.inf
         # internal representation: list entries [prev_stop, arrival_time, type, journey, day]
         reach_stops = list(range(len(self.today.stop_to_routes)))
@@ -62,18 +62,28 @@ class RaptorRouter:
         # Find the reached stop that gives the earliest arrival at destination
         # (transit arrival at stop + walking time from stop to destination)
         best_final_stop = None
+        final_walk_seconds = None
         best_total_arrival = math.inf
         for stop, walk_time in final_stops.items():
-            if reach_stops[stop][2] != WALKING and reach_stops[stop][1] < math.inf:
-                total_arrival = reach_stops[stop][1] + walk_time
-                if total_arrival < best_total_arrival:
-                    best_total_arrival = total_arrival
-                    best_final_stop = stop
+            if reach_stops[stop][1] < math.inf:
+                if reach_stops[stop][2] == WALKING:
+                    pre = reach_stops[stop][0]
+                    wal = walking.walking_time_between( walking.get_loc_coords(pre), destination )
+                    total_arrival = reach_stops[pre][1] + wal
+                    if total_arrival < best_total_arrival:
+                        best_total_arrival = total_arrival
+                        best_final_stop = pre
+                        final_walk_seconds = wal
+                else:
+                    total_arrival = reach_stops[stop][1] + walk_time
+                    if total_arrival < best_total_arrival:
+                        best_total_arrival = total_arrival
+                        best_final_stop = stop
+                        final_walk_seconds = walk_time
         
         if best_final_stop is None:
             return {}
         
-        final_stop = best_final_stop
         arrival_time = best_total_arrival
         dir_walking = walking.walking_time_between( start_point, destination )
         if dir_walking is not None and dir_walking + start_time < arrival_time + 10:
@@ -88,10 +98,9 @@ class RaptorRouter:
                 }
                 # No transit legs, just a direct walk
             }
-        final_walk_seconds = final_stops[final_stop]
         #return a dict of dicts storing stops on the route from destination
         fastest_route = {}
-        track = final_stop
+        track = best_final_stop
         visited = set()
         while track is not None:
             if track in visited:
@@ -237,7 +246,11 @@ class RaptorRouter:
             jsi = network.journey_stop_index[first_journey]
             start_pos = jsi.get(stop, None)
             if start_pos is None:
-                return None
+                # This journey doesn't have the boarding stop in its index.
+                # Skip to the next candidate departure instead of aborting
+                # the whole search for this route/network.
+                idx += 1
+                continue
 
             for subsequent_point, subsequent_a_time, subsequent_d_time in journey_times[start_pos + 1:]:
                 if subsequent_point == stop:

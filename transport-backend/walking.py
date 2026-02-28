@@ -28,6 +28,10 @@ class Walking:
         self._coords = stop_coords              # {stop_int: (lat, lon)}
         self._osrm = osrm_base
         self._max = max_walk_seconds
+        
+    def get_loc_coords(self, stop_int):
+        """Return (lat, lon) for a given stop_int."""
+        return self._coords[stop_int]
 
     def _haversine_m(self, lat1, lon1, lat2, lon2):
         """Return distance in meters between two lat/lon points using haversine."""
@@ -56,7 +60,7 @@ class Walking:
         lat, lon = location
 
         # 1. Candidate stops within bounding box (~1.3 km)
-        margin = 0.012
+        margin = 0.02
         candidates = []
         exact_matches = {}  # {stop_int: walk_seconds} for exact coordinate matches
         for stop_int, (slat, slon) in self._coords.items():
