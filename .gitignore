@@ -1,3 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions and build artifacts
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.pyx.c
+*.c
+build/
+dist/
+*.egg-info/
+
+# Cython compiled wheels
+*.cpython-*-*.so
+
+# Specific backend artifacts
+transport-backend/*.so
+transport-backend/*.c
+transport-backend/*.o
+
+# Node / frontend
+node_modules/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
 # Logs
 logs/
 *.log
