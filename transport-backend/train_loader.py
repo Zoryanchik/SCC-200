@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg
 from train_data import TrainData
 
 
@@ -14,19 +14,21 @@ class TrainLoader:
         self.db_path = db_path
 
     def ensure_db(self):
-        conn = sqlite3.connect(self.db_path)
+        # Ensure a connection can be opened to the Postgres DSN
+        conn = psycopg.connect(self.db_path)
         conn.close()
 
     def create_schema(self):
-        conn = sqlite3.connect(self.db_path)
+        # Create the minimal schema in Postgres
+        conn = psycopg.connect(self.db_path)
         cur = conn.cursor()
-        cur.executescript('''
-            CREATE TABLE IF NOT EXISTS train_dataset_meta (
+        cur.execute(
+            '''CREATE TABLE IF NOT EXISTS train_dataset_meta (
                 source_url   TEXT PRIMARY KEY,
                 download_url TEXT NOT NULL,
                 modified     TEXT NOT NULL
-            );
-        ''')
+            );'''
+        )
         conn.commit()
         conn.close()
 

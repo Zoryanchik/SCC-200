@@ -39,6 +39,35 @@ same container network. The recommended development workflow is:
 
 1. Start OSRM (MLD) in a container. From the project root:
 
+````markdown
+Postgres-only note
+-------------------
+
+This backend is Postgres-only. It expects Postgres DSNs for the BUS/TRAIN/WALK
+databases (the default development DSN points at 127.0.0.1:5011). For local
+development you can start a Postgres container using the included helper:
+
+```zsh
+./run_pgsql.sh
+```
+
+Then start the backend container or run locally:
+
+Container (recommended):
+```zsh
+./run_backend.sh
+```
+
+Local (development):
+```zsh
+cd transport-backend
+# start uvicorn locally; server will listen on 127.0.0.1:5050 by default
+python3 __main__.py
+```
+
+If you need custom DB locations, set `BUS_DB_DSN`, `TRAIN_DB_DSN`, and
+`WALK_DB_DSN` in your environment before starting the backend.
+````
 ```zsh
 ./transport-backend/osrm/run_osrm.sh -d
 ```
@@ -92,3 +121,60 @@ Notes and troubleshooting
 
 If you want, I can add a short dev note to the top-level README describing
 this workflow as well.
+
+## Docker Compose (recommended)
+
+For a simple, reproducible development workflow you can use the provided
+docker-compose file which brings up a Postgres database and the backend on a
+single user network with sensible defaults.
+
+From the repository root:
+
+```zsh
+# start Postgres + backend (builds the backend image)
+docker compose -f docker-compose.postgres.yml up --build
+
+# bring the services down (stops and removes containers but preserves DB volume)
+docker compose -f docker-compose.postgres.yml down
+```
+
+The compose file defines:
+
+- `postgres` — Postgres 15 listening on host port `127.0.0.1:5011` (container
+	port `5011`). The data is persisted in a named volume `transport-postgres-data`.
+- `backend` — the transport backend built from `transport-backend/` and attached
+	to the same network; the backend is configured by default to use the
+	container hostname `transport-postgres-local` so it connects to the DB using
+	the service name. If you prefer host networking or a different DSN set
+	`BUS_DB_DSN`, `TRAIN_DB_DSN` and `WALK_DB_DSN` in the environment (or
+	override them in your compose file).
+
+If you experience name resolution issues on your platform (some Podman/macOS
+setups), the `start_container.sh` helper will try to detect the Postgres
+container IP and forward a working DB DSN into the backend container. Using
+docker compose avoids that complexity because Docker provides built-in
+service discovery between services declared in the same compose file.
+
+### Running OSRM with Compose
+
+The compose file can also bring up an OSRM routing service so the backend can
+perform walking/table queries without additional setup. OSRM requires a
+preprocessed dataset (a .osrm bundle) mounted into the container at `/data`.
+You can create this dataset locally with the helper script in
+`transport-backend/scripts/build_osrm.sh` (use `--sample` for a small test
+dataset) or supply your own prepared `.osrm` files under `./osrm/data`.
+
+Example (build a small sample dataset and run the full stack):
+
+```zsh
+# build a small test dataset (runs on the host)
+cd transport-backend
+./scripts/build_osrm.sh --sample
+
+# from the repo root: bring up Postgres, backend, and OSRM
+docker compose -f docker-compose.postgres.yml up --build
+```
+
+When OSRM is running the backend will be configured (by default) with
+`OSRM_URL=http://scc200-osrm:5012` so it addresses the local OSRM service by
+container name.

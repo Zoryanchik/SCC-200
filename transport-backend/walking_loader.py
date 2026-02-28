@@ -2,7 +2,8 @@ import bisect
 import json
 import os
 import ssl
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import urllib.request
 import re
 import shutil
@@ -20,23 +21,36 @@ class WalkingLoader:
         self.precompute_inserted = 0
         self.precompute_use_fallback = False
 
+    def _connect(self, path=None):
+        db = path or self.db_path
+        # Postgres-only: always connect via psycopg
+        pg_conn = psycopg.connect(db)
+        return pg_conn
+
     def create_schema(self):
         """Create walking DB tables: stop_coords and walking_transfers."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.executescript('''
+        conn = self._connect(self.db_path)
+        schema = '''
             CREATE TABLE IF NOT EXISTS stop_coords (
-                atco_code   CHAR(12) PRIMARY KEY,
+                atco_code   TEXT PRIMARY KEY,
                 lat         REAL NOT NULL,
                 lon         REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS walking_transfers (
-                from_atco   CHAR(12) NOT NULL,
-                to_atco     CHAR(12) NOT NULL,
+                from_atco   TEXT NOT NULL,
+                to_atco     TEXT NOT NULL,
                 walk_seconds INTEGER NOT NULL,
                 PRIMARY KEY (from_atco, to_atco)
             );
-        ''')
+        '''
+        import re as _re
+        cur = conn.cursor()
+        for stmt in schema.split(';'):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            stmt2 = _re.sub(r"CHAR\s*\(\s*\d+\s*\)", "TEXT", stmt, flags=_re.I)
+            cur.execute(stmt2)
         conn.commit()
         conn.close()
 
@@ -46,7 +60,12 @@ class WalkingLoader:
         Caches the XML locally to avoid repeated large downloads. Uses
         INSERT OR REPLACE so the operation is idempotent.
         """
-        xml_path = os.path.join(os.path.dirname(self.db_path), "naptan.xml")
+        # When db_path is a DSN (Postgres) it isn't a filesystem path.
+        # Use a repository-local cache directory for downloaded XML so
+        # caching doesn't depend on the DB path type.
+        repo_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+        os.makedirs(repo_cache, exist_ok=True)
+        xml_path = os.path.join(repo_cache, "naptan.xml")
 
         # Download only if local file missing / too small
         if not os.path.exists(xml_path) or os.path.getsize(xml_path) < 1_000_000:
@@ -93,9 +112,11 @@ class WalkingLoader:
             print("  ✗ No coordinates found in NaPTAN XML")
             return
 
-        conn = sqlite3.connect(self.db_path)
-        conn.executemany(
-            "INSERT OR REPLACE INTO stop_coords (atco_code, lat, lon) VALUES (?,?,?)",
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        cur.executemany(
+            "INSERT INTO stop_coords (atco_code, lat, lon) VALUES (%s, %s, %s) "
+            "ON CONFLICT (atco_code) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon",
             rows,
         )
         conn.commit()
@@ -104,7 +125,7 @@ class WalkingLoader:
 
     def get_all_stop_coords(self):
         """Return dict {atco_code: (lat, lon)} for all stops with coords."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("SELECT atco_code, lat, lon FROM stop_coords")
         result = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
@@ -124,9 +145,10 @@ class WalkingLoader:
         self.precomputing = True
         self.precompute_use_fallback = False
 
-        conn = sqlite3.connect(self.db_path)
-        done_sources = {r[0] for r in conn.execute(
-            "SELECT DISTINCT from_atco FROM walking_transfers").fetchall()}
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT from_atco FROM walking_transfers")
+        done_sources = {r[0] for r in cur.fetchall()}
         conn.close()
 
         coords = self.get_all_stop_coords()
@@ -200,10 +222,12 @@ class WalkingLoader:
             # update progress
             self.precompute_processed = processed
             if processed % 500 == 0:
-                conn = sqlite3.connect(self.db_path)
-                conn.executemany(
-                    "INSERT OR REPLACE INTO walking_transfers "
-                    "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
+                conn = self._connect(self.db_path)
+                cur = conn.cursor()
+                cur.executemany(
+                    "INSERT INTO walking_transfers "
+                    "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
                     transfers,
                 )
                 conn.commit()
@@ -215,10 +239,12 @@ class WalkingLoader:
                       f" {total_found} transfers saved")
 
         if transfers:
-            conn = sqlite3.connect(self.db_path)
-            conn.executemany(
-                "INSERT OR REPLACE INTO walking_transfers "
-                "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
+            conn = self._connect(self.db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT INTO walking_transfers "
+                "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
+                "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
                 transfers,
             )
             conn.commit()
@@ -252,9 +278,10 @@ class WalkingLoader:
         self.precomputing = True
         self.precompute_use_fallback = True
 
-        conn = sqlite3.connect(self.db_path)
-        done_sources = {r[0] for r in conn.execute(
-            "SELECT DISTINCT from_atco FROM walking_transfers").fetchall()}
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT from_atco FROM walking_transfers")
+        done_sources = {r[0] for r in cur.fetchall()}
         conn.close()
 
         coords = self.get_all_stop_coords()
@@ -315,10 +342,12 @@ class WalkingLoader:
             # update progress
             self.precompute_processed = processed
             if processed % 500 == 0:
-                conn = sqlite3.connect(self.db_path)
-                conn.executemany(
-                    "INSERT OR REPLACE INTO walking_transfers "
-                    "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
+                conn = self._connect(self.db_path)
+                cur = conn.cursor()
+                cur.executemany(
+                    "INSERT INTO walking_transfers "
+                    "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
                     transfers,
                 )
                 conn.commit()
@@ -330,10 +359,12 @@ class WalkingLoader:
                       f" {total_found} transfers saved (approx)")
 
         if transfers:
-            conn = sqlite3.connect(self.db_path)
-            conn.executemany(
-                "INSERT OR REPLACE INTO walking_transfers "
-                "(from_atco, to_atco, walk_seconds) VALUES (?,?,?)",
+            conn = self._connect(self.db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT INTO walking_transfers "
+                "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
+                "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
                 transfers,
             )
             conn.commit()
@@ -372,15 +403,16 @@ class WalkingLoader:
 
     def clear_walking_transfers(self):
         """Remove all precomputed walking transfers (e.g. after data update)."""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("DELETE FROM walking_transfers")
-        conn.execute("DELETE FROM stop_coords")
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM walking_transfers")
+        cur.execute("DELETE FROM stop_coords")
         conn.commit()
         conn.close()
 
     def get_walking_transfers(self):
         """Return dict {from_atco: {to_atco: walk_seconds}}."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("SELECT from_atco, to_atco, walk_seconds FROM walking_transfers")
         result = {}

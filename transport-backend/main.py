@@ -14,10 +14,12 @@ import os
 from datetime import date as _date, timedelta as _timedelta
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-# Separate DB files for bus, train and walking
-BUS_DB_PATH   = os.path.join(CACHE_DIR, "bus_database.db")
-TRAIN_DB_PATH = os.path.join(CACHE_DIR, "train_database.db")
-WALK_DB_PATH  = os.path.join(CACHE_DIR, "walking_database.db")
+# Postgres-first: prefer environment DSNs, but provide a sensible
+# local default for development so the app runs without extra setup.
+DEFAULT_PG = "postgresql://pguser:pgpass@127.0.0.1:5011/transport"
+BUS_DB_PATH   = os.environ.get("BUS_DB_DSN") or DEFAULT_PG
+TRAIN_DB_PATH = os.environ.get("TRAIN_DB_DSN") or DEFAULT_PG
+WALK_DB_PATH  = os.environ.get("WALK_DB_DSN") or DEFAULT_PG
 
 
 def initialize_base():
@@ -37,14 +39,19 @@ def initialize_base():
 
     # We'll run bus, walking (download only), and train init concurrently.
     from concurrent.futures import ThreadPoolExecutor
-    import sqlite3 as _sql
+    # SQLite fallback removed — backend is Postgres-first. We keep
+    # DSN-based defaults so local development still works without env
+    # variables being set.
 
     def _bus_task():
         loader = BusLoader(BUS_DB_PATH, walking_db_path=WALK_DB_PATH)
         loader.ensure_db()
         loader.create_schema()
-        conn = _sql.connect(BUS_DB_PATH)
-        _count = conn.execute("SELECT COUNT(*) FROM bus_route_stops").fetchone()[0]
+        # Use the loader's connection helper so DB DSNs (Postgres) work
+        conn = loader._connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM bus_route_stops")
+        _count = cur.fetchone()[0]
         conn.close()
         data_changed = False
         if _count == 0:
@@ -53,9 +60,12 @@ def initialize_base():
             print(f"  Got {len(datasets)} download URLs")
             for ds in datasets:
                 loader.download_and_load(ds['download_url'])
-                conn = _sql.connect(BUS_DB_PATH)
-                conn.execute(
-                    "INSERT OR REPLACE INTO bus_dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                # Persist dataset metadata using the loader connection
+                conn = loader._connect()
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO bus_dataset_meta (source_url, download_url, modified) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (source_url) DO UPDATE SET download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
                     (ds['source_url'], ds['download_url'], ds['modified']),
                 )
                 conn.commit()

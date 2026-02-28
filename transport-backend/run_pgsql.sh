@@ -18,7 +18,20 @@ CONTAINER_PORT=${CONTAINER_PORT:-5011}
 PG_USER=${PG_USER:-pguser}
 PG_PASS=${PG_PASS:-pgpass}
 PG_DB=${PG_DB:-transport}
-DATA_DIR="$(cd "$(dirname "${0}")" && pwd)/pgdata"
+## Resolve script directory robustly. Use BASH_SOURCE when available, fall back to $0.
+_script_dir=""
+if [ -n "${BASH_SOURCE:-}" ]; then
+    _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+fi
+if [ -z "${_script_dir}" ]; then
+    _script_dir="$(cd "$(dirname "${0}")" && pwd 2>/dev/null || true)"
+fi
+# If resolution failed for any reason, fall back to a repo-local path under PWD.
+if [ -z "${_script_dir}" ] || [ "${_script_dir}" = "/" ]; then
+    DATA_DIR="$(pwd)/transport-backend/pgdata"
+else
+    DATA_DIR="${_script_dir}/pgdata"
+fi
 
 mkdir -p "${DATA_DIR}"
 
@@ -42,7 +55,19 @@ else
     # Start postgres with an overridden port so the server listens on
     # the container port we expose (default 5011). We pass -c 'port=...' to
     # the postgres entrypoint to override the default 5432.
-    ${ENGINE} run -d --name "${CONTAINER_NAME}" -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
+    # Attach the Postgres container to the user network so other containers
+    # (for example the transport-backend container) can reach it by name.
+    # The default network name mirrors the backend's default (scc200-net) and
+    # can be overridden with NETWORK_NAME in the environment.
+    NETWORK_NAME="${NETWORK_NAME:-scc200-net}"
+    if ! ${ENGINE} network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
+        echo "Creating network: ${NETWORK_NAME}"
+        ${ENGINE} network create "${NETWORK_NAME}" || true
+    else
+        echo "Using existing network: ${NETWORK_NAME}"
+    fi
+
+    ${ENGINE} run -d --name "${CONTAINER_NAME}" --network "${NETWORK_NAME}" -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
         -e POSTGRES_USER="${PG_USER}" -e POSTGRES_PASSWORD="${PG_PASS}" -e POSTGRES_DB="${PG_DB}" \
         ${VOLUME_ARG} \
         --restart unless-stopped "${IMAGE}" postgres -c "port=${CONTAINER_PORT}"
