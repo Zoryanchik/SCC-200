@@ -7,16 +7,26 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
+            max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
             background-color: #f5f5f5;
+        }
+        /* Layout: horizontal row of containers when space allows */
+        .layout {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+            flex-wrap: wrap;
         }
         .container {
             background-color: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-sizing: border-box;
+            flex: 1 1 320px; /* grow, shrink, base width */
+            min-width: 280px;
         }
         h1 {
             color: #333;
@@ -78,9 +88,20 @@
             text-align: center;
             margin-top: 10px;
         }
+        /* Responsive: stack vertically on narrow screens */
+        @media (max-width: 900px) {
+            .layout {
+                flex-direction: column;
+            }
+            body {
+                max-width: 100%;
+                padding: 12px;
+            }
+        }
     </style>
 </head>
 <body>
+    <div class="layout">
     <div class="container">
         <h1>Live Bus Data Viewer</h1>
 
@@ -113,7 +134,7 @@
     </div>
 
     <!-- Routing Form -->
-    <div class="container" style="margin-top: 40px;">
+    <div class="container" style="margin-top: 0;">
         <h1>Route Planner</h1>
         <form id="routeForm">
             <div class="form-group">
@@ -157,6 +178,56 @@
         <div id="route-loading" class="loading">Searching for route...</div>
         <div id="route-result" class="result" style="display: none;"></div>
     </div>
+
+    <!-- Route by address -->
+    <div class="container" style="margin-top: 0;">
+        <h2>Route Planner — by address</h2>
+        <form id="routeAddressForm">
+            <div class="form-group">
+                <label for="start_addr">Start address or place:</label>
+                <input type="text" id="start_addr" value="Lancaster" required>
+            </div>
+            <div class="form-group">
+                <label for="end_addr">End address or place:</label>
+                <input type="text" id="end_addr" value="Preston" required>
+            </div>
+            <div class="form-group">
+                <label for="route_addr_date">Date (YYYY-MM-DD):</label>
+                <input type="date" id="route_addr_date" required>
+            </div>
+            <div class="form-group">
+                <label for="route_addr_time">Time (HH:MM:SS):</label>
+                <input type="time" id="route_addr_time" step="1" required>
+            </div>
+            <div class="form-group">
+                <label for="max_transfers_addr">Max Transfers:</label>
+                <input type="number" id="max_transfers_addr" value="5" min="0" required>
+            </div>
+            <div class="form-group">
+                <label for="mode_addr">Mode:</label>
+                <select id="mode_addr">
+                    <option value="both">Both</option>
+                    <option value="bus">Bus</option>
+                    <option value="train">Train</option>
+                </select>
+            </div>
+            <button type="submit">Find Route by Address</button>
+        </form>
+        <div id="route-addr-loading" class="loading">Searching for route by address...</div>
+        <div id="route-addr-candidates" style="display: none; margin-top: 12px;">
+            <div class="form-group">
+                <label for="start_candidates">Start candidates (pick one):</label>
+                <select id="start_candidates"></select>
+            </div>
+            <div class="form-group">
+                <label for="end_candidates">End candidates (pick one):</label>
+                <select id="end_candidates"></select>
+            </div>
+            <button id="compute_route_from_candidates" type="button">Compute route from selected candidates</button>
+        </div>
+        <div id="route-addr-result" class="result" style="display: none;"></div>
+    </div>
+    </div> <!-- .layout -->
 
     <script src="static/script.js"></script>
 </body>
