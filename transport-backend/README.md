@@ -1,6 +1,9 @@
 Inside transport-backend:
 
-First run OSRM server:
+Run PGSQL server:
+./run_pgsql
+
+Run OSRM server:
 ./osrm/run_osrm.sh
 
 Open a new terminal:
