@@ -58,20 +58,58 @@ def initialize_base():
             print("  Bus DB empty — downloading timetable data...")
             datasets = loader._fetch_dataset_info()
             print(f"  Got {len(datasets)} download URLs")
-            for ds in datasets:
-                loader.download_and_load(ds['download_url'])
-                # Persist dataset metadata using the loader connection
-                conn = loader._connect()
-                cur = conn.cursor()
-                cur.execute(
-                    "INSERT INTO bus_dataset_meta (source_url, download_url, modified) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (source_url) DO UPDATE SET download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
-                    (ds['source_url'], ds['download_url'], ds['modified']),
-                )
-                conn.commit()
-                conn.close()
-            print("  ✓ Timetable data loaded")
-            data_changed = True
+            # Download and load datasets concurrently (one worker per URL).
+            # Each worker will perform the download/load and then persist the
+            # dataset metadata using its own DB connection to avoid sharing
+            # cursors between threads.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _download_and_save(ds, retries=3, backoff=1.0):
+                import time, traceback
+                last_exc = None
+                for attempt in range(1, retries + 1):
+                    try:
+                        loader.download_and_load(ds['download_url'])
+                        # Persist dataset metadata using a fresh connection
+                        conn2 = loader._connect()
+                        cur2 = conn2.cursor()
+                        cur2.execute(
+                            "INSERT INTO bus_dataset_meta (source_url, download_url, modified) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (source_url) DO UPDATE SET download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
+                            (ds['source_url'], ds['download_url'], ds['modified']),
+                        )
+                        conn2.commit()
+                        conn2.close()
+                        return (ds, None)
+                    except Exception as e:
+                        last_exc = e
+                        # simple backoff
+                        if attempt < retries:
+                            time.sleep(backoff * (2 ** (attempt - 1)))
+                        else:
+                            # final failure, return exception info
+                            tb = traceback.format_exc()
+                            return (ds, (e, tb))
+
+            max_workers = min(4, max(1, len(datasets)))
+            successes = []
+            failures = []
+            with ThreadPoolExecutor(max_workers=max_workers) as dex:
+                futures = {dex.submit(_download_and_save, ds): ds for ds in datasets}
+                for fut in as_completed(futures):
+                    ds, result = fut.result()
+                    if result is None:
+                        successes.append(ds)
+                    else:
+                        failures.append((ds, result))
+
+            if successes:
+                print(f"  ✓ Timetable data loaded for {len(successes)}/{len(datasets)} dataset(s)")
+                data_changed = True
+            if failures:
+                print(f"  ⚠ Failed to load {len(failures)}/{len(datasets)} dataset(s):")
+                for ds, (exc, tb) in failures:
+                    print(f"    - {ds.get('source_url')} -> error: {exc}")
         else:
             data_changed = loader.check_for_updates()
         print("  ✓ Bus DB ready")
