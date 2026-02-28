@@ -14,27 +14,22 @@ CACHE_DIR="$HERE/cache"
 
 mkdir -p "$CACHE_DIR"
 
-# If compiled extensions were previously built into build/lib.*, copy them
-# into the package root so that '.so' files are available in-place. This
-# is convenient for developers who expect the extensions to live next to
-# the sources. Use BUILD_INPLACE=1 to force a local in-place build attempt
-# (requires build tools on the host).
-if compdir=$(ls -d build/lib.* 2>/dev/null | head -n1) && [ -n "$compdir" ]; then
-  echo "Found compiled extensions in $compdir — copying .so files into project root"
-  find "$compdir" -maxdepth 1 -type f -name '*.so' -exec cp -n {} . \;
-fi
-
-# Optional: allow forcing an in-place build on the host before container startup.
-# Example: BUILD_INPLACE=1 ./start_container.sh
-if [ "${BUILD_INPLACE:-0}" = "1" ]; then
+# By default, attempt a local in-place build so compiled extensions (.so)
+# live next to the source files. This is the expected developer workflow:
+# the host will run `python3 setup_*.py build_ext --inplace` before starting
+# the container. Set SKIP_LOCAL_BUILD=1 in the environment to skip this step
+# (useful on CI or when build tools are intentionally absent).
+if [ "${SKIP_LOCAL_BUILD:-0}" != "1" ]; then
   if [ -f setup_raptor.py ]; then
-    echo "BUILD_INPLACE=1 — running local setup_raptor.py build_ext --inplace"
+    echo "Running local setup_raptor.py build_ext --inplace"
     python3 setup_raptor.py build_ext --inplace || echo "Local build raptor failed"
   fi
   if [ -f setup_walking.py ]; then
-    echo "BUILD_INPLACE=1 — running local setup_walking.py build_ext --inplace"
+    echo "Running local setup_walking.py build_ext --inplace"
     python3 setup_walking.py build_ext --inplace || echo "Local build walking failed"
   fi
+else
+  echo "SKIP_LOCAL_BUILD=1 — skipping host in-place build"
 fi
 
 # Postgres connection defaults used when running the backend container on a
