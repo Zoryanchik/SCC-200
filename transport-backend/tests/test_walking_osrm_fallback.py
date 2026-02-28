@@ -57,7 +57,7 @@ def test_reachable_stops_fallback_on_non_ok(monkeypatch):
     payload = json.dumps({"code": "Error", "durations": [[0, 60, 600]]})
     monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResp(payload.encode("utf-8")))
 
-    result = w.reachable_stops(user)
+    result = dict(w.reachable_stops(user))
 
     # Both stops are within max_walk_seconds when using haversine fallback
     expected_keys = set(stop_coords.keys())

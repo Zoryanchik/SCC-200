@@ -52,10 +52,13 @@ class Walking:
     # ── reachable stops from an arbitrary (lat, lon) ─────────────
 
     def reachable_stops(self, location):
-        """Return {stop_int: walk_seconds} for stops walkable from *location*.
+        """Return a sorted list of (stop_int, walk_seconds) for stops walkable
+        from *location*.
 
         *location* is a (lat, lon) tuple representing an arbitrary point
         (the user's start or end position).
+
+        The returned list is sorted by walk_seconds ascending.
         """
         lat, lon = location
 
@@ -81,8 +84,8 @@ class Walking:
             # Include exact matches (stops at the user's exact location)
             for s, t in exact_matches.items():
                 result[s] = 0
-            sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
-            return sorted_result
+            # Return flattened list sorted by seconds
+            return sorted(result.items(), key=lambda item: item[1])
 
         # 2. Build OSRM /table request: source = user location,
         #    destinations = candidate stops
@@ -112,8 +115,8 @@ class Walking:
             # Include exact matches (stops at the user's exact location)
             for s, t in exact_matches.items():
                 result[s] = 0
-            sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
-            return sorted_result
+            # Return flattened list sorted by seconds
+            return sorted(result.items(), key=lambda item: item[1])
         # Treat any non-Ok (case-insensitive) OSRM `code` as a failure and fall
         # back to haversine estimates. This guards against server errors that
         # still return JSON with a non-Ok status field.
@@ -127,7 +130,7 @@ class Walking:
                     result[stop_int] = walk_time
             for s, t in exact_matches.items():
                 result[s] = 0
-            return {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
+            return sorted(result.items(), key=lambda item: item[1])
 
         durations = data["durations"][0]        # single-source row
         result = {}
@@ -141,9 +144,8 @@ class Walking:
         for s, t in exact_matches.items():
             result[s] = 0
 
-        # Sort by walk_seconds ascending
-        sorted_result = {k: v for k, v in sorted(result.items(), key=lambda item: item[1])}
-        return sorted_result
+        # Sort by walk_seconds ascending and return flattened list
+        return sorted(result.items(), key=lambda item: item[1])
 
         
 

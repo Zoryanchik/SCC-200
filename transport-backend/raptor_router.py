@@ -25,10 +25,13 @@ class RaptorRouter:
         for stop in range(len(reach_stops)):
             reach_stops[stop] = [None, inf, None, None, None]
         n_transfer = -1
-        initial_stops = walking.reachable_stops( start_point )
+        # reachable_stops now returns a list of (stop, walk_seconds)
+        initial_list = walking.reachable_stops( start_point )
+        # keep a dict for O(1) lookups later
+        initial_stops = dict(initial_list)
         switch_a = []
         switch_b = []
-        for stop, walk_time in initial_stops.items():
+        for stop, walk_time in initial_list:
             reach_stops[stop][1] = start_time + walk_time
             reach_stops[stop][2] = WALKING
             if stop not in switch_a:
@@ -55,16 +58,18 @@ class RaptorRouter:
             switch_b,
             allowed_modes,
         )
-        final_stops = walking.reachable_stops( destination )
-        if not final_stops:
+        final_list = walking.reachable_stops( destination )
+        if not final_list:
             return {}
-        
+        # dict for lookups, and list for ordered iteration
+        final_stops = dict(final_list)
+
         # Find the reached stop that gives the earliest arrival at destination
         # (transit arrival at stop + walking time from stop to destination)
         best_final_stop = None
         final_walk_seconds = None
         best_total_arrival = math.inf
-        for stop, walk_time in final_stops.items():
+        for stop, walk_time in final_list:
             if reach_stops[stop][1] < math.inf:
                 if reach_stops[stop][2] == WALKING:
                     pre = reach_stops[stop][0]
