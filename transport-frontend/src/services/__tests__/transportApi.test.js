@@ -362,6 +362,38 @@ describe('getJourneyPlans — POST /journey/plan', () => {
     expect(body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(body.departureTime).toMatch(/^\d{2}:\d{2}:\d{2}$/);
   });
+
+  test('augments legs with offset display fields when backend provides day offsets', async () => {
+    const MOCK_WITH_OFFSETS = {
+      success: true,
+      legs: [
+        {
+          type: 'bus',
+          from_stop: { name: 'A', lat: 54.048, lon: -2.801 },
+          to_stop: { name: 'B', lat: 53.759, lon: -2.699 },
+          departure_time: '23:50:00',
+          arrival_time: '00:20:00',
+          departure_day_offset: 0,
+          arrival_day_offset: 1,
+        }
+      ],
+      meta: {},
+      routeGeometries: [],
+    };
+
+    fetch.mockReturnValueOnce(jsonResponse(MOCK_WITH_OFFSETS));
+
+    const result = await getJourneyPlans({ lat: 54.048, lon: -2.801 }, { lat: 53.759, lon: -2.699 }, '2026-02-28T23:00:00Z');
+
+    expect(result.legs).toHaveLength(1);
+    const leg = result.legs[0];
+    expect(leg).toHaveProperty('arrival_time_with_offset');
+    expect(leg.arrival_time_with_offset).toContain('00:20:00');
+    expect(leg.arrival_time_with_offset).toContain('+1d');
+    expect(leg).toHaveProperty('arrival_datetime_iso');
+    // arrival_datetime_iso should be the next day (2026-03-01) because Feb 28 + 1 day -> Mar 1
+    expect(leg.arrival_datetime_iso.startsWith('2026-03-01')).toBeTruthy();
+  });
 });
 
 // ---- GET /rail/departures/{station} (not yet implemented) -----------------

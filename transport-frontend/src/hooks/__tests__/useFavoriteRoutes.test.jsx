@@ -25,7 +25,15 @@ vi.mock('../../services/liveUpdates', () => ({
 
 describe('useFavoriteRoutes', () => {
   beforeEach(() => {
-    localStorage.clear()
+    // Force a minimal, working localStorage shim for the test to avoid
+    // environment differences between node/jsdom workers.
+    globalThis.localStorage = {
+      _data: {},
+      getItem(key) { return this._data.hasOwnProperty(key) ? this._data[key] : null },
+      setItem(key, value) { this._data[key] = String(value) },
+      removeItem(key) { delete this._data[key] },
+      clear() { this._data = {} },
+    }
   })
 
   test('loads empty favorites and can save/remove', () => {

@@ -177,6 +177,62 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
     responseJson.meta ??= {};
     responseJson.routeGeometries ??= [];
 
+    // Augment legs with user-friendly display strings that include day offsets
+    // Backend may return arrival_day_offset / departure_day_offset (integers >= 0).
+    // Preserve original arrival_time / departure_time strings for backward-compatibility.
+    try {
+      const requestDate = date; // YYYY-MM-DD from earlier normalizeDateTime
+      responseJson.legs = (responseJson.legs || []).map((leg) => {
+        const copy = { ...leg };
+        const makeWithOffset = (timeStr, dayOffset) => {
+          if (!timeStr) return null;
+          const offset = Number.isFinite(dayOffset) && dayOffset > 0 ? ` (+${dayOffset}d)` : "";
+          return `${timeStr}${offset}`;
+        };
+
+        // Add friendly combined fields used by UI components. These are additive and
+        // won't break callers that expect the original field names.
+        copy.arrival_time_with_offset = makeWithOffset(copy.arrival_time, copy.arrival_day_offset);
+        copy.departure_time_with_offset = makeWithOffset(copy.departure_time, copy.departure_day_offset);
+
+        // Optional: also expose ISO datetimes computed from the requested date.
+        // Only add when both date and time exist. These are in UTC-ish ISO format
+        // and may need timezone-adjustment depending on app needs.
+        if (copy.arrival_time) {
+          try {
+            const [h, m, s] = copy.arrival_time.split(':').map((n) => parseInt(n, 10));
+            if (!Number.isNaN(h) && !Number.isNaN(m) && !Number.isNaN(s)) {
+              const dt = new Date(`${requestDate}T${copy.arrival_time}Z`);
+              if (copy.arrival_day_offset && Number.isFinite(copy.arrival_day_offset) && copy.arrival_day_offset > 0) {
+                dt.setUTCDate(dt.getUTCDate() + copy.arrival_day_offset);
+              }
+              copy.arrival_datetime_iso = dt.toISOString();
+            }
+          } catch (e) {
+            // ignore conversion errors — keep original fields
+          }
+        }
+        if (copy.departure_time) {
+          try {
+            const dt2 = new Date(`${requestDate}T${copy.departure_time}Z`);
+            if (copy.departure_day_offset && Number.isFinite(copy.departure_day_offset) && copy.departure_day_offset > 0) {
+              dt2.setUTCDate(dt2.getUTCDate() + copy.departure_day_offset);
+            }
+            copy.departure_datetime_iso = dt2.toISOString();
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        return copy;
+      });
+    } catch (e) {
+      // If anything goes wrong during augmentation, fall back to the raw response
+      // and avoid breaking the app — the original fields are preserved.
+      // eslint-disable-next-line no-console
+      console.warn('Failed to augment journey legs with day-offset display fields', e);
+    }
+
     return responseJson;
   } catch (error) {
     console.error('Error getting journey plans:', error);
