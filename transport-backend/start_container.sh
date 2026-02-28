@@ -14,22 +14,17 @@ CACHE_DIR="$HERE/cache"
 
 mkdir -p "$CACHE_DIR"
 
-# By default, attempt a local in-place build so compiled extensions (.so)
-# live next to the source files. This is the expected developer workflow:
-# the host will run `python3 setup_*.py build_ext --inplace` before starting
-# the container. Set SKIP_LOCAL_BUILD=1 in the environment to skip this step
-# (useful on CI or when build tools are intentionally absent).
+# NOTE: automatic Cython/build steps were removed per developer request.
+# Historically this script attempted to run `setup_raptor.py` and
+# `setup_walking.py` on the host to produce in-place compiled extensions.
+# That behavior caused unexpected build attempts on systems without the
+# necessary build toolchain. If you need to build native extensions,
+# run the appropriate setup_*.py scripts manually before starting the
+# container, or enable a custom build step in your CI pipeline.
 if [ "${SKIP_LOCAL_BUILD:-0}" != "1" ]; then
-  if [ -f setup_raptor.py ]; then
-    echo "Running local setup_raptor.py build_ext --inplace"
-    python3 setup_raptor.py build_ext --inplace || echo "Local build raptor failed"
-  fi
-  if [ -f setup_walking.py ]; then
-    echo "Running local setup_walking.py build_ext --inplace"
-    python3 setup_walking.py build_ext --inplace || echo "Local build walking failed"
-  fi
+  echo "Local Cython/build steps disabled. Set SKIP_LOCAL_BUILD=1 to suppress this message."
 else
-  echo "SKIP_LOCAL_BUILD=1 — skipping host in-place build"
+  echo "SKIP_LOCAL_BUILD=1 — local builds intentionally disabled"
 fi
 
 # Postgres connection defaults used when running the backend container on a
@@ -160,9 +155,7 @@ echo "Starting container $CONTAINER (host:5050 -> container:5050) with cache mou
 # double-quoted shell variable so we can safely pass it as the argument to
 # '/bin/sh -c'. Avoid nesting single quotes inside the variable which makes
 # the value hard to pass to the runtime correctly.
-START_SCRIPT="if [ -f /app/setup_raptor.py ]; then echo '[startup] running setup_raptor.py --inplace'; python3 /app/setup_raptor.py build_ext --inplace || echo '[startup] setup_raptor failed'; fi; \
-if [ -f /app/setup_walking.py ]; then echo '[startup] running setup_walking.py --inplace'; python3 /app/setup_walking.py build_ext --inplace || echo '[startup] setup_walking failed'; fi; \
-echo '[startup] launching uvicorn'; exec uvicorn api:app --host 0.0.0.0 --port 5050"
+START_SCRIPT="echo '[startup] skipping in-container Cython/build steps'; echo '[startup] launching uvicorn'; exec uvicorn api:app --host 0.0.0.0 --port 5050"
 
 # Run the container and pass the startup script as the command to execute.
 # We use '/bin/sh -c "$START_SCRIPT"' so the whole script runs inside the
