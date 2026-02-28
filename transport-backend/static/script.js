@@ -1,3 +1,9 @@
+// Determine API base URL. When the page is opened via file:// the
+// browser will treat leading '/' paths as file URLs (which fail when
+// the backend is running on http). Detect that case and fall back to
+// the local backend address used in development.
+const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5050' : '';
+
 document.getElementById('busLiveForm').addEventListener('submit', async function(e) {
     e.preventDefault();
 

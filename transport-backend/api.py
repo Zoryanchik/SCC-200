@@ -548,26 +548,13 @@ def format_route_text(route_result, merged):
         first_arrival = legs[0][1]["arrival_time"]
         depart_time = first_arrival - start_walk
         out.append(f"\n  - Start  ({start_point[0]:.5f}, {start_point[1]:.5f})")
-        depart_adj = int(depart_time) % 86400
-        depart_day = int(depart_time) // 86400
-        depart_time_str = seconds_to_time(int(depart_adj))
-        if depart_day and depart_day > 0:
-            out.append(f"    Depart at {depart_time_str} (+{depart_day}d)")
-        else:
-            out.append(f"    Depart at {depart_time_str}")
+        out.append(f"    Depart at {seconds_to_time(int(depart_time))}")
         walk_min = start_walk / 60
         out.append(f"    - Walk {walk_min:.0f} min ({start_walk}s)")
 
     for i, (stop_int, info) in enumerate(legs):
         stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
-        if info["arrival_time"] != float("inf"):
-            adj_arr = int(info["arrival_time"]) % 86400
-            arr_day = int(info["arrival_time"]) // 86400
-            arrival = seconds_to_time(int(adj_arr))
-            if arr_day and arr_day > 0:
-                arrival = f"{arrival} (+{arr_day}d)"
-        else:
-            arrival = "--:--:--"
+        arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
         # Support both new 'mode' key and legacy 'type' key in route dicts
         transport = info.get("mode") or info.get("type") or "origin"
 
@@ -596,12 +583,7 @@ def format_route_text(route_result, merged):
                 if j_origin and j_dest:
                     desc_parts.append(f"{j_origin} -> {j_dest}")
                 if board_dep is not None:
-                        b_adj = int(board_dep) % 86400
-                        b_day = int(board_dep) // 86400
-                        b_str = seconds_to_time(int(b_adj))
-                        if b_day and b_day > 0:
-                            b_str = f"{b_str} (+{b_day}d)"
-                        desc_parts.append(f"departs {b_str}")
+                    desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
                 desc = " - ".join(desc_parts) if desc_parts else transport
                 out.append(f"    - {desc}")
 
@@ -613,13 +595,7 @@ def format_route_text(route_result, merged):
         out.append(f"    - Walk {walk_min:.0f} min ({end_walk}s)")
         out.append(f"  - Destination  ({destination[0]:.5f}, {destination[1]:.5f})")
         if total_arrival is not None:
-            t_adj = int(total_arrival) % 86400
-            t_day = int(total_arrival) // 86400
-            t_str = seconds_to_time(int(t_adj))
-            if t_day and t_day > 0:
-                out.append(f"    Arrive at {t_str} (+{t_day}d)")
-            else:
-                out.append(f"    Arrive at {t_str}")
+            out.append(f"    Arrive at {seconds_to_time(int(total_arrival))}")
 
     out.append("\n" + "=" * 60)
     return "\n".join(out)
@@ -725,16 +701,6 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             return None
         return seconds_to_time(int(secs))
 
-    def _time_with_day(secs):
-        """Return (time_str, day_offset) for a seconds-since-epoch value.
-
-        day_offset is 0 for same-day times, 1 for next-day, etc.
-        """
-        if secs is None or secs == math.inf:
-            return None, None
-        day_offset = int(secs) // 86400
-        return seconds_to_time(int(secs)), day_offset
-
     _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#e53935"}
     legs = []
     geometries = []
@@ -755,7 +721,6 @@ def build_journey_plan_response(route_result, merged, stop_coords):
         if first_coord:
             to_loc["lat"] = first_coord[0]
             to_loc["lon"] = first_coord[1]
-        arr_time_str, arr_day = _time_with_day(ordered[0][1]["arrival_time"])
         legs.append({
             "mode": "walking",
             "from_stop": {"name": "Start", "lat": start_point[0],
@@ -763,8 +728,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "to_stop": to_loc,
             "duration_seconds": start_walk,
             "departure_time": None,
-            "arrival_time": arr_time_str,
-            "arrival_day_offset": arr_day,
+            "arrival_time": _time_str(ordered[0][1]["arrival_time"]),
         })
         wc = [[start_point[0], start_point[1]]]
         if first_coord:
@@ -796,22 +760,18 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             to_loc["lat"] = curr_coord[0]
             to_loc["lon"] = curr_coord[1]
 
-        at_str, at_day = _time_with_day(curr_info["arrival_time"])
         leg = {
             "mode": transport,
             "from_stop": from_loc,
             "to_stop": to_loc,
-            "arrival_time": at_str,
-            "arrival_day_offset": at_day,
+            "arrival_time": _time_str(curr_info["arrival_time"]),
         }
 
         line_name = ""
         if transport == "walking":
             walk_secs = curr_info["arrival_time"] - prev_info["arrival_time"]
             leg["duration_seconds"] = int(walk_secs)
-            dep_str, dep_day = _time_with_day(prev_info["arrival_time"])
-            leg["departure_time"] = dep_str
-            leg["departure_day_offset"] = dep_day
+            leg["departure_time"] = _time_str(prev_info["arrival_time"])
             leg["line_name"] = None
         else:
             j_info = curr_info.get("journey_info")
@@ -824,9 +784,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             leg["journey_destination"] = (
                 curr_info.get("journey_destination", "") or None)
             board_dep = curr_info.get("board_departure")
-            dep_str, dep_day = _time_with_day(board_dep)
-            leg["departure_time"] = dep_str
-            leg["departure_day_offset"] = dep_day
+            leg["departure_time"] = _time_str(board_dep)
             dur_start = board_dep if board_dep else prev_info["arrival_time"]
             if (curr_info["arrival_time"] < math.inf
                     and dur_start < math.inf):
@@ -878,9 +836,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "duration_seconds": end_walk,
             "departure_time": _time_str(
                 ordered[-1][1]["arrival_time"]),
-            "departure_day_offset": _time_with_day(ordered[-1][1]["arrival_time"])[1],
             "arrival_time": _time_str(total_arrival),
-            "arrival_day_offset": _time_with_day(total_arrival)[1],
         })
         wc = []
         if last_coord:
@@ -900,7 +856,6 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "start_walk_seconds": start_walk,
             "end_walk_seconds": end_walk,
             "total_arrival": _time_str(total_arrival),
-            "total_arrival_day_offset": _time_with_day(total_arrival)[1],
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
@@ -1008,6 +963,61 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
 
 if __name__ == "__main__":
     import uvicorn
+    # Try to detect and terminate any existing process listening on the
+    # intended port so a stale server doesn't prevent starting the app.
+    # This is intended as a developer convenience; it uses `lsof` which
+    # is commonly available on macOS and Linux. If `lsof` is missing the
+    # attempt is skipped and startup proceeds normally.
+    import subprocess
+    import shutil
+    import time
+    import signal
+    import os
+    import logging
+
+    def _kill_process_on_port(port: int = 5005, timeout: float = 2.0) -> None:
+        logger = logging.getLogger(__name__)
+        lsof = shutil.which("lsof")
+        if not lsof:
+            logger.debug("lsof not found; skipping auto-kill on port %s", port)
+            return
+        try:
+            # lsof -ti tcp:<port> outputs PIDs (one per line) or exits non-zero
+            out = subprocess.check_output([lsof, "-ti", f"tcp:{port}"], stderr=subprocess.DEVNULL)
+            pids = [int(p) for p in out.decode().strip().split() if p.strip()]
+        except subprocess.CalledProcessError:
+            # No process found listening on the port
+            return
+        except Exception as exc:  # pragma: no cover - environment-specific
+            logger.warning("Error checking port %s occupancy: %s", port, exc)
+            return
+
+        for pid in pids:
+            try:
+                if pid == os.getpid():
+                    # Don't kill ourselves
+                    continue
+                logger.info("Terminating process %s occupying port %s", pid, port)
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                # Ignore individual kill failures and continue
+                pass
+
+        # Wait briefly for processes to exit
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                out = subprocess.check_output([lsof, "-ti", f"tcp:{port}"], stderr=subprocess.DEVNULL)
+                if not out.strip():
+                    break
+            except subprocess.CalledProcessError:
+                break
+            except Exception:
+                break
+            time.sleep(0.05)
+
+    _kill_process_on_port(5005)
+
     uvicorn.run(app, host="localhost", port=5005)
 
 
