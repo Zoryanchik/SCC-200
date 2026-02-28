@@ -14,6 +14,15 @@ CACHE_DIR="$HERE/cache"
 
 mkdir -p "$CACHE_DIR"
 
+# Postgres connection defaults used when running the backend container on a
+# user network. These mirror the defaults used by run_pgsql.sh and can be
+# overridden via the environment before calling this script.
+PG_USER="${PG_USER:-pguser}"
+PG_PASS="${PG_PASS:-pgpass}"
+PG_DB="${PG_DB:-transport}"
+PG_PORT="${PG_PORT:-5011}"
+PG_HOST="${PG_HOST:-transport-postgres-local}"
+
 # Detect container runtime: prefer podman, fall back to docker
 if command -v podman >/dev/null 2>&1; then
   RUNTIME=podman
@@ -91,6 +100,39 @@ else
   else
     echo "Using existing network: $NETWORK_NAME"
   fi
+  # When running on a user network (default) try to forward DB DSNs so the
+  # backend inside the container connects to the Postgres container by name
+  # instead of trying to use 127.0.0.1 (which would resolve to the container
+  # itself). If the Postgres container is not present on the user network we
+  # fall back to the host loopback to preserve existing local workflows.
+  #
+  # Detect whether the Postgres container is attached to the network. If so
+  # use the container hostname; otherwise use 127.0.0.1 so host-local Postgres
+  # remains reachable.
+  # Prefer detecting the Postgres container by name (works across runtimes).
+  if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'transport-postgres-local'; then
+    # Try to resolve the Postgres container's IP on the user network. Some
+    # container runtimes (or macOS host setups) do not provide DNS name
+    # resolution by container name inside containers, so using the container
+    # IP is more reliable for connectivity.
+    POSTGRES_IP=$($RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' transport-postgres-local 2>/dev/null || true)
+    if [ -n "${POSTGRES_IP}" ]; then
+      TARGET_HOST="$POSTGRES_IP"
+      echo "Found Postgres container IP ${POSTGRES_IP} — using host: $TARGET_HOST"
+    else
+      TARGET_HOST="$PG_HOST"
+      echo "Could not determine Postgres IP; falling back to container name: $TARGET_HOST"
+    fi
+  else
+    TARGET_HOST="127.0.0.1"
+    echo "Postgres container not found by name — falling back to host: $TARGET_HOST"
+  fi
+
+  BACKEND_PG_DSN="postgresql://${PG_USER}:${PG_PASS}@${TARGET_HOST}:${PG_PORT}/${PG_DB}"
+  echo "Forwarding DB DSNs into container pointing at: ${TARGET_HOST}:${PG_PORT}"
+  # Preserve any existing ENV_FLAGS (for OSRM_URL) and append DB DSNs
+  ENV_FLAGS="$ENV_FLAGS -e BUS_DB_DSN=${BACKEND_PG_DSN} -e TRAIN_DB_DSN=${BACKEND_PG_DSN} -e WALK_DB_DSN=${BACKEND_PG_DSN}"
+
   RUN_FLAGS="$RUN_FLAGS --network $NETWORK_NAME -p 5050:5050"
 fi
 

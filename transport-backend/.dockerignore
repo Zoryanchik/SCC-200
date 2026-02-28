@@ -1,0 +1,13 @@
+# Ignore local runtime and data directories that shouldn't be baked into the image
+pgdata
+cache
+__pycache__
+.pytest_cache
+.DS_Store
+*.pyc
+tests
+.git
+
+# If there are any absolute paths or host mountpoints referenced, be conservative
+# and exclude them from the build context.
+/pgdata

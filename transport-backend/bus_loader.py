@@ -3,7 +3,8 @@ import io
 import os
 import pickle
 import re
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import ssl
 import tempfile
 import json
@@ -11,6 +12,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from bus_data import BusData
+import traceback
 
 class BusLoader:
     def __init__( self, db_path, user=None, password=None, walking_db_path=None ):
@@ -19,6 +21,17 @@ class BusLoader:
         self.password = password
         # Optional separate walking DB (contains stop_coords and walking_transfers)
         self.walking_db_path = walking_db_path
+
+    # Connection helper: return a DB connection object. Backend is
+    # Postgres-only: treat the configured DB path as a Postgres DSN
+    # (psycopg) and return a native psycopg connection.
+    def _connect(self, path=None):
+        db = path or self.db_path
+
+        # Always use Postgres (psycopg) in Postgres-only mode.
+        pg_conn = psycopg.connect(db)
+        # psycopg connection is returned directly for Postgres usage.
+        return pg_conn
 
     def get_download_urls(self):
         """Return a list of dataset download URLs.
@@ -95,7 +108,7 @@ class BusLoader:
         print("  Checking for timetable updates...")
         datasets = self._fetch_dataset_info()
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("SELECT source_url, modified FROM bus_dataset_meta")
         stored = {row[0]: row[1] for row in cur.fetchall()}
@@ -115,10 +128,11 @@ class BusLoader:
         for ds in changed:
             self.download_and_load(ds['download_url'])
             # save the new timestamp
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect(self.db_path)
             cur = conn.cursor()
             cur.execute(
-                "INSERT OR REPLACE INTO bus_dataset_meta (source_url, download_url, modified) VALUES (?,?,?)",
+                "INSERT INTO bus_dataset_meta (source_url, download_url, modified) VALUES (%s, %s, %s) "
+                "ON CONFLICT (source_url) DO UPDATE SET download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
                 (ds['source_url'], ds['download_url'], ds['modified']),
             )
             conn.commit()
@@ -129,34 +143,33 @@ class BusLoader:
 
     def ensure_db( self ):
         # Create the database file if it doesn't exist
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         conn.close()
 
     #Create tables
     def create_schema( self ):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.executescript('''
+        conn = self._connect(self.db_path)
+        schema = '''
             CREATE TABLE IF NOT EXISTS bus_route_stops (
-                route_id   CHAR(12),
-                atco_code  CHAR(12),
+                route_id   TEXT,
+                atco_code  TEXT,
                 stop_order INTEGER NOT NULL,
                 PRIMARY KEY (route_id, atco_code)
             );
             CREATE TABLE IF NOT EXISTS bus_journey_routes (
-                journey_id CHAR(12) PRIMARY KEY,
+                journey_id TEXT PRIMARY KEY,
                 route_id   TEXT NOT NULL,
                 line_name  TEXT,
                 destination_display TEXT
             );
             CREATE TABLE IF NOT EXISTS bus_journey_times (
-                journey_id     CHAR(12),
-                atco_code      CHAR(12),
+                journey_id     TEXT,
+                atco_code      TEXT,
                 arrival_time   INTEGER NOT NULL,
                 PRIMARY KEY (journey_id, atco_code)
             );
             CREATE TABLE IF NOT EXISTS bus_stop_names (
-                atco_code   CHAR(12) PRIMARY KEY,
+                atco_code   TEXT PRIMARY KEY,
                 common_name TEXT NOT NULL,
                 indicator   TEXT,
                 locality    TEXT
@@ -180,7 +193,7 @@ class BusLoader:
                 PRIMARY KEY (service_code, start_date, end_date)
             );
             CREATE TABLE IF NOT EXISTS bus_journey_operating_profile (
-                journey_id   CHAR(12) NOT NULL,
+                journey_id   TEXT NOT NULL,
                 service_code TEXT NOT NULL,
                 days_of_week INTEGER NOT NULL DEFAULT 0,
                 start_date   TEXT,
@@ -189,7 +202,15 @@ class BusLoader:
                 org_working  INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (journey_id)
             );
-        ''')
+        '''
+        import re as _re
+        cur = conn.cursor()
+        for stmt in schema.split(';'):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            stmt2 = _re.sub(r"CHAR\s*\(\s*\d+\s*\)", "TEXT", stmt, flags=_re.I)
+            cur.execute(stmt2)
         conn.commit()
         conn.close()
         
@@ -447,6 +468,7 @@ class BusLoader:
                 print(f'[{i}/{total}] OK  {fname}')
             except Exception as e:
                 print(f'[{i}/{total}] ERR {fname}: {e}')
+                traceback.print_exc()
         print(f'Done. {total} files processed.')
 
     def download_and_load(self, url):
@@ -480,38 +502,47 @@ class BusLoader:
             serviced_orgs:  list of (service_code, start_date, end_date)
             journey_ops:    list of (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working)
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cursor = conn.cursor()
         cursor.executemany(
-            "INSERT OR REPLACE INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (?,?,?)",
+            "INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (%s, %s, %s) "
+            "ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order",
             route_stops
         )
         cursor.executemany(
-            "INSERT OR REPLACE INTO bus_journey_routes (journey_id, route_id, line_name, destination_display) VALUES (?,?,?,?)",
+            "INSERT INTO bus_journey_routes (journey_id, route_id, line_name, destination_display) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display",
             journey_routes
         )
         cursor.executemany(
-            "INSERT OR REPLACE INTO bus_journey_times (journey_id, atco_code, arrival_time) VALUES (?,?,?)",
+            "INSERT INTO bus_journey_times (journey_id, atco_code, arrival_time) VALUES (%s, %s, %s) "
+            "ON CONFLICT (journey_id, atco_code) DO UPDATE SET arrival_time = EXCLUDED.arrival_time",
             journey_times
         )
         if stop_names:
             cursor.executemany(
-                "INSERT OR REPLACE INTO bus_stop_names (atco_code, common_name, indicator, locality) VALUES (?,?,?,?)",
+                "INSERT INTO bus_stop_names (atco_code, common_name, indicator, locality) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (atco_code) DO UPDATE SET common_name = EXCLUDED.common_name, indicator = EXCLUDED.indicator, locality = EXCLUDED.locality",
                 stop_names
             )
         if service_ops:
             cursor.executemany(
-                "INSERT OR REPLACE INTO bus_service_operating_period (service_code, start_date, end_date) VALUES (?,?,?)",
+                "INSERT INTO bus_service_operating_period (service_code, start_date, end_date) VALUES (%s, %s, %s) "
+                "ON CONFLICT (service_code) DO UPDATE SET start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date",
                 service_ops
             )
         if serviced_orgs:
             cursor.executemany(
-                "INSERT OR REPLACE INTO bus_serviced_org_working_days (service_code, start_date, end_date) VALUES (?,?,?)",
+                # This table's primary key is (service_code, start_date, end_date);
+                # when the exact triple exists, there's nothing to update, so use DO NOTHING.
+                "INSERT INTO bus_serviced_org_working_days (service_code, start_date, end_date) VALUES (%s, %s, %s) "
+                "ON CONFLICT (service_code, start_date, end_date) DO NOTHING",
                 serviced_orgs
             )
         if journey_ops:
             cursor.executemany(
-                "INSERT OR REPLACE INTO bus_journey_operating_profile (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO bus_journey_operating_profile (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working",
                 journey_ops
             )
         conn.commit()
@@ -519,7 +550,7 @@ class BusLoader:
 
     def load_busdata( self ):
         """Query the SQLite DB and build a BusData object."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cursor = conn.cursor()
 
         # --- count distinct entities for initial sizing ---
@@ -614,7 +645,7 @@ class BusLoader:
         query_date = _date.fromisoformat(date_str)
         dow_bit = 1 << query_date.weekday()       # Mon=0 → bit 1, Sun=6 → bit 64
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
 
         # 1. Load serviced org working-day ranges
@@ -691,11 +722,11 @@ class BusLoader:
             return BusData(num_routes=0, num_journeys=0, num_stops=0)
 
         # 3. Build BusData filtering to valid_journeys only
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
 
         # Figure out which routes are still needed
-        placeholders = ','.join('?' * len(valid_journeys))
+        placeholders = ','.join(['%s'] * len(valid_journeys))
         valid_list = list(valid_journeys)
         cur.execute(
             f"SELECT DISTINCT route_id FROM bus_journey_routes WHERE journey_id IN ({placeholders})",
@@ -712,7 +743,7 @@ class BusLoader:
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
 
         # 3a. route_stops — only routes that have valid journeys
-        route_placeholders = ','.join('?' * len(valid_routes))
+        route_placeholders = ','.join(['%s'] * len(valid_routes))
         valid_routes_list = list(valid_routes)
         cur.execute(
             f"SELECT route_id, atco_code FROM bus_route_stops WHERE route_id IN ({route_placeholders}) ORDER BY route_id, stop_order",
@@ -797,9 +828,9 @@ class BusLoader:
 
     def get_stop_name(self, atco_code):
         """Return the common name for a single ATCO code, or None."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT common_name FROM bus_stop_names WHERE atco_code = ?", (atco_code,))
+        cur.execute("SELECT common_name FROM bus_stop_names WHERE atco_code = %s", (atco_code,))
         row = cur.fetchone()
         conn.close()
         return row[0] if row else None
@@ -811,9 +842,9 @@ class BusLoader:
         """
         if not atco_codes:
             return {}
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
-        placeholders = ','.join('?' for _ in atco_codes)
+        placeholders = ','.join(['%s'] * len(atco_codes))
         cur.execute(
             f"SELECT atco_code, common_name FROM bus_stop_names WHERE atco_code IN ({placeholders})",
             list(atco_codes)
@@ -824,7 +855,7 @@ class BusLoader:
 
     def get_stop_count(self):
         """Return the number of unique stop names in the database."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM bus_stop_names")
         count = cur.fetchone()[0]
@@ -848,10 +879,10 @@ class BusLoader:
         if not query:
             return []
         # 1) Query stop names from the bus DB
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
-            "SELECT atco_code, common_name FROM bus_stop_names WHERE LOWER(common_name) LIKE LOWER(?) LIMIT ?",
+            "SELECT atco_code, common_name FROM bus_stop_names WHERE LOWER(common_name) LIKE LOWER(%s) LIMIT %s",
             (f"%{query}%", limit),
         )
         rows = cur.fetchall()
@@ -867,9 +898,9 @@ class BusLoader:
         wdb = self.walking_db_path
         if wdb:
             try:
-                wconn = sqlite3.connect(wdb)
+                wconn = self._connect(wdb)
                 wcur = wconn.cursor()
-                placeholders = ','.join('?' for _ in atcos)
+                placeholders = ','.join(['%s'] * len(atcos))
                 wcur.execute(f"SELECT atco_code, lat, lon FROM stop_coords WHERE atco_code IN ({placeholders})", atcos)
                 for atco, lat, lon in wcur.fetchall():
                     coords_map[atco] = (lat, lon)
