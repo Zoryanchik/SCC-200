@@ -3,6 +3,7 @@
  * Displays route details with pricing and duration
  */
 
+import React from "react";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -85,6 +86,14 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   {step.from ? ` from ${step.from}` : ""}
                   {step.to ? ` to ${step.to}` : ""}
                 </Typography>
+                {/* Display times when provided by the journey planner (with day offsets) */}
+                {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
+                  <Typography variant="caption" color="text.secondary" data-testid={`step-time-${idx}`}>
+                    {step.departure_time_with_offset ? `Dep: ${step.departure_time_with_offset}` : ""}
+                    {step.departure_time_with_offset && step.arrival_time_with_offset ? ' • ' : ''}
+                    {step.arrival_time_with_offset ? `Arr: ${step.arrival_time_with_offset}` : ""}
+                  </Typography>
+                )}
               </Box>
             </Stack>
           ))}

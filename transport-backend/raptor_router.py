@@ -91,7 +91,7 @@ class RaptorRouter:
         
         arrival_time = best_total_arrival
         dir_walking = walking.walking_time_between( start_point, destination )
-        if dir_walking is not None and dir_walking + start_time < arrival_time + 10:
+        if dir_walking is not None and dir_walking <= 1800 and dir_walking + start_time < arrival_time + 10:
             # Direct walking is faster than any transit route found
             return {
                 '_meta': {
