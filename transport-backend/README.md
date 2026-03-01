@@ -6,8 +6,14 @@ Run PGSQL server:
 Run OSRM server:
 ./osrm/run_osrm.sh
 
-Open a new terminal:
-./run_backend.sh
+To run inside a container:
+	Open a new terminal:
+	./run_backend.sh
+
+//OR
+To install requirements and run locally:
+pip install -r requirements.txt
+python3 api.py
 
 
 # Development / small-area testing
