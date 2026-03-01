@@ -1151,14 +1151,17 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
     
     fetch_url = f"https://transport.scc.lancs.ac.uk/weather?lat={lat}&lon={lon}"
 
-    import urllib
+    # Use requests (which bundles a CA cert store via certifi) so TLS
+    # verification works inside virtualenvs and containers.
+    import requests
 
     try:
-        with urllib.request.urlopen(fetch_url) as resp:
-            data = json.load(resp)
+        resp = requests.get(fetch_url, headers={"User-Agent": "transport-backend/1.0"}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:
         return JSONResponse(
-            status_code=500,
+            status_code=502,
             content={"error": str(exc)},
         )
     
