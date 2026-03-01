@@ -7,6 +7,7 @@ __pycache__
 *.pyc
 tests
 .git
+osrm
 
 # If there are any absolute paths or host mountpoints referenced, be conservative
 # and exclude them from the build context.
