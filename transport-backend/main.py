@@ -61,7 +61,10 @@ def initialize_base():
     # can address an OSRM sidecar by name (e.g. http://osrm:5012).
     OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
 
-    # ── Task 1: Bus data ─────────────────────────────────────────
+    # ── Task 1: Bus — per-dataset concurrent download + load ─────
+    # Returns (loader, bus_data_changed: bool)
+    # Each dataset URL is fetched in its own sub-thread; the task only
+    # returns True if at least one dataset was newly downloaded.
 
     def _bus_task():
         loader = BusLoader(BUS_DB_PATH, walking_db_path=WALK_DB_PATH)
@@ -72,153 +75,268 @@ def initialize_base():
         cur.execute("SELECT COUNT(*) FROM bus_route_stops")
         _count = cur.fetchone()[0]
         conn.close()
-        data_changed = False
+        bus_changed = False
         if _count == 0:
-            print("  Bus DB empty — downloading timetable data...")
+            print("  [bus] DB empty — fetching dataset list...")
             datasets = loader._fetch_dataset_info()
-            print(f"  Got {len(datasets)} download URLs")
+            print(f"  [bus] Got {len(datasets)} download URLs — downloading concurrently...")
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             def _download_and_save(ds, retries=3, backoff=1.0):
                 import time, traceback
-                last_exc = None
+                # Extract short tag from source URL (e.g. 'ARCT' from '.../ARCT')
+                tag = ds['source_url'].rstrip('/').split('/')[-1]
                 for attempt in range(1, retries + 1):
                     try:
-                        loader.download_and_load(ds['download_url'])
+                        loader.download_and_load(ds['download_url'], tag=tag)
                         conn2 = loader._connect()
                         cur2 = conn2.cursor()
                         cur2.execute(
-                            "INSERT INTO bus_dataset_meta (source_url, download_url, modified) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (source_url) DO UPDATE SET download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
+                            "INSERT INTO bus_dataset_meta (source_url, download_url, modified) "
+                            "VALUES (%s, %s, %s) ON CONFLICT (source_url) DO UPDATE SET "
+                            "download_url = EXCLUDED.download_url, modified = EXCLUDED.modified",
                             (ds['source_url'], ds['download_url'], ds['modified']),
                         )
                         conn2.commit()
                         conn2.close()
                         return (ds, None)
                     except Exception as e:
-                        last_exc = e
                         if attempt < retries:
                             time.sleep(backoff * (2 ** (attempt - 1)))
                         else:
-                            tb = traceback.format_exc()
-                            return (ds, (e, tb))
+                            return (ds, (e, traceback.format_exc()))
 
             max_workers = min(4, max(1, len(datasets)))
-            successes = []
-            failures = []
+            successes, failures = [], []
             with ThreadPoolExecutor(max_workers=max_workers) as dex:
-                futures = {dex.submit(_download_and_save, ds): ds for ds in datasets}
-                for fut in as_completed(futures):
+                futs = {dex.submit(_download_and_save, ds): ds for ds in datasets}
+                for fut in as_completed(futs):
                     ds, result = fut.result()
-                    if result is None:
-                        successes.append(ds)
-                    else:
-                        failures.append((ds, result))
+                    (successes if result is None else failures).append((ds, result))
 
             if successes:
-                print(f"  ✓ Timetable data loaded for {len(successes)}/{len(datasets)} dataset(s)")
-                data_changed = True
+                print(f"  [bus] ✓ Loaded {len(successes)}/{len(datasets)} dataset(s)")
+                bus_changed = True
             if failures:
-                print(f"  ⚠ Failed to load {len(failures)}/{len(datasets)} dataset(s):")
-                for ds, (exc, tb) in failures:
-                    print(f"    - {ds.get('source_url')} -> error: {exc}")
+                print(f"  [bus] ⚠ Failed {len(failures)}/{len(datasets)} dataset(s):")
+                for ds, (exc, _tb) in failures:
+                    print(f"    - {ds.get('source_url')} → {exc}")
         else:
-            data_changed = loader.check_for_updates()
-        print("  ✓ Bus DB ready")
-        return loader, data_changed
+            print("  [bus] Data present — checking for updates...")
+            bus_changed = loader.check_for_updates()
+        print("  [bus] ✓ Ready")
+        return loader, bus_changed
 
-    # ── Task 2: Walking — download coords + precompute transfers ──
+    # ── Task 2: Walking — download NaPTAN coords + precompute ────
+    # Entirely independent of bus data: runs fully in parallel.
+    # Returns (atco_loader, walking_loader, raw_coords)
 
     def _walking_task():
-        """Download stop coords, probe OSRM, and precompute transfers.
-
-        This runs the full precompute (OSRM or haversine fallback)
-        synchronously so that walking data is ready before startup
-        completes.
-        """
-        # 2a. Schema + download stop coordinates via AtcoLoader
         al = AtcoLoader(WALK_DB_PATH)
         al.create_schema()
-        al.download_stop_coords()
+
+        # Detect whether stop_coords is empty before the download so we
+        # know whether NaPTAN data itself changed.
+        conn_pre = al._connect()
+        cur_pre = conn_pre.cursor()
+        cur_pre.execute("SELECT COUNT(*) FROM stop_coords")
+        coords_before = cur_pre.fetchone()[0]
+        conn_pre.close()
+
+        al.download_stop_coords()   # upserts into stop_coords
+
+        conn_post = al._connect()
+        cur_post = conn_post.cursor()
+        cur_post.execute("SELECT COUNT(*) FROM stop_coords")
+        coords_after = cur_post.fetchone()[0]
+        conn_post.close()
+
+        coords_changed = coords_after != coords_before or coords_before == 0
+        if coords_changed:
+            print(f"  [walking] ✓ Stop coords updated ({coords_after} stops)")
+        else:
+            print(f"  [walking] ✓ Stop coords unchanged ({coords_after} stops)")
 
         wl = WalkingLoader(WALK_DB_PATH)
         wl.create_schema()
 
-        # 2b. Probe OSRM availability
-        osrm_ok = False
-        try:
-            probe_url = OSRM_URL.rstrip("/") + "/"
-            _r = _ur.urlopen(probe_url, timeout=3)
-            _r.close()
-            osrm_ok = True
-        except _ue.HTTPError:
-            osrm_ok = True
-        except _ue.URLError:
-            osrm_ok = False
-
-        if not osrm_ok:
-            print(f"  ⚠  OSRM not reachable at {OSRM_URL} — using haversine fallback")
-
-        # 2c. Get coords and precompute walking transfers (blocking)
         raw_coords = al.get_all_stop_coords()
 
-        if osrm_ok:
-            wl.precompute_walking_transfers(raw_coords, osrm_base=OSRM_URL)
+        # ── Precompute walking transfers in parallel with bus ─────
+        # Walking is independent of bus timetable data — only NaPTAN
+        # stop coordinates are needed, which are already loaded above.
+        conn_tx = wl._connect()
+        cur_tx  = conn_tx.cursor()
+        cur_tx.execute("SELECT COUNT(*) FROM walking_transfers")
+        transfers_count = cur_tx.fetchone()[0]
+        conn_tx.close()
+
+        needs_precompute = coords_changed or transfers_count == 0
+
+        if needs_precompute:
+            # ── Try loading from disk cache first ─────────────────
+            if not coords_changed and transfers_count == 0:
+                loaded = wl.load_from_cache()
+                if loaded:
+                    return al, wl, raw_coords
+
+            reasons = []
+            if coords_changed:       reasons.append("stop coords changed")
+            if transfers_count == 0: reasons.append("walking_transfers empty")
+            print(f"  [walking] Precomputing transfers ({', '.join(reasons)})...")
+
+            if coords_changed:
+                wl.clear_walking_transfers()
+
+            # Probe OSRM
+            osrm_ok = False
+            try:
+                probe_url = OSRM_URL.rstrip("/") + "/"
+                _r = _ur.urlopen(probe_url, timeout=3)
+                _r.close()
+                osrm_ok = True
+            except _ue.HTTPError:
+                osrm_ok = True
+            except _ue.URLError:
+                osrm_ok = False
+
+            if not osrm_ok:
+                print(f"  [walking] ⚠  OSRM not reachable at {OSRM_URL} — using haversine fallback")
+
+            if osrm_ok:
+                wl.precompute_walking_transfers(raw_coords, osrm_base=OSRM_URL)
+            else:
+                wl.precompute_walking_transfers_fallback(raw_coords)
+
+            # Save to disk cache for next startup
+            wl.save_cache()
         else:
-            wl.precompute_walking_transfers_fallback(raw_coords)
+            print("  [walking] Transfers up-to-date — skipping precompute")
 
-        raw_transfers = wl.get_walking_transfers()
-        print(f"  ✓ Walking ready  ({len(raw_transfers)} stops with transfers, "
-              f"{len(raw_coords)} with coords)")
-        return al, wl, raw_coords, raw_transfers
+        return al, wl, raw_coords
 
-    # ── Task 3: Train init ────────────────────────────────────────
+    # ── Task 3: Train — schema init (lightweight) ─────────────────
+    # Returns train_loader.  Train data is loaded on-demand per date
+    # in build_for_date(), so nothing expensive happens here.
 
     def _train_task():
         tl = TrainLoader(TRAIN_DB_PATH)
         tl.ensure_db()
         tl.create_schema()
-        print("  ✓ Train DB ready")
+        print("  [train] ✓ Ready")
         return tl
 
     # ── Run all three concurrently ────────────────────────────────
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        bus_fut = ex.submit(_bus_task)
-        walk_fut = ex.submit(_walking_task)
+        bus_fut   = ex.submit(_bus_task)
+        walk_fut  = ex.submit(_walking_task)
         train_fut = ex.submit(_train_task)
 
-        loader, data_changed = bus_fut.result()
-        atco_loader, walking_loader, raw_coords, raw_transfers = walk_fut.result()
-        train_loader = train_fut.result()
+        loader, bus_changed                    = bus_fut.result()
+        atco_loader, walking_loader, raw_coords = walk_fut.result()
+        train_loader                            = train_fut.result()
 
-    # If bus data changed, wipe stale walking transfers and recompute.
-    # (The walking task above used whatever was in the DB; if bus data
-    # changed we need a clean slate.)
-    if data_changed:
-        print("  Bus data changed — recomputing walking transfers...")
-        walking_loader.clear_walking_transfers()
-        osrm_ok = False
-        try:
-            probe_url = OSRM_URL.rstrip("/") + "/"
-            _r = _ur.urlopen(probe_url, timeout=3)
-            _r.close()
-            osrm_ok = True
-        except _ue.HTTPError:
-            osrm_ok = True
-        except _ue.URLError:
-            osrm_ok = False
-        if osrm_ok:
-            walking_loader.precompute_walking_transfers(raw_coords, osrm_base=OSRM_URL)
-        else:
-            walking_loader.precompute_walking_transfers_fallback(raw_coords)
-        raw_transfers = walking_loader.get_walking_transfers()
-        print(f"  ✓ Walking re-done ({len(raw_transfers)} stops with transfers)")
+    raw_transfers = walking_loader.get_walking_transfers()
+    print(f"  [walking] ✓ Ready  ({len(raw_transfers)} stops with transfers, "
+          f"{len(raw_coords)} with coords)")
 
     walking_raw = {
         "transfers": raw_transfers,   # {atco: {atco: secs}}
         "coords":    raw_coords,      # {atco: (lat, lon)}
     }
+
+    # ── Pre-build today's merged timetable ────────────────────────
+    # This ensures the first API request doesn't have to wait.
+    today_str = _date.today().isoformat()
+    yesterday_str = (_date.today() - _timedelta(days=1)).isoformat()
+    tomorrow_str = (_date.today() + _timedelta(days=1)).isoformat()
+    print(f"\n  [merged] Pre-building timetable for {today_str}...")
+
+    # Load all 3 days' data in parallel (shared between AM and PM)
+    train_loader = TrainLoader(TRAIN_DB_PATH)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        bus_yesterday_f = ex.submit(loader.load_busdata_for_date, yesterday_str)
+        bus_today_f = ex.submit(loader.load_busdata_for_date, today_str)
+        bus_tomorrow_f = ex.submit(loader.load_busdata_for_date, tomorrow_str)
+        train_yesterday_f = ex.submit(train_loader.load_traindata_for_date, yesterday_str)
+        train_today_f = ex.submit(train_loader.load_traindata_for_date, today_str)
+        train_tomorrow_f = ex.submit(train_loader.load_traindata_for_date, tomorrow_str)
+
+        bus_yesterday = bus_yesterday_f.result()
+        bus_today = bus_today_f.result()
+        bus_tomorrow = bus_tomorrow_f.result()
+        train_yesterday = train_yesterday_f.result()
+        train_today = train_today_f.result()
+        train_tomorrow = train_tomorrow_f.result()
+
+    # Build AM (yesterday + today) and PM (today + tomorrow) in parallel
+    def _build_variant(day_a_data, day_b_data, offset_a, offset_b, label):
+        bus_a, train_a = day_a_data
+        bus_b, train_b = day_b_data
+        datasets = [
+            (bus_a, offset_a),
+            (train_a, offset_a),
+            (bus_b, offset_b),
+            (train_b, offset_b),
+        ]
+        merged = MergedData(datasets, stop_name_fn=loader.get_stop_names_bulk)
+        router = RaptorRouter(merged)
+
+        # Remap walking data
+        from collections import defaultdict
+        raw_transfers = walking_raw["transfers"]
+        raw_coords = walking_raw["coords"]
+
+        atco_to_merged_all = defaultdict(list)
+        for g_offset, g_count, mapper in merged._group_mappers:
+            if mapper is None:
+                continue
+            for local_i in range(g_count):
+                try:
+                    code = mapper.get_code(local_i)
+                except Exception:
+                    continue
+                if code:
+                    atco_to_merged_all[code].append(g_offset + local_i)
+
+        inter_table = {}
+        for from_atco, dests in raw_transfers.items():
+            from_ints = atco_to_merged_all.get(from_atco, [])
+            for from_int in from_ints:
+                inner = {}
+                for to_atco, secs in dests.items():
+                    to_ints = atco_to_merged_all.get(to_atco, [])
+                    for to_int in to_ints:
+                        inner[to_int] = secs
+                if inner:
+                    inter_table[from_int] = inner
+
+        stop_coords = {}
+        for atco, (lat, lon) in raw_coords.items():
+            for s_int in atco_to_merged_all.get(atco, []):
+                stop_coords[s_int] = (lat, lon)
+
+        walking_obj = Walking(inter_table, stop_coords)
+        print(f"    ✓ {label} ready")
+        return merged, router, walking_obj
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        am_fut = ex.submit(_build_variant,
+            (bus_yesterday, train_yesterday), (bus_today, train_today),
+            -86400, 0, "AM")
+        pm_fut = ex.submit(_build_variant,
+            (bus_today, train_today), (bus_tomorrow, train_tomorrow),
+            0, 86400, "PM")
+
+        merged_am, router_am, walking_am = am_fut.result()
+        merged_pm, router_pm, walking_pm = pm_fut.result()
+
+    prebuilt_cache = {
+        (today_str, "PM"): (merged_pm, router_pm, walking_pm),
+        (today_str, "AM"): (merged_am, router_am, walking_am),
+    }
+    print(f"  [merged] ✓ Today's timetable ready (AM + PM)")
 
     print("\n" + "=" * 60)
     print("Base Initialization Complete!")
@@ -228,6 +346,7 @@ def initialize_base():
         "loader": loader,
         "walking_raw": walking_raw,
         "walking_loader": walking_loader,
+        "prebuilt_cache": prebuilt_cache,
     }
 
 

@@ -9,10 +9,17 @@ import ssl
 import tempfile
 import json
 import urllib.request
-import xml.etree.ElementTree as ET
 import zipfile
 from bus_data import BusData
 import traceback
+
+# Use lxml for faster XML parsing (~2-3x vs stdlib ElementTree)
+try:
+    from lxml import etree as ET
+    _USING_LXML = True
+except ImportError:
+    import xml.etree.ElementTree as ET
+    _USING_LXML = False
 
 class BusLoader:
     def __init__( self, db_path, user=None, password=None, walking_db_path=None ):
@@ -202,6 +209,9 @@ class BusLoader:
                 org_working  INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (journey_id)
             );
+            -- Indexes for faster JOINs in load_busdata_for_date
+            CREATE INDEX IF NOT EXISTS idx_journey_routes_route ON bus_journey_routes(route_id);
+            CREATE INDEX IF NOT EXISTS idx_route_stops_route ON bus_route_stops(route_id);
         '''
         import re as _re
         cur = conn.cursor()
@@ -229,88 +239,76 @@ class BusLoader:
         parts = hms.split(':')
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
 
-    def load_file(self, file_path):
-        """Parse a TransXChange XML file and populate the database."""
+    def _parse_file(self, file_path):
+        """Parse a TransXChange XML file and return row-lists without touching the DB.
+
+        Returns a 7-tuple:
+            (route_stops_rows, journey_routes_rows, journey_times_rows,
+             stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows)
+        """
         tree = ET.parse(file_path)
         root = tree.getroot()
         ns = '{http://www.transxchange.org.uk/}'
 
-        # Attempt to determine the operator / organisation code for this file.
-        # TransXChange files may include this under several elements; try a few
-        # common locations and fall back to empty string if not found.
         service_code = ''
-        # Preferred: Services/Service/ServiceCode
         svc_el = root.find(f'{ns}Services/{ns}Service')
         if svc_el is not None:
             service_code = svc_el.findtext(f'{ns}ServiceCode', '').strip()
-        # Fallback: ServiceOrganisations/ServiceOrganisation/OrganisationCode
         if not service_code:
             so_el = root.find(f'{ns}ServiceOrganisations/{ns}ServiceOrganisation')
             if so_el is not None:
                 service_code = so_el.findtext(f'{ns}OrganisationCode', '').strip()
-        # Fallback: ServicedOrganisations/ServicedOrganisation/OrganisationCode
         if not service_code:
             sdel = root.find(f'{ns}ServicedOrganisations/{ns}ServicedOrganisation')
             if sdel is not None:
                 service_code = sdel.findtext(f'{ns}OrganisationCode', '').strip()
-        # Another possible location: ServiceOperator/OperatorCode
         if not service_code:
             op_el = root.find(f'{ns}ServiceOperator/{ns}OperatorCode')
             if op_el is not None:
                 service_code = (op_el.text or '').strip()
 
-        # ── 0. StopPoints — AtcoCode → CommonName mapping ────────
         stop_names_rows = []
         for sp in root.findall(f'{ns}StopPoints/{ns}AnnotatedStopPointRef'):
-            atco = sp.findtext(f'{ns}StopPointRef')
-            cname = sp.findtext(f'{ns}CommonName')
+            atco   = sp.findtext(f'{ns}StopPointRef')
+            cname  = sp.findtext(f'{ns}CommonName')
             indicator = sp.findtext(f'{ns}Indicator', '')
-            locality = sp.findtext(f'{ns}LocalityName', '')
+            locality  = sp.findtext(f'{ns}LocalityName', '')
             if atco and cname:
                 stop_names_rows.append((atco, cname, indicator, locality))
 
-        # ── 1. JourneyPatternSections ──────────────────────────────
-        # jps_data[section_id] = [ (jptl_id, from_stop, to_stop, run_seconds, to_day_shift), … ]
         jps_data = {}
         for jps in root.findall(f'{ns}JourneyPatternSections/{ns}JourneyPatternSection'):
-            sid = jps.attrib['id']
+            sid   = jps.attrib['id']
             links = []
             for jptl in jps.findall(f'{ns}JourneyPatternTimingLink'):
-                jptl_id  = jptl.attrib['id']
+                jptl_id   = jptl.attrib['id']
                 from_stop = jptl.findtext(f'{ns}From/{ns}StopPointRef')
                 to_stop   = jptl.findtext(f'{ns}To/{ns}StopPointRef')
                 run_sec   = self._parse_duration(jptl.findtext(f'{ns}RunTime'))
-                # DepartureDayShift on the To element: number of days
-                # after the journey start that this stop is reached
                 to_day_shift = int(jptl.findtext(f'{ns}To/{ns}DepartureDayShift') or '0')
                 links.append((jptl_id, from_stop, to_stop, run_sec, to_day_shift))
             jps_data[sid] = links
 
-        # Build ordered stop list from a section's timing links
         def section_stops(sid):
             links = jps_data[sid]
             if not links:
                 return []
-            stops = [links[0][1]]  # first From
+            stops = [links[0][1]]
             for _, _, to_stop, _, _ in links:
                 stops.append(to_stop)
             return stops
 
-        # ── 2. JourneyPatterns (under Services) ──────────────────
-        # jp_map[jp_id] = { route_ref, section_ids }
         jp_map = {}
         svc = root.find(f'{ns}Services/{ns}Service')
 
-        # ── 2a. Service OperatingPeriod ───────────────────────────
         service_code = svc.findtext(f'{ns}ServiceCode', '')
         op_period = svc.find(f'{ns}OperatingPeriod')
         svc_start = op_period.findtext(f'{ns}StartDate', '') if op_period is not None else ''
         svc_end   = op_period.findtext(f'{ns}EndDate', '')   if op_period is not None else ''
         service_op_rows = [(service_code, svc_start, svc_end)]
 
-        # ── 2b. Services OperatingPeriod ─────────────────────────────
-        serviced_org_rows = []
-        service_working_map = {}  # service_code -> list of (start, end)
+        serviced_org_rows  = []
+        service_working_map = {}
         op_period = svc.find(f'{ns}OperatingPeriod')
         if op_period is not None:
             sd = op_period.findtext(f'{ns}StartDate', '')
@@ -319,31 +317,25 @@ class BusLoader:
                 serviced_org_rows.append((service_code, sd, ed))
                 service_working_map.setdefault(service_code, []).append((sd, ed))
 
-        # Parse Lines: line_id -> LineName
         line_names = {}
         for line in svc.findall(f'{ns}Lines/{ns}Line'):
             line_names[line.attrib['id']] = line.findtext(f'{ns}LineName', '')
 
         std = svc.find(f'{ns}StandardService')
         for jp in std.findall(f'{ns}JourneyPattern'):
-            jp_id = jp.attrib['id']
+            jp_id   = jp.attrib['id']
             route_ref = jp.findtext(f'{ns}RouteRef')
             sec_refs  = [s.text for s in jp.findall(f'{ns}JourneyPatternSectionRefs')]
             dest_display = jp.findtext(f'{ns}DestinationDisplay', '')
             jp_map[jp_id] = {'route_ref': route_ref, 'section_ids': sec_refs, 'destination_display': dest_display}
 
-        # ── 3. Routes → route_stops ──────────────────────────────
-        # Build stop list per route from its JourneyPatterns' sections
-        # Multiple JPs can share a RouteRef; pick the longest stop list
-        route_stop_lists = {}  # route_ref -> [atco_codes]
+        route_stop_lists = {}
         for jp_id, info in jp_map.items():
-            rref = info['route_ref']
+            rref  = info['route_ref']
             stops = []
             for sid in info['section_ids']:
                 stops.extend(section_stops(sid))
-            # deduplicate while preserving order (chain of From→To can repeat)
-            seen = set()
-            ordered = []
+            seen, ordered = set(), []
             for s in stops:
                 if s not in seen:
                     seen.add(s)
@@ -353,20 +345,14 @@ class BusLoader:
 
         route_stops_rows = []
         for route_id, stops in route_stop_lists.items():
-            # Prefix route_id with service code if available so that
-            # route identifiers are namespaced per service. This ensures
-            # uniqueness across multiple operator datasets loaded into the
-            # same DB.
             rkey = f"{service_code}:{route_id}" if service_code else route_id
             for idx, atco in enumerate(stops):
                 route_stops_rows.append((rkey, atco, idx))
 
-        # ── 4. VehicleJourneys → journey_routes + journey_times ──
         journey_routes_rows = []
         journey_times_rows  = []
         journey_op_rows     = []
 
-        # Days-of-week element names → bitmask (bit 0 = Monday, bit 6 = Sunday)
         DOW_BITS = {
             'Monday': 1, 'Tuesday': 2, 'Wednesday': 4, 'Thursday': 8,
             'Friday': 16, 'Saturday': 32, 'Sunday': 64,
@@ -388,45 +374,35 @@ class BusLoader:
             info = jp_map[jp_ref]
             route_ref = info['route_ref']
             destination_display = info.get('destination_display', '')
-            # Namespace journey and route IDs with the service code
-            # so they're unique across multiple operators.
             jkey = f"{service_code}:{vj_code}" if service_code and vj_code else (vj_code or '')
             rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
             journey_routes_rows.append((jkey, rkey, line_name, destination_display))
 
-            # ── Parse OperatingProfile ────────────────────────────
             op = vj.find(f'{ns}OperatingProfile')
-            dow_mask = 127  # default: all days
+            dow_mask = 127
             op_start = svc_start
             op_end   = svc_end
             org_ref  = ''
-            org_working = 1  # 1 = runs on org working days, 0 = runs on org holidays
+            org_working = 1
 
             if op is not None:
-                # RegularDayType / DaysOfWeek
                 dow_el = op.find(f'{ns}RegularDayType/{ns}DaysOfWeek')
                 if dow_el is not None:
                     dow_mask = 0
                     for child in dow_el:
                         tag = child.tag.replace(ns, '')
                         dow_mask |= DOW_BITS.get(tag, 0)
-
-                # SpecialDaysOperation — override start/end date range
                 sdo = op.find(f'{ns}SpecialDaysOperation')
                 if sdo is not None:
                     inc = sdo.find(f'{ns}DaysOfOperation/{ns}DateRange')
                     if inc is not None:
                         sd = inc.findtext(f'{ns}StartDate', '')
                         ed = inc.findtext(f'{ns}EndDate', '')
-                        if sd:
-                            op_start = sd
-                        if ed:
-                            op_end = ed
+                        if sd: op_start = sd
+                        if ed: op_end   = ed
 
-            # Store journey operating profile keyed by the namespaced journey id
             journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working))
 
-            # Build per-JPTL RunTime overrides from VehicleJourneyTimingLinks
             overrides = {}
             for vjtl in vj.findall(f'{ns}VehicleJourneyTimingLink'):
                 ref = vjtl.findtext(f'{ns}JourneyPatternTimingLinkRef')
@@ -434,61 +410,102 @@ class BusLoader:
                 if ref and rt:
                     overrides[ref] = self._parse_duration(rt)
 
-            # Walk through the JourneyPatternSection timing links
-            cum = dep_sec  # cumulative time in seconds
+            cum   = dep_sec
             first = True
             for sid in info['section_ids']:
                 for jptl_id, from_stop, to_stop, base_run, to_day_shift in jps_data[sid]:
                     if first:
-                        # arrival at the first stop is the departure time
                         journey_times_rows.append((jkey, from_stop, cum))
                         first = False
                     run = overrides.get(jptl_id, base_run)
                     cum += run
-                    # Apply DepartureDayShift: ensure arrival is on the
-                    # correct day (e.g. overnight journeys crossing midnight)
                     if to_day_shift:
                         min_time = dep_sec + to_day_shift * 86400
                         if cum < min_time:
                             cum = min_time
                     journey_times_rows.append((jkey, to_stop, cum))
 
-        # ── 5. Persist ───────────────────────────────────────────
-        self.populate(route_stops_rows, journey_routes_rows, journey_times_rows, stop_names_rows,
-                      service_op_rows, serviced_org_rows, journey_op_rows)
+        return (route_stops_rows, journey_routes_rows, journey_times_rows,
+                stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows)
 
-    def load_folder(self, folder_path):
-        """Parse every .xml file in a folder and populate the database."""
+    def load_file(self, file_path):
+        """Parse a TransXChange XML file and populate the database."""
+        rows = self._parse_file(file_path)
+        self.populate(*rows)
+
+    def load_folder(self, folder_path, tag=None):
+        """Parse every .xml file in a folder sequentially and bulk-insert.
+
+        Files are parsed one-by-one (single thread per dataset URL). Each
+        file is parsed with ``_parse_file`` (no DB access), rows are
+        accumulated in memory and inserted in a single bulk ``populate``
+        call at the end to minimise DB round-trips.
+
+        Args:
+            folder_path: path to folder containing .xml files
+            tag: optional short label for log messages (e.g. 'ARCT')
+        """
+        prefix = f'[{tag}] ' if tag else ''
         files = sorted(f for f in os.listdir(folder_path) if f.lower().endswith('.xml'))
         total = len(files)
-        for i, fname in enumerate(files, 1):
+        if total == 0:
+            return
+
+        all_route_stops    = []
+        all_journey_routes = []
+        all_journey_times  = []
+        all_stop_names     = []
+        all_service_ops    = []
+        all_serviced_orgs  = []
+        all_journey_ops    = []
+
+        for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
             try:
-                self.load_file(fpath)
-                print(f'[{i}/{total}] OK  {fname}')
+                r = self._parse_file(fpath)
+                if r:
+                    all_route_stops    .extend(r[0])
+                    all_journey_routes .extend(r[1])
+                    all_journey_times  .extend(r[2])
+                    all_stop_names     .extend(r[3])
+                    all_service_ops    .extend(r[4])
+                    all_serviced_orgs  .extend(r[5])
+                    all_journey_ops    .extend(r[6])
+                # Only print every 10th file or the last one to reduce log noise
+                if (idx + 1) % 10 == 0 or idx == total - 1:
+                    print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
             except Exception as e:
-                print(f'[{i}/{total}] ERR {fname}: {e}')
-                traceback.print_exc()
-        print(f'Done. {total} files processed.')
+                print(f'  [bus] {prefix}ERR [{idx+1}/{total}] {fname}: {e}')
 
-    def download_and_load(self, url):
+        # Single bulk insert for the whole folder
+        self.populate(
+            all_route_stops, all_journey_routes, all_journey_times,
+            all_stop_names, all_service_ops, all_serviced_orgs, all_journey_ops,
+        )
+        print(f'  [bus] {prefix}Done. {total} files, '
+              f'{len(all_journey_routes)} journeys, '
+              f'{len(all_journey_times)} stop-times.')
+
+    def download_and_load(self, url, tag=None):
         """Download a zip of TXC XML files from a URL, extract, and load into the DB.
 
         Args:
             url: e.g. 'https://transport.scc.lancs.ac.uk/timetable/dataset/18047/download/'
+            tag: optional short label for log messages (e.g. 'ARCT')
         """
-        print(f'Downloading {url} ...')
+        label = tag or url.split('/')[-2] or 'dataset'
+        print(f'  [bus] [{label}] Downloading...')
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         resp = urllib.request.urlopen(url, context=ctx)
         data = resp.read()
-        print(f'Downloaded {len(data) / 1024 / 1024:.1f} MB')
+        print(f'  [bus] [{label}] Downloaded {len(data) / 1024 / 1024:.1f} MB')
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 zf.extractall(tmp_dir)
-            self.load_folder(tmp_dir)
+            self.load_folder(tmp_dir, tag=label)
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None ):
@@ -504,46 +521,111 @@ class BusLoader:
         """
         conn = self._connect(self.db_path)
         cursor = conn.cursor()
-        cursor.executemany(
-            "INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (%s, %s, %s) "
-            "ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order",
-            route_stops
+
+        def _chunked_multi_insert(cur, table, cols, rows, on_conflict=None, key_indices=None, chunk_size=1000):
+            """Insert rows using COPY to temp table + INSERT...SELECT...ON CONFLICT.
+
+            This is significantly faster than multi-row INSERTs for large batches
+            because COPY uses a binary protocol with minimal parsing overhead.
+
+            *cols* is a sequence of column names.
+            *rows* is an iterable of tuples.
+            *key_indices* (optional): tuple of column indices forming the PK.
+                When provided, duplicates are handled via DISTINCT ON in SQL
+                rather than Python deduplication.
+            """
+            if not rows:
+                return
+
+            col_list = ', '.join(cols)
+
+            # Create temp table cloning structure from target (preserves types)
+            temp_table = f"_tmp_{table}"
+            cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            cur.execute(f"CREATE TEMP TABLE {temp_table} (LIKE {table}) ON COMMIT DROP")
+
+            # COPY data into temp table (fast, no constraint checks)
+            with cur.copy(f"COPY {temp_table} ({col_list}) FROM STDIN") as copy:
+                for r in rows:
+                    copy.write_row(r)
+
+            # INSERT from temp table with deduplication via DISTINCT ON
+            on_conf = ''
+            if on_conflict:
+                on_conf = ' ' + on_conflict
+
+            if key_indices is not None:
+                key_cols = ', '.join(cols[i] for i in key_indices)
+                # Use DISTINCT ON to deduplicate before inserting
+                cur.execute(f"""
+                    INSERT INTO {table} ({col_list})
+                    SELECT DISTINCT ON ({key_cols}) {col_list}
+                    FROM {temp_table}
+                    {on_conf}
+                """)
+            else:
+                cur.execute(f"INSERT INTO {table} ({col_list}) SELECT {col_list} FROM {temp_table}{on_conf}")
+
+        _chunked_multi_insert(
+            cursor,
+            'bus_route_stops',
+            ['route_id', 'atco_code', 'stop_order'],
+            route_stops,
+            on_conflict='ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order',
+            key_indices=(0, 1),  # (route_id, atco_code)
         )
-        cursor.executemany(
-            "INSERT INTO bus_journey_routes (journey_id, route_id, line_name, destination_display) VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display",
-            journey_routes
+        _chunked_multi_insert(
+            cursor,
+            'bus_journey_routes',
+            ['journey_id', 'route_id', 'line_name', 'destination_display'],
+            journey_routes,
+            on_conflict='ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display',
+            key_indices=(0,),  # (journey_id,)
         )
-        cursor.executemany(
-            "INSERT INTO bus_journey_times (journey_id, atco_code, arrival_time) VALUES (%s, %s, %s) "
-            "ON CONFLICT (journey_id, atco_code) DO UPDATE SET arrival_time = EXCLUDED.arrival_time",
-            journey_times
+        _chunked_multi_insert(
+            cursor,
+            'bus_journey_times',
+            ['journey_id', 'atco_code', 'arrival_time'],
+            journey_times,
+            on_conflict='ON CONFLICT (journey_id, atco_code) DO UPDATE SET arrival_time = EXCLUDED.arrival_time',
+            key_indices=(0, 1),  # (journey_id, atco_code)
         )
+
         if stop_names:
-            cursor.executemany(
-                "INSERT INTO bus_stop_names (atco_code, common_name, indicator, locality) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (atco_code) DO UPDATE SET common_name = EXCLUDED.common_name, indicator = EXCLUDED.indicator, locality = EXCLUDED.locality",
-                stop_names
+            _chunked_multi_insert(
+                cursor,
+                'bus_stop_names',
+                ['atco_code', 'common_name', 'indicator', 'locality'],
+                stop_names,
+                on_conflict='ON CONFLICT (atco_code) DO UPDATE SET common_name = EXCLUDED.common_name, indicator = EXCLUDED.indicator, locality = EXCLUDED.locality',
+                key_indices=(0,),  # (atco_code,)
             )
         if service_ops:
-            cursor.executemany(
-                "INSERT INTO bus_service_operating_period (service_code, start_date, end_date) VALUES (%s, %s, %s) "
-                "ON CONFLICT (service_code) DO UPDATE SET start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date",
-                service_ops
+            _chunked_multi_insert(
+                cursor,
+                'bus_service_operating_period',
+                ['service_code', 'start_date', 'end_date'],
+                service_ops,
+                on_conflict='ON CONFLICT (service_code) DO UPDATE SET start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date',
+                key_indices=(0,),  # (service_code,)
             )
         if serviced_orgs:
-            cursor.executemany(
-                # This table's primary key is (service_code, start_date, end_date);
-                # when the exact triple exists, there's nothing to update, so use DO NOTHING.
-                "INSERT INTO bus_serviced_org_working_days (service_code, start_date, end_date) VALUES (%s, %s, %s) "
-                "ON CONFLICT (service_code, start_date, end_date) DO NOTHING",
-                serviced_orgs
+            _chunked_multi_insert(
+                cursor,
+                'bus_serviced_org_working_days',
+                ['service_code', 'start_date', 'end_date'],
+                serviced_orgs,
+                on_conflict='ON CONFLICT (service_code, start_date, end_date) DO NOTHING',
+                key_indices=(0, 1, 2),  # (service_code, start_date, end_date)
             )
         if journey_ops:
-            cursor.executemany(
-                "INSERT INTO bus_journey_operating_profile (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working",
-                journey_ops
+            _chunked_multi_insert(
+                cursor,
+                'bus_journey_operating_profile',
+                ['journey_id', 'service_code', 'days_of_week', 'start_date', 'end_date', 'org_ref', 'org_working'],
+                journey_ops,
+                on_conflict='ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working',
+                key_indices=(0,),  # (journey_id,)
             )
         conn.commit()
         conn.close()
@@ -725,14 +807,24 @@ class BusLoader:
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
+        # Use temp table for valid journey IDs - much faster than IN(...) with thousands of values
+        cur.execute("CREATE TEMP TABLE _valid_journeys (journey_id TEXT PRIMARY KEY) ON COMMIT DROP")
+        with cur.copy("COPY _valid_journeys (journey_id) FROM STDIN") as copy:
+            for jid in valid_journeys:
+                copy.write_row((jid,))
+
         # Figure out which routes are still needed
-        placeholders = ','.join(['%s'] * len(valid_journeys))
-        valid_list = list(valid_journeys)
         cur.execute(
-            f"SELECT DISTINCT route_id FROM bus_journey_routes WHERE journey_id IN ({placeholders})",
-            valid_list,
+            "SELECT DISTINCT route_id FROM bus_journey_routes jr "
+            "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
         )
         valid_routes = {r[0] for r in cur.fetchall()}
+
+        # Create temp table for valid routes too
+        cur.execute("CREATE TEMP TABLE _valid_routes (route_id TEXT PRIMARY KEY) ON COMMIT DROP")
+        with cur.copy("COPY _valid_routes (route_id) FROM STDIN") as copy:
+            for rid in valid_routes:
+                copy.write_row((rid,))
 
         # Count for sizing
         num_routes = len(valid_routes)
@@ -742,12 +834,11 @@ class BusLoader:
 
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
 
-        # 3a. route_stops — only routes that have valid journeys
-        route_placeholders = ','.join(['%s'] * len(valid_routes))
-        valid_routes_list = list(valid_routes)
+        # 3a. route_stops — only routes that have valid journeys (use JOIN)
         cur.execute(
-            f"SELECT route_id, atco_code FROM bus_route_stops WHERE route_id IN ({route_placeholders}) ORDER BY route_id, stop_order",
-            valid_routes_list,
+            "SELECT rs.route_id, rs.atco_code FROM bus_route_stops rs "
+            "JOIN _valid_routes vr ON rs.route_id = vr.route_id "
+            "ORDER BY rs.route_id, rs.stop_order"
         )
         current_route = None
         stops_buf = []
@@ -761,10 +852,11 @@ class BusLoader:
         if current_route is not None:
             bd.add_route_stop(current_route, stops_buf)
 
-        # 3b. journey_routes — only valid journeys
+        # 3b. journey_routes — only valid journeys (use JOIN)
         cur.execute(
-            f"SELECT route_id, journey_id FROM bus_journey_routes WHERE journey_id IN ({placeholders}) ORDER BY route_id",
-            valid_list,
+            "SELECT jr.route_id, jr.journey_id FROM bus_journey_routes jr "
+            "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id "
+            "ORDER BY jr.route_id"
         )
         current_route = None
         journeys_buf = []
@@ -778,10 +870,11 @@ class BusLoader:
         if current_route is not None:
             bd.add_route_journeys(current_route, journeys_buf)
 
-        # 3c. journey_times — only valid journeys
+        # 3c. journey_times — only valid journeys (use JOIN)
         cur.execute(
-            f"SELECT journey_id, atco_code, arrival_time FROM bus_journey_times WHERE journey_id IN ({placeholders}) ORDER BY journey_id, arrival_time",
-            valid_list,
+            "SELECT jt.journey_id, jt.atco_code, jt.arrival_time FROM bus_journey_times jt "
+            "JOIN _valid_journeys vj ON jt.journey_id = vj.journey_id "
+            "ORDER BY jt.journey_id, jt.arrival_time"
         )
         current_journey = None
         times_buf = []
@@ -795,10 +888,11 @@ class BusLoader:
         if current_journey is not None:
             bd.add_journey_times(current_journey, times_buf)
 
-        # 3d. metadata
+        # 3d. metadata (use JOIN)
         cur.execute(
-            f"SELECT journey_id, route_id, line_name, destination_display FROM bus_journey_routes WHERE journey_id IN ({placeholders})",
-            valid_list,
+            "SELECT jr.journey_id, jr.route_id, jr.line_name, jr.destination_display "
+            "FROM bus_journey_routes jr "
+            "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
         )
         route_line_names = {}
         for journey_id, route_id, line_name, destination_display in cur.fetchall():
@@ -821,6 +915,7 @@ class BusLoader:
                     "line_name": line_name,
                 }
 
+        conn.commit()  # commit to drop temp tables
         conn.close()
         return bd
 

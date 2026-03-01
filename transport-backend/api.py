@@ -510,6 +510,7 @@ async def get_frontend():
 # tiny 1x1 transparent PNG so requests don't 404 and clutter logs.
 @app.get("/apple-touch-icon.png")
 @app.get("/apple-touch-icon-precomposed.png")
+@app.get("/favicon.ico")
 async def _apple_touch_icon():
     from fastapi.responses import Response
     import base64
@@ -579,7 +580,7 @@ def get_router_for_date(date_str, start_time=None):
     The cache key includes the AM/PM bucket so morning and afternoon
     queries use the correct two-day merge.
     """
-    global _base_cache
+    global _base_cache, _router_cache
     bucket = "AM" if (start_time is not None and start_time < 43200) else "PM"
     cache_key = (date_str, bucket)
     with _router_cache_lock:
@@ -588,6 +589,12 @@ def get_router_for_date(date_str, start_time=None):
         if _base_cache is None:
             from main import initialize_base
             _base_cache = initialize_base()
+            # Merge prebuilt cache from init
+            if "prebuilt_cache" in _base_cache:
+                _router_cache.update(_base_cache["prebuilt_cache"])
+            # Check again after merging prebuilt
+            if cache_key in _router_cache:
+                return _router_cache[cache_key]
         loader = _base_cache["loader"]
         walking_raw = _base_cache["walking_raw"]
         from main import build_for_date
