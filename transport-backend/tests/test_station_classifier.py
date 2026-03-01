@@ -447,13 +447,19 @@ class TestSearchStopsClassificationFilter:
         api_module._base_cache = {"loader": mock_loader}
         api_module._classification_cache = None
 
-    def test_without_classification_returns_all(self, client: TestClient):
+    def test_without_classification_returns_geocoded(self, client: TestClient):
+        """Default search (no classification) returns only geocoded locations."""
         self._setup_loader()
-        with patch("api.geocode_locations", return_value=[]):
+        locations = [
+            {"id": "loc:0", "name": "Centenary Way", "lat": 54.0,
+             "lon": -2.8, "atco_code": None, "type": "location"},
+        ]
+        with patch("api.geocode_locations", return_value=locations):
             resp = client.get("/search/stops", params={"q": "cent"})
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 2  # Central Station, Centre Vale Park
+        assert len(data) == 1
+        assert data[0]["type"] == "location"
         api_module._classification_cache = None
 
     def test_with_classification_filters_results(self, client: TestClient):

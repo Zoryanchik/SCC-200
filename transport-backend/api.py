@@ -160,28 +160,130 @@ async def status():
 
 # -- Stop search ---------------------------------------------------------------
 
+# Known Lancashire place names, areas, and common POIs used for fuzzy
+# correction when the user makes a typo.  Nominatim has no built-in
+# fuzzy matching, so we correct the query first using difflib.
+_LANCASHIRE_PLACES: List[str] = [
+    # Major towns / cities
+    "Lancaster", "Preston", "Blackpool", "Blackburn", "Burnley",
+    "Accrington", "Morecambe", "Fleetwood", "Lytham", "Clitheroe",
+    "Chorley", "Leyland", "Ormskirk", "Skelmersdale", "Colne",
+    "Nelson", "Darwen", "Rawtenstall", "Bacup", "Haslingden",
+    "Carnforth", "Garstang", "Poulton-le-Fylde", "Thornton-Cleveleys",
+    "Cleveleys", "Kirkham", "Longridge", "Bamber Bridge", "Fulwood",
+    "Ingleton", "Heysham", "Silverdale", "Bolton-le-Sands",
+    "Galgate", "Cockerham", "Knott End", "Whalley", "Ribchester",
+    "Oswaldtwistle", "Great Harwood", "Rishton", "Clayton-le-Moors",
+    "Padiham", "Brierfield", "Barnoldswick", "Earby",
+    "Penwortham", "Lostock Hall", "Walton-le-Dale", "Longton",
+    "Freckleton", "Warton", "Wesham",
+    # University / institutions
+    "Lancaster University", "UCLan", "Edge Hill University",
+    # Transport hubs
+    "Lancaster Bus Station", "Preston Bus Station",
+    "Blackpool North", "Blackpool South", "Blackpool Pleasure Beach",
+    "Lancaster Railway Station", "Preston Railway Station",
+    "Morecambe Railway Station", "Carnforth Railway Station",
+    # Landmarks / attractions
+    "Blackpool Tower", "Blackpool Zoo", "Williamson Park",
+    "Beacon Fell", "Pendle Hill", "Forest of Bowland",
+    "Ribble Valley", "Lune Valley", "Trough of Bowland",
+    "Ashton Memorial", "Lancaster Castle", "Lancaster Priory",
+    "Morecambe Bay", "Happy Mount Park", "Stanley Park",
+    # Common POI / brand names people search for
+    "Sainsbury", "Sainsburys", "Sainsbury's",
+    "Tesco", "Asda", "Aldi", "Lidl", "Morrisons", "Morrison",
+    "Nando's", "Nandos", "McDonald's", "McDonalds",
+    "Costa", "Starbucks", "Greggs",
+    "Hospital", "Royal Lancaster Infirmary", "Royal Preston Hospital",
+    "Blackpool Victoria Hospital",
+    "Arndale", "Fishergate", "St George's Shopping Centre",
+    "Houndshill", "Market", "Library", "Cinema", "Park", "Beach",
+]
+
+# Lower-cased version for matching
+_LANCASHIRE_PLACES_LOWER: List[str] = [p.lower() for p in _LANCASHIRE_PLACES]
 
 
-def geocode_locations(query: str, limit: int = 5, county: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Query Nominatim and return candidates.
+def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
+    """Return the best fuzzy match from the known-places list.
 
-    If `county` is provided the results are filtered to items whose
-    address contains the county string (case-insensitive). When a
-    county is requested the lookup is also restricted to countrycode
-    'gb' to improve relevance for Lancashire-like counties.
+    If the query (or any individual word ≥ 4 chars) closely matches a
+    known place/POI, return the corrected version. Otherwise return the
+    original query unchanged.
+    """
+    from difflib import SequenceMatcher, get_close_matches
+
+    q = query.strip()
+    q_lower = q.lower()
+
+    # 1) Try matching the full query against known places
+    matches = get_close_matches(q_lower, _LANCASHIRE_PLACES_LOWER, n=1, cutoff=threshold)
+    if matches:
+        # Return the original-case version from the canonical list
+        idx = _LANCASHIRE_PLACES_LOWER.index(matches[0])
+        return _LANCASHIRE_PLACES[idx]
+
+    # 2) Try matching individual words (for multi-word queries like
+    #    "Lancster University" → correct "Lancster" → "Lancaster")
+    words = q.split()
+    corrected_words = []
+    changed = False
+    for word in words:
+        if len(word) < 4:
+            corrected_words.append(word)
+            continue
+        word_matches = get_close_matches(
+            word.lower(), _LANCASHIRE_PLACES_LOWER, n=1, cutoff=threshold
+        )
+        if word_matches:
+            idx = _LANCASHIRE_PLACES_LOWER.index(word_matches[0])
+            corrected_words.append(_LANCASHIRE_PLACES[idx])
+            changed = True
+        else:
+            corrected_words.append(word)
+    if changed:
+        return " ".join(corrected_words)
+
+    return q
+
+
+def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
+    """Query Nominatim and return candidates filtered to Lancashire.
+
+    Results are restricted to ``countrycodes=gb`` and filtered so that
+    only items whose address contains the county string are returned.
+    The county is also appended to the Nominatim query to bias results
+    toward the correct region (helps for brand / POI searches).
+
+    A fuzzy-correction step maps common typos (e.g. "Lancster",
+    "Blackpol") to known Lancashire place names before sending the
+    query to Nominatim.
     """
     if not query or limit <= 0:
         return []
 
-    params = {"format": "json", "q": query, "limit": str(limit), "addressdetails": "1"}
-    skip_county_filter = False
-    # Special-case short/brand queries (e.g. 'Morrisons'): if a county
-    # is supplied, append the county to the query so Nominatim returns
-    # localised store results, and skip the later strict address
-    # substring filtering which can be over-strict for POIs.
-    if county and query.strip().lower() == "morrisons":
-        params["q"] = f"{query} {county}"
-        skip_county_filter = True
+    # Fuzzy-correct the query against known Lancashire places / POIs
+    corrected = _fuzzy_correct_query(query)
+
+    # When a county is provided, always append it to the query so
+    # Nominatim returns geographically relevant results. This works
+    # well for place names ("Lancaster Lancashire") and brands alike
+    # ("Sainsbury Lancashire"). We ask Nominatim for extra results and
+    # then do a lenient post-filter to trim any outliers.
+    effective_query = corrected
+    if county:
+        # Only append if the user hasn't already included the county
+        if county.lower() not in corrected.lower():
+            effective_query = f"{corrected} {county}"
+
+    nominatim_limit = limit * 3 if county else limit  # over-fetch for filtering
+    params = {
+        "format": "json",
+        "q": effective_query,
+        "limit": str(nominatim_limit),
+        "addressdetails": "1",
+    }
 
     if county:
         # Prefer UK results when a UK county is requested
@@ -205,27 +307,32 @@ def geocode_locations(query: str, limit: int = 5, county: Optional[str] = None) 
         except (TypeError, ValueError):
             continue
 
-        # If county filtering requested, prefer entries where the
-        # address has a matching county/state value or display_name
-        if county and not skip_county_filter:
+        # Lenient county post-filter: check county, state_district,
+        # display_name and all address values for the county string.
+        # This catches unitary authorities (Blackpool, Lancaster)
+        # whose Nominatim `county` field differs from "Lancashire"
+        # but whose `state_district` is "Lancashire".
+        if county:
             addr = item.get("address", {}) or {}
-            # Build a combined string of all address fields to increase
-            # the chance of matching counties which may appear in
-            # different address components (city, town, state, county).
-            addr_combined = " ".join([str(v) for v in addr.values() if v]).lower()
-            if county.lower() not in addr_combined and county.lower() not in (item.get("display_name") or "").lower():
-                # Skip non-matching items
+            display = (item.get("display_name") or "").lower()
+            addr_combined = " ".join(
+                str(v) for v in addr.values() if v
+            ).lower()
+            county_lc = county.lower()
+            if county_lc not in addr_combined and county_lc not in display:
                 continue
 
         name = item.get("display_name") or item.get("name") or query
         results.append({
-            "id": f"loc:{idx}",
+            "id": f"loc:{len(results)}",
             "name": name,
             "lat": lat,
             "lon": lon,
             "atco_code": None,
             "type": "location",
         })
+        if len(results) >= limit:
+            break
     return results
 
 
@@ -268,13 +375,12 @@ async def search_stops(
         )
 
     try:
-        loader = _base_cache["loader"]
-        stop_results = loader.search_stops(q, limit if not classification else limit * 3)
-        for stop in stop_results:
-            stop["type"] = "stop"
-        
-        # Apply classification filter when requested
+        # Classification filter still uses stop DB
         if classification:
+            loader = _base_cache["loader"]
+            stop_results = loader.search_stops(q, limit * 3)
+            for stop in stop_results:
+                stop["type"] = "stop"
             lookup = _get_classification_lookup()
             filtered = []
             for stop in stop_results:
@@ -287,15 +393,13 @@ async def search_stops(
                     break
             return filtered
 
-        remaining = max(0, limit - len(stop_results))
+        # Default: return only geocoded locations (Lancashire)
         location_results = []
-        if remaining > 0:
-            try:
-                location_results = geocode_locations(
-                    q, remaining, county="Lancashire")
-            except Exception as exc:
-                logger.warning("Geocoding lookup failed: %s", exc)
-        return stop_results + location_results
+        try:
+            location_results = geocode_locations(q, limit)
+        except Exception as exc:
+            logger.warning("Geocoding lookup failed: %s", exc)
+        return location_results
     except Exception as exc:
         return JSONResponse(
             status_code=500,

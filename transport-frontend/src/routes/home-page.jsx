@@ -110,8 +110,8 @@ export default function HomePage() {
   const [selectedToStop, setSelectedToStop] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
-  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation);
-  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation);
+  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 300);
+  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: departures, loading: departuresLoading } = useLiveDepartures("LAN");
@@ -516,6 +516,7 @@ export default function HomePage() {
               <Autocomplete
                 fullWidth
                 freeSolo
+                filterOptions={(x) => x}
                 options={allStops.from}
                 getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
                 value={selectedFromStop}
@@ -583,6 +584,7 @@ export default function HomePage() {
               <Autocomplete
                 fullWidth
                 freeSolo
+                filterOptions={(x) => x}
                 options={allStops.to}
                 getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
                 value={selectedToStop}
