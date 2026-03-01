@@ -16,7 +16,7 @@ This document contains the full, actionable task list (19 items) with implementa
 ## High Priority
 - [x] Strange ui problem when you zoom on a map only busees in this specifc are showen(filter problem), all other ones dissapear
 - [?] add to frontend ui numbers of busses (implented in backend)
-- [ ] Circle bar for time when data will be updated for busses ( get read of loading btw make it more nice)
+- [x] Circle bar for time when data will be updated for busses ✅ *(countdown ring on map top-right; overlay removed from background refreshes — 2026-03-02)*
 - [x] fix routing 
 - [x] walking transfers?
 - [ ] implement fronterd for routing 
@@ -28,11 +28,12 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] Align search UI and map on the same page; prioritize map locations.
  - [x] Review mock FastAPI frontend (`api.py`, http://localhost:5050) for integration cues.
 - [x] Implement `/journey/plan` endpoint with `routeGeometries`.
-- [x] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend.
-- [~] **P2:** Implement 6 missing backend endpoints called by frontend (rail, ~~weather~~, alerts, pricing, bus times, bus arrivals). *(weather done; rail, alerts, pricing, bus times, bus arrivals still missing)*
+- [x] **P1:** Fix `API_BASE_URL` — hardcoded to external host, frontend never hits local backend. ✅ *(VITE_API_BASE_URL env var; defaults to http://localhost:5050)*
+- [~] **P2:** Implement 6 missing backend endpoints called by frontend (~~rail~~, ~~weather~~, alerts, pricing, bus times, bus arrivals). *(weather ✅ SCC proxy; rail, alerts, pricing, bus times, bus arrivals still 404)*
+- [x] **Schema audit (2026-03-02):** Documented all api.py endpoint schemas; fixed `mode`→`type` normalisation in `getJourneyPlans()` (backend uses `mode:"walking"`, UI needs `type:"walk"`); fixed weather test mocks to match real OpenWeatherMap proxy shape. 86 tests, 100% pass. ✅
 
 ## Medium Priority
-- [ ] Refresh only map for live locations, not the whole page
+- [ ] Refresh only map for live locations, not the whole page *(in progress — see fix_plan.md line 35)*
 - [ ] Delay handling for bus
 - [ ] Delay handling for train
 - [ ] Widden searchbar, allow location text shown in one line
@@ -45,10 +46,10 @@ This document contains the full, actionable task list (19 items) with implementa
 - [x] ~~Ensure multi-leg route geometry export for map polylines.~~ **[Anton]** ✅
 - [x] ~~Add station classification (P27) and filtering (P28).~~ **[Anton]** ✅
 - [x] ~~Add OSRM integration with walking fallback.~~ **[Anton]** ✅
-- [x] ~~Update frontend services and hooks to match API responses.~~ **[Jamie]** ✅ *(transportApi.js uses VITE_API_BASE_URL, calls correct endpoints for search/journey/bus/weather; some endpoints still missing backend handlers)*
+- [x] ~~Update frontend services and hooks to match API responses.~~ **[Jamie]** ✅ *(transportApi.js uses VITE_API_BASE_URL; mode→type leg normalisation added 2026-03-02; weather mock corrected; 86 tests pass)*
 - [~] Add developer docs and Docker compose. **[Jamie]** *(READMEs and Dockerfile exist; docker-compose.yml still missing)*
-- [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`).
-- [x] **P5:** Fix `/journey/plan` error response — returns `null` arrays instead of `[]`/`{}`, will crash frontend `.map()`.
+- [x] **P3:** Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from `GET /bus/live/{operator}`). ✅
+- [x] **P5:** Fix `/journey/plan` error response — `null` arrays → `[]`/`{}` via `??=` null guards in `getJourneyPlans()`. ✅
 - [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173). *(not implemented — still hardcoded in api.py)*
 
 ## Low Priority
@@ -69,38 +70,31 @@ This document contains the full, actionable task list (19 items) with implementa
 
 ## Known Problems (from integration review 2026-02-19)
 
-### P1 — API_BASE_URL hardcoded to external host (BLOCKING)
+### P1 — API_BASE_URL hardcoded to external host ✅ RESOLVED
 - **File:** `transport-frontend/src/services/transportApi.js`
-- **Problem:** `API_BASE_URL` is `https://transport.scc.lancs.ac.uk`. The React frontend never hits `localhost:8000` during local dev. All calls go to the university server.
-- **Fix:** Switch to an env variable (`VITE_API_BASE_URL`) with a `.env` default of `http://localhost:5050`, or configure a Vite proxy.
+- ~~**Problem:** `API_BASE_URL` is `https://transport.scc.lancs.ac.uk`.~~
+- **Resolution:** `VITE_API_BASE_URL` env variable; `.env` defaults to `http://localhost:5050`, `.env.production` sets the SCC URL. All tests pass.
 
-### P2 — 6 frontend endpoints have no backend implementation
+### P2 — Frontend endpoints missing backend implementation (5 remaining)
 The frontend calls these endpoints, but `api.py` does not define them. They will 404.
 
-| Frontend function        | Missing endpoint               | Owner |
-|--------------------------|---------------------------------|-------|
-| `fetchRailDepartures()`  | `GET /rail/departures/{station}`| John  |
-| `fetchWeatherData()`     | `GET /weather?lat=&lon=`        | John  |
-| `fetchServiceAlerts()`   | `GET /alerts`                   | John  |
-| `fetchPricing()`         | `GET /pricing?from=&to=`        | John  |
-| `fetchBusTimes()`        | `GET /bus/times/{stopCode}`     | —     |
-| `fetchBusArrivals()`     | `GET /bus/arrivals/{stopCode}`  | —     |
+| Frontend function        | Missing endpoint                | Status | Owner |
+|--------------------------|----------------------------------|--------|-------|
+| `fetchRailDepartures()`  | `GET /rail/departures/{station}` | ❌ 404 | John  |
+| `fetchWeatherData()`     | `GET /weather?lat=&lon=`         | ✅ Done (SCC proxy; returns `{weather:[],wind,main}`) | — |
+| `fetchServiceAlerts()`   | `GET /alerts`                    | ❌ 404 | John  |
+| `fetchPricing()`         | `GET /pricing?from=&to=`         | ❌ 404 | John  |
+| `fetchBusTimes()`        | `GET /bus/times/{stopCode}`      | ❌ 404 | —     |
+| `fetchBusArrivals()`     | `GET /bus/arrivals/{stopCode}`   | ❌ 404 | —     |
 
-### P3 — Duplicate bus live endpoints (confusion risk)
-- `POST /api/bus_live` — used only by the mock HTML frontend (`index.html`).
-- `GET /bus/live/{operator}` — used by the React frontend.
-- **Risk:** New developers may call the wrong one. The `POST` endpoint returns a different response shape (`line_ref`/`latitude`/`longitude` vs `line`/`lat`/`lon`).
-- **Fix:** Deprecate or remove `POST /api/bus_live` once the mock frontend is no longer needed, or add a clear docstring warning.
+### P3 — Duplicate bus live endpoints ✅ RESOLVED
+- `POST /api/bus_live` removed. All consumers use `GET /bus/live/{operator}?lat=&lon=` → `[{line, destination, lat, lon, operator}]`.
 
-### P4 — `routeGeometries` uses `[lat, lon]`, not GeoJSON `[lon, lat]`
-- **File:** `transport-backend/api.py` → `build_journey_plan_response()`
-- **Problem:** Leaflet and most map libraries expect `[lat, lon]` for `L.polyline`, so this actually works. But GeoJSON spec uses `[lon, lat]`. If the frontend ever switches to GeoJSON-based rendering this will break silently.
-- **Fix:** Document clearly in `INTEGRATION_SCHEMAS.md` (done). Add a comment in `api.py`.
+### P4 — `routeGeometries` coord order ✅ RESOLVED
+- Documented in `INTEGRATION_SCHEMAS.md` and `AGENT.md`. `coords` arrays use `[lat, lon]` (Leaflet-compatible, NOT GeoJSON). Comments added in `api.py`.
 
-### P5 — `/journey/plan` error response has `null` arrays
-- When the router fails, `legs`, `meta`, and `routeGeometries` are all `null` (not empty arrays/objects).
-- **Risk:** Frontend code doing `result.legs.map(...)` will throw `TypeError: Cannot read properties of null`.
-- **Fix:** Either return `[]`/`{}` from the backend, or add null guards in the frontend hooks (`useJourneyPlans`).
+### P5 — `/journey/plan` error response has `null` arrays ✅ RESOLVED
+- `getJourneyPlans()` uses `??=` null guards: `legs ??= []`, `meta ??= {}`, `routeGeometries ??= []`. Frontend `.map()` calls are safe.
 
 ### P6 — No environment-based CORS configuration
 - **File:** `transport-backend/api.py`
@@ -148,9 +142,9 @@ Focus: Connecting the frontend to the new backend, docs, and hardening.
 
 | # | Task | Priority |
 |---|------|----------|
-| P1 | Fix `API_BASE_URL` — switch to `VITE_API_BASE_URL` env variable (BLOCKING) | **High** |
+| P1 | ~~Fix `API_BASE_URL` — switch to `VITE_API_BASE_URL` env variable~~ ✅ | ~~High~~ |
 | P6 | Make CORS origins env-configurable (currently hardcoded) | **Medium** |
-| 15 | Update frontend services and hooks to match API responses | Medium |
+| 15 | ~~Update frontend services and hooks to match API responses~~ ✅ *(mode→type normalisation, weather mock fix, 86 tests)* | ~~Medium~~ |
 | 14 | Add developer docs and Docker compose | Medium |
 | 16 | Harden production config (CORS, auth, rate limits) | Low |
 | 18 | Add analytics and frequent routes endpoint | Low |
@@ -161,6 +155,15 @@ Focus: Connecting the frontend to the new backend, docs, and hardening.
 - Tried to connect backend bus live with frontend but it did not work well. The function takes `latitude` and `longitude` as parameters (current map center). Request: modify frontend to adapt. Note: not familiar with frontend.
 - Search bar should support any location search (ideally with prompt), not just stations. Suggests putting the map on the same page as search bar and prioritizing locations on the map.
 - Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:5050. Note: check overall project in case something changed.
+
+## Session log (2026-03-02)
+- **Schema audit of `api.py`:** Mapped all endpoint request/response shapes; identified two critical mismatches:
+  1. Journey legs backend field is `mode: "walking"/"bus"/"train"` — NOT `type`. Fixed in `getJourneyPlans()` by adding `mode → type` normalisation (`"walking"` → `"walk"`) so UI components reading `leg.type === 'walk'` work correctly.
+  2. `/weather` returns OpenWeatherMap-shaped JSON `{weather:[{main,description,icon}], wind:{speed}, main:{temp,humidity}}` — test mocks were wrong shape. Fixed.
+- **Tests:** 86 frontend tests, 100% pass rate. `transportApi.js` statement coverage 90.66%, branches 75.38%, functions 100%.
+- **Committed:** `chore(api): document mock FastAPI endpoints and integration cues` → pushed to `origin/main`.
+- **AGENT.md updated** with all endpoint payload schemas and gotchas.
+- **Bus update countdown badge (2026-03-02):** `useLiveBusLocations` now distinguishes `loading` (first-load overlay) from `refreshing` (background re-fetch). A circular countdown ring is pinned top-right on the map showing seconds until next refresh; it spins purple while fetching and turns green while counting down. Full white overlay is removed from 30-second background polls — map stays usable. 86 tests, 100% pass.
 
 ---
 

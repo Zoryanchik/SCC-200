@@ -47,15 +47,40 @@ export const useLiveBusLocations = (
   { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
 ) => {
   const [data, setData] = useState([]);
+  // `loading` is true only until the very first fetch completes (initial load).
+  // Subsequent background re-fetches are indicated by `refreshing` instead,
+  // so the map overlay is not shown on every 30-second poll.
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  // Countdown in seconds until the next automatic refresh.
+  const [countdown, setCountdown] = useState(Math.round(refreshInterval / 1000));
+  const initializedRef = useRef(false);
   const debounceRef = useRef(null);
   const intervalRef = useRef(null);
+  const countdownRef = useRef(null);
+
+  // Start a 1 s tick countdown that resets after each fetch.
+  const startCountdown = useCallback((seconds) => {
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    let remaining = seconds;
+    setCountdown(remaining);
+    countdownRef.current = setInterval(() => {
+      remaining -= 1;
+      setCountdown(Math.max(0, remaining));
+      if (remaining <= 0) clearInterval(countdownRef.current);
+    }, 1000);
+  }, []);
 
   const fetchData = useCallback(async (fetchLat, fetchLon) => {
     if (!operatorCode) return;
-    try {
+    const isInitial = !initializedRef.current;
+    if (isInitial) {
       setLoading(true);
+    } else {
+      setRefreshing(true);
+    }
+    try {
       const opts = {};
       if (typeof fetchLat === 'number' && typeof fetchLon === 'number') {
         opts.lat = fetchLat;
@@ -67,30 +92,28 @@ export const useLiveBusLocations = (
       );
       setData(result);
       setError(null);
+      if (isInitial) {
+        initializedRef.current = true;
+        setLoading(false);
+      }
+      // Restart the countdown after every successful fetch.
+      startCountdown(Math.round(refreshInterval / 1000));
     } catch (err) {
       setError(err);
       console.error('Error fetching bus locations:', err);
+      if (isInitial) setLoading(false);
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
-  }, [operatorCode]);
+  }, [operatorCode, refreshInterval, startCountdown]);
 
   // Debounce lat/lon changes, then set up auto-refresh interval
   useEffect(() => {
-    // Clear any pending debounce timer
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-    // Clear any previous refresh interval
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-    }
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (intervalRef.current) clearInterval(intervalRef.current);
 
     debounceRef.current = setTimeout(() => {
-      // Initial fetch after debounce
       fetchData(lat, lon);
-
-      // Set up periodic refresh with the debounced coordinates
       intervalRef.current = setInterval(() => {
         fetchData(lat, lon);
       }, refreshInterval);
@@ -99,12 +122,13 @@ export const useLiveBusLocations = (
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (intervalRef.current) clearInterval(intervalRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
     };
   }, [fetchData, lat, lon, refreshInterval, debounceMs]);
 
   const refetch = useCallback(() => fetchData(lat, lon), [fetchData, lat, lon]);
 
-  return { data, loading, error, refetch };
+  return { data, loading, refreshing, countdown, refreshInterval, error, refetch };
 };
 
 /**

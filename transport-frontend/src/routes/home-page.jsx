@@ -132,7 +132,14 @@ export default function HomePage() {
   }, []);
 
   // Debounced live bus data tied to the current map center
-  const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations("SCCU", {
+  const {
+    data: busLocations,
+    loading: busLoading,
+    refreshing: busRefreshing,
+    countdown: busCountdown,
+    refreshInterval: busRefreshInterval,
+    error: busError,
+  } = useLiveBusLocations("SCCU", {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
     refreshInterval: 30000,
@@ -440,6 +447,9 @@ export default function HomePage() {
               userLocation={null}
               nearestStop={null}
               busLoading={busLoading}
+              busRefreshing={busRefreshing}
+              busCountdown={busCountdown}
+              busRefreshInterval={busRefreshInterval}
               trainLoading={trainLoading}
               onMapReady={setMapInstance}
               onMoveEnd={handleMoveEnd}

@@ -97,9 +97,18 @@ export default function MapViewMap({
 	nearestStop,
 	busLoading,
 	trainLoading,
+	/** seconds until next bus data refresh */
+	busCountdown = 30,
+	/** total refresh period in ms — used to compute ring percentage */
+	busRefreshInterval = 30000,
+	/** true while a background re-fetch is in-flight */
+	busRefreshing = false,
 	onMapReady,
 	onMoveEnd
 }) {
+	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
+	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
+
 	return (
 		<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
 			<Box sx={{
@@ -112,20 +121,85 @@ export default function MapViewMap({
 				borderColor: 'divider',
 				height: { xs: 420, sm: 520, md: '100%' }
 			}}>
+				{/* Full overlay only on the very first load — not on every 30-second refresh */}
 				{(busLoading || trainLoading) && (
 					<Box sx={{
 						position: 'absolute',
 						inset: 0,
 						zIndex: 1000,
-						backgroundColor: 'rgba(255,255,255,0.7)',
+						backgroundColor: 'rgba(255,255,255,0.72)',
 						display: 'flex',
 						alignItems: 'center',
 						justifyContent: 'center'
 					}}>
 						<Stack spacing={1} alignItems="center">
-							<CircularProgress size={28} />
-							<Typography variant="caption" fontWeight={600}>Loading live locations</Typography>
+							<CircularProgress size={32} />
+							<Typography variant="caption" fontWeight={600}>Loading live locations…</Typography>
 						</Stack>
+					</Box>
+				)}
+
+				{/* Countdown ring — always visible after initial load to show next refresh */}
+				{!busLoading && (
+					<Box sx={{
+						position: 'absolute',
+						top: 12,
+						right: 12,
+						zIndex: 1001,
+						display: 'flex',
+						flexDirection: 'column',
+						alignItems: 'center',
+						gap: '4px',
+					}}>
+						{/* Circular progress ring */}
+						<Box sx={{ position: 'relative', display: 'inline-flex' }}>
+							{/* Grey background track */}
+							<CircularProgress
+								variant="determinate"
+								value={100}
+								size={52}
+								thickness={3.5}
+								sx={{ color: 'rgba(0,0,0,0.1)', position: 'absolute', top: 0, left: 0 }}
+							/>
+							{/* Countdown ring — spins when refreshing, counts down otherwise */}
+							<CircularProgress
+								variant={busRefreshing ? 'indeterminate' : 'determinate'}
+								value={busRefreshing ? undefined : ringValue}
+								size={52}
+								thickness={3.5}
+								sx={{ color: busRefreshing ? '#6366F1' : '#10B981', transition: 'color 0.3s' }}
+							/>
+							{/* Centre label */}
+							<Box sx={{
+								position: 'absolute', inset: 0,
+								display: 'flex', alignItems: 'center', justifyContent: 'center',
+								backgroundColor: 'white', borderRadius: '50%',
+								margin: '4px',
+							}}>
+								<Typography
+									variant="caption"
+									fontWeight={700}
+									sx={{ fontSize: '11px', lineHeight: 1, color: busRefreshing ? '#6366F1' : '#374151' }}
+								>
+									{busRefreshing ? '↻' : `${busCountdown}s`}
+								</Typography>
+							</Box>
+						</Box>
+						{/* Label pill below the ring */}
+						<Box sx={{
+							backgroundColor: 'rgba(255,255,255,0.92)',
+							borderRadius: '8px',
+							px: 0.8, py: 0.3,
+							boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
+						}}>
+							<Typography
+								variant="caption"
+								fontWeight={600}
+								sx={{ fontSize: '10px', color: busRefreshing ? '#6366F1' : '#374151', whiteSpace: 'nowrap' }}
+							>
+								{busRefreshing ? 'Updating…' : 'Next update'}
+							</Typography>
+						</Box>
 					</Box>
 				)}
 				{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
