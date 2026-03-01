@@ -21,30 +21,79 @@ import RouteCard from "../components/common/RouteCard";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
-const MOCK_STOPS = [
-  { id: 1, name: "Lancaster Bus Station", code: "LAN001", lat: 54.048, lon: -2.801, type: "stop" },
-  { id: 2, name: "Lancaster Train Station", code: "LAN002", lat: 54.049, lon: -2.807, type: "stop" },
-  { id: 3, name: "Morecambe Bus Station", code: "MOR001", lat: 54.069, lon: -2.869, type: "stop" },
-  { id: 4, name: "Preston Bus Station", code: "PRE001", lat: 53.761, lon: -2.703, type: "stop" },
-  { id: 5, name: "Blackpool North Station", code: "BLK001", lat: 53.816, lon: -3.050, type: "stop" }
-];
+/**
+ * Convert the backend journey-plan response ({success, legs, meta, …})
+ * into a single RouteCard-compatible object ({id, duration, transfers,
+ * steps, walkMinutes}).  Returns null when legs are empty.
+ */
+function journeyToRouteCard(journey) {
+  const legs = journey?.legs;
+  if (!Array.isArray(legs) || legs.length === 0) return null;
 
-const MOCK_ROUTES = [
-  {
-    id: 1, duration: "45 mins", transfers: 1,
-    steps: [
-      { type: "walk", duration: "5 mins", to: "Lancaster Station" },
-      { type: "train", route: "Northern", duration: "30 mins", from: "Lancaster", to: "Preston" },
-      { type: "walk", duration: "10 mins", to: "Destination" }
-    ],
-    price: "5.20"
-  },
-  {
-    id: 2, duration: "38 mins", transfers: 0,
-    steps: [{ type: "bus", route: "2", duration: "38 mins", from: "Lancaster", to: "Destination" }],
-    price: "3.80"
+  // Build step list that RouteCard understands
+  const steps = legs.map((leg) => {
+    const mode = (leg.mode || "walk").toLowerCase();
+    const type = mode === "walking" ? "walk" : mode;
+    const durSec = leg.duration_seconds ?? 0;
+    const durMin = Math.round(durSec / 60);
+
+    const fromName = leg.from_stop?.name || "";
+    const toName = leg.to_stop?.name || "";
+
+    return {
+      type,
+      route: leg.line_name || "",
+      duration: durMin >= 60
+        ? `${Math.floor(durMin / 60)}h ${durMin % 60} mins`
+        : `${durMin} mins`,
+      from: fromName,
+      to: toName,
+      journey_origin: leg.journey_origin || null,
+      journey_destination: leg.journey_destination || null,
+      // keep original times for the time display row in RouteCard
+      departure_time_with_offset: leg.departure_time_with_offset ?? null,
+      arrival_time_with_offset: leg.arrival_time_with_offset ?? null,
+    };
+  });
+
+  // Count transit transfers (non-walk legs minus 1, minimum 0)
+  const transitLegs = steps.filter((s) => s.type !== "walk").length;
+  const transfers = Math.max(0, transitLegs - 1);
+
+  // Total walk minutes
+  const walkMinutes = legs
+    .filter((l) => (l.mode || "").toLowerCase() === "walking")
+    .reduce((sum, l) => sum + Math.round((l.duration_seconds ?? 0) / 60), 0);
+
+  // Overall duration from meta
+  const meta = journey.meta || {};
+  const totalArrival = meta.total_arrival; // "HH:MM:SS"
+  let duration = "";
+  if (totalArrival && legs[0]?.arrival_time) {
+    // Derive total duration from first leg arrival minus walk to that leg
+    // Simpler: use first leg departure → last arrival
+    const startWalk = meta.start_walk_seconds ?? 0;
+    const endWalk = meta.end_walk_seconds ?? 0;
+    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0) + startWalk;
+    const totalMin = Math.round(totalSec / 60);
+    duration = totalMin >= 60
+      ? `${Math.floor(totalMin / 60)}h ${totalMin % 60} mins`
+      : `${totalMin} mins`;
+  } else {
+    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
+    const totalMin = Math.round(totalSec / 60);
+    duration = `${totalMin} mins`;
   }
-];
+
+  return {
+    id: 1,
+    duration,
+    transfers,
+    steps,
+    walkMinutes,
+    price: null, // pricing not yet available
+  };
+}
 
 const MOCK_MARKERS = [
   { id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
@@ -68,7 +117,7 @@ export default function HomePage() {
   const { data: departures, loading: departuresLoading } = useLiveDepartures("LAN");
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
-  const [routes, setRoutes] = useState(MOCK_ROUTES);
+  const [routes, setRoutes] = useState([]);
 
   // ---- Map + live-bus state (merged from map-view-page) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
@@ -264,8 +313,8 @@ export default function HomePage() {
   }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
-    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : MOCK_STOPS;
-    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : MOCK_STOPS;
+    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : [];
+    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : [];
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
@@ -273,11 +322,12 @@ export default function HomePage() {
     if (!fromCoords || !toCoords) return;
     setIsSearching(true);
     try {
-      const journeys = await getJourneyPlans(fromCoords, toCoords, new Date().toISOString());
-      setRoutes(Array.isArray(journeys) ? journeys : []);
+      const journey = await getJourneyPlans(fromCoords, toCoords, new Date().toISOString());
+      const card = journeyToRouteCard(journey);
+      setRoutes(card ? [card] : []);
     } catch (error) {
       console.error("Journey search error:", error);
-      setRoutes(MOCK_ROUTES);
+      setRoutes([]);
     } finally {
       setIsSearching(false);
     }
@@ -447,7 +497,7 @@ export default function HomePage() {
       </Paper>
 
       <Grid container spacing={{ xs: 2, md: 3 }}>
-        <Grid item xs={12} md={6}>
+        <Grid item xs={12} md={8}>
           <Paper
             elevation={0}
             sx={{
@@ -464,6 +514,7 @@ export default function HomePage() {
               </Typography>
 
               <Autocomplete
+                fullWidth
                 freeSolo
                 options={allStops.from}
                 getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
@@ -517,11 +568,20 @@ export default function HomePage() {
                         params.InputProps.endAdornment
                       ),
                     }}
+                    sx={{
+                      "& .MuiOutlinedInput-root": {
+                        "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                        "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                      },
+                      "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                      "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                    }}
                   />
                 )}
               />
 
               <Autocomplete
+                fullWidth
                 freeSolo
                 options={allStops.to}
                 getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
@@ -575,6 +635,14 @@ export default function HomePage() {
                         params.InputProps.endAdornment
                       ),
                     }}
+                    sx={{
+                      "& .MuiOutlinedInput-root": {
+                        "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                        "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                      },
+                      "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                      "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                    }}
                   />
                 )}
               />
@@ -622,7 +690,7 @@ export default function HomePage() {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid item xs={12} md={4}>
           <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, height: "100%" }}>
             <Stack spacing={2}>
               <Stack direction="row" spacing={1} alignItems="center">

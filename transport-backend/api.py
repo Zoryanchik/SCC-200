@@ -291,7 +291,8 @@ async def search_stops(
         location_results = []
         if remaining > 0:
             try:
-                location_results = geocode_locations(q, remaining)
+                location_results = geocode_locations(
+                    q, remaining, county="Lancashire")
             except Exception as exc:
                 logger.warning("Geocoding lookup failed: %s", exc)
         return stop_results + location_results

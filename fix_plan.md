@@ -32,6 +32,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [~] **P2:** Implement 6 missing backend endpoints called by frontend (rail, ~~weather~~, alerts, pricing, bus times, bus arrivals). *(weather done; rail, alerts, pricing, bus times, bus arrivals still missing)*
 
 ## Medium Priority
+- [ ] Widden searchbar, allow location text shown in one line
 - [ ] Implement `/rail/departures/{station}` endpoint. *(not implemented)*
 - [ ] Implement timetable/bus filtering 
 - [ ] 

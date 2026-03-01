@@ -76,22 +76,43 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               {step.type === "walk" && <MapPin size={18} color="#6b7280" style={{ marginTop: 2 }} />}
               {step.type === "bus" && <Bus size={18} color="#1976d2" style={{ marginTop: 2 }} />}
               {step.type === "train" && <Train size={18} color="#2e7d32" style={{ marginTop: 2 }} />}
-              <Box>
-                <Typography fontWeight={700} textTransform="capitalize" variant="body2">
-                  {step.type}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {step.route ? `${step.route} - ` : ""}
-                  {step.duration}
-                  {step.from ? ` from ${step.from}` : ""}
-                  {step.to ? ` to ${step.to}` : ""}
-                </Typography>
-                {/* Display times when provided by the journey planner (with day offsets) */}
+              <Box sx={{ flex: 1 }}>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                  <Typography fontWeight={700} textTransform="capitalize" variant="body2">
+                    {step.type}
+                  </Typography>
+                  {step.route ? (
+                    <Typography variant="body2" fontWeight={600} color="primary" component="span">
+                      Line {step.route}
+                    </Typography>
+                  ) : null}
+                  <Typography variant="body2" color="text.secondary" component="span">
+                    {step.duration}
+                  </Typography>
+                </Stack>
+
+                {/* From → To */}
+                {(step.from || step.to) && (
+                  <Typography variant="body2" sx={{ mt: 0.25 }}>
+                    {step.from ? <>{step.from}</> : null}
+                    {step.from && step.to ? " → " : ""}
+                    {step.to ? <>{step.to}</> : null}
+                  </Typography>
+                )}
+
+                {/* Service origin → destination (for transit legs) */}
+                {(step.journey_origin || step.journey_destination) && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+                    Service: {step.journey_origin || "?"} → {step.journey_destination || "?"}
+                  </Typography>
+                )}
+
+                {/* Departure / Arrival times */}
                 {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
-                  <Typography variant="caption" color="text.secondary" data-testid={`step-time-${idx}`}>
-                    {step.departure_time_with_offset ? `Dep: ${step.departure_time_with_offset}` : ""}
-                    {step.departure_time_with_offset && step.arrival_time_with_offset ? ' • ' : ''}
-                    {step.arrival_time_with_offset ? `Arr: ${step.arrival_time_with_offset}` : ""}
+                  <Typography variant="caption" fontWeight={500} color="text.secondary" data-testid={`step-time-${idx}`} sx={{ display: "block", mt: 0.25 }}>
+                    {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ""}
+                    {step.departure_time_with_offset && step.arrival_time_with_offset ? "  •  " : ""}
+                    {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ""}
                   </Typography>
                 )}
               </Box>

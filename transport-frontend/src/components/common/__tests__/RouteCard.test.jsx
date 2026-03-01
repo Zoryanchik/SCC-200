@@ -34,9 +34,9 @@ describe('RouteCard', () => {
     const firstStepTime = screen.queryByTestId('step-time-0');
     const secondStepTime = screen.queryByTestId('step-time-1');
     expect(firstStepTime).toBeTruthy();
-    expect(firstStepTime.textContent).toContain('Arr: 10:02:00');
+    expect(firstStepTime.textContent).toContain('Arr 10:02:00');
     expect(secondStepTime).toBeTruthy();
-    expect(secondStepTime.textContent).toContain('Dep: 10:05:00');
-    expect(secondStepTime.textContent).toContain('Arr: 10:35:00');
+    expect(secondStepTime.textContent).toContain('Dep 10:05:00');
+    expect(secondStepTime.textContent).toContain('Arr 10:35:00');
   });
 });

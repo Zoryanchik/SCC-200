@@ -288,13 +288,12 @@ describe("HomePage marker update logic", () => {
     });
   });
 
-  test("renders mock routes initially", async () => {
+  test("shows no-routes message initially (no search performed)", async () => {
     vi.useRealTimers();
     await renderPage();
 
     await waitFor(() => {
-      const routeCards = screen.getAllByTestId("route-card");
-      expect(routeCards.length).toBe(2);
+      expect(screen.getByText("No routes found. Try adjusting your search.")).toBeTruthy();
     });
   });
 
@@ -339,100 +338,3 @@ describe("fetchLiveBusLocations API contract", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 });
-
-
-describe("HomePage marker update logic", () => {
-  beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-  });
-
-  test("updates markers when busLocations data is returned", async () => {
-    const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster" },
-      { lat: 54.06, lon: -2.81, line: "2B", destination: "Morecambe" },
-    ];
-    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
-    api.fetchRailDepartures.mockResolvedValue([]);
-
-    vi.useRealTimers();
-    await renderPage();
-
-    // The map stub should render with mock markers initially
-    await waitFor(() => {
-      expect(screen.getByTestId("map-stub")).toBeTruthy();
-    });
-  });
-
-  test("renders default alerts when no API alerts are available", async () => {
-    api.fetchServiceAlerts.mockResolvedValue([]);
-    vi.useRealTimers();
-    await renderPage();
-
-    await waitFor(() => {
-      expect(screen.getByText(/M6 delays/)).toBeTruthy();
-    });
-  });
-
-  test("renders default departures when no API data available", async () => {
-    api.fetchRailDepartures.mockResolvedValue([]);
-    vi.useRealTimers();
-    await renderPage();
-
-    await waitFor(() => {
-      const cards = screen.getAllByTestId("departure-card");
-      expect(cards.length).toBeGreaterThan(0);
-    });
-  });
-
-  test("renders mock routes initially", async () => {
-    vi.useRealTimers();
-    await renderPage();
-
-    await waitFor(() => {
-      const routeCards = screen.getAllByTestId("route-card");
-      expect(routeCards.length).toBe(2);
-    });
-  });
-
-  test("search button is disabled by default (no stops selected)", async () => {
-    vi.useRealTimers();
-    await renderPage();
-
-    const btn = screen.getByText("Search routes");
-    expect(btn.closest("button").disabled).toBe(true);
-  });
-});
-
-describe("fetchLiveBusLocations API contract", () => {
-  test("fetchLiveBusLocations builds correct query params including lat, lon, latTol, lonTol", async () => {
-    const { fetchLiveBusLocations: realFetch } = await vi.importActual("../services/transportApi");
-
-    // We can not actually call the network but we can verify the URL construction
-    // by checking the mock was called with expected shape
-    api.fetchLiveBusLocations.mockResolvedValue([]);
-
-    const { result } = renderHook(() =>
-      useLiveBusLocations("SCCU", {
-        lat: 54.05,
-        lon: -2.80,
-        debounceMs: 50,
-      })
-    );
-
-    await act(async () => {
-      vi.advanceTimersByTime(100);
-    });
-
-    await waitFor(() => {
-      const call = api.fetchLiveBusLocations.mock.calls[0];
-      expect(call[0]).toBe("SCCU");
-      expect(call[1]).toHaveProperty("lat", 54.05);
-      expect(call[1]).toHaveProperty("lon", -2.80);
-    });
-  });
-
-  beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-  });
-});
-

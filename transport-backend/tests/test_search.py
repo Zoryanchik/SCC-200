@@ -56,10 +56,30 @@ SAMPLE_STOPS = [
 
 
 def _mock_search(query, limit=10):
-    """Simulate BusLoader.search_stops  case-insensitive substring match."""
+    """Simulate BusLoader.search_stops with fuzzy matching.
+
+    First returns exact substring matches, then supplements with
+    difflib fuzzy matches (mirroring the real implementation).
+    """
+    from difflib import SequenceMatcher
     q = query.lower()
-    results = [s for s in SAMPLE_STOPS if q in s["name"].lower()]
-    return results[:limit]
+    # Exact substring matches first
+    exact = [s for s in SAMPLE_STOPS if q in s["name"].lower()]
+    if len(exact) >= limit:
+        return exact[:limit]
+    # Fuzzy supplement
+    exact_codes = {s["atco_code"] for s in exact}
+    remaining = limit - len(exact)
+    scored = []
+    for s in SAMPLE_STOPS:
+        if s["atco_code"] in exact_codes:
+            continue
+        ratio = SequenceMatcher(None, q, s["name"].lower()).ratio()
+        if ratio > 0.45:
+            scored.append((ratio, s))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    fuzzy = [s for _, s in scored[:remaining]]
+    return exact + fuzzy
 
 
 @pytest.fixture()
@@ -145,7 +165,7 @@ class TestSearchStopsEndpoint:
 
         data = response.json()
         assert data == locations
-        geocode_mock.assert_called_once_with("lancaster", 3)
+        geocode_mock.assert_called_once_with("lancaster", 3, county="Lancashire")
 
     def test_search_respects_limit(self, client: TestClient):
         """Limit parameter caps the number of results returned."""
@@ -189,6 +209,18 @@ class TestSearchStopsEndpoint:
         names = {s["name"] for s in data}
         assert "Lancaster Bus Station" in names
         assert "Lancaster University" in names
+
+    def test_search_fuzzy_matches_typo(self, client: TestClient):
+        """Fuzzy search should find stops even with typos."""
+        mock_loader = MagicMock()
+        mock_loader.search_stops.side_effect = _mock_search
+        api_module._base_cache = {"loader": mock_loader}
+
+        # "lancster" is a typo for "Lancaster" — should still find matches
+        response = client.get("/search/stops", params={"q": "lancster"})
+        data = response.json()
+        names = {s["name"] for s in data}
+        assert "Lancaster Bus Station" in names or "Lancaster University" in names
 
     def test_search_default_limit_is_10(self, client: TestClient):
         """When limit is not provided, default should be 10."""

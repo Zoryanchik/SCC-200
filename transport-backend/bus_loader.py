@@ -863,37 +863,86 @@ class BusLoader:
         return count
 
     def search_stops(self, query, limit=10):
-        """Search for stops by name (case-insensitive substring match).
+        """Search for stops by name with fuzzy matching.
 
-        Joins stop_names and stop_coords tables to return results with
-        coordinates.  Returns a list of dicts with keys:
-        id, name, atco_code, lat, lon.
+        First tries an exact substring match (ILIKE).  When that
+        returns fewer than *limit* results, a trigram similarity
+        search supplements the list — so typos like "lancstr" still
+        find "Lancaster Bus Station".
+
+        Falls back to Python-side fuzzy scoring when the Postgres
+        ``pg_trgm`` extension is unavailable.
 
         Args:
-            query: substring to search for in common_name
+            query: search string (substring or approximate name)
             limit: maximum number of results to return
 
         Returns:
-            list[dict]: matching stops
+            list[dict]: matching stops with id, name, atco_code, lat, lon
         """
         if not query:
             return []
-        # 1) Query stop names from the bus DB
+
         conn = self._connect(self.db_path)
         cur = conn.cursor()
+
+        # --- 1) exact ILIKE substring match (fast, no extension needed) ---
         cur.execute(
-            "SELECT atco_code, common_name FROM bus_stop_names WHERE LOWER(common_name) LIKE LOWER(%s) LIMIT %s",
+            "SELECT atco_code, common_name FROM bus_stop_names "
+            "WHERE LOWER(common_name) LIKE LOWER(%s) LIMIT %s",
             (f"%{query}%", limit),
         )
-        rows = cur.fetchall()
+        exact_rows = cur.fetchall()
+
+        # --- 2) fuzzy supplement when exact results are sparse ----------
+        fuzzy_rows = []
+        if len(exact_rows) < limit:
+            remaining = limit - len(exact_rows)
+            exact_atcos = {r[0] for r in exact_rows}
+            try:
+                # Try pg_trgm similarity (fast, server-side)
+                cur.execute(
+                    "SELECT atco_code, common_name, "
+                    "similarity(LOWER(common_name), LOWER(%s)) AS sim "
+                    "FROM bus_stop_names "
+                    "WHERE similarity(LOWER(common_name), LOWER(%s)) > 0.15 "
+                    "ORDER BY sim DESC LIMIT %s",
+                    (query, query, remaining + len(exact_rows)),
+                )
+                for atco, name, _sim in cur.fetchall():
+                    if atco not in exact_atcos:
+                        fuzzy_rows.append((atco, name))
+                        if len(fuzzy_rows) >= remaining:
+                            break
+            except Exception:
+                # pg_trgm not available — fall back to Python difflib
+                conn.rollback()
+                cur.execute(
+                    "SELECT atco_code, common_name FROM bus_stop_names"
+                )
+                all_rows = cur.fetchall()
+                from difflib import SequenceMatcher
+                q_lower = query.lower()
+                scored = []
+                for atco, name in all_rows:
+                    if atco in exact_atcos:
+                        continue
+                    ratio = SequenceMatcher(None, q_lower, name.lower()).ratio()
+                    if ratio > 0.45:
+                        scored.append((ratio, atco, name))
+                scored.sort(key=lambda t: t[0], reverse=True)
+                fuzzy_rows = [(atco, name) for _, atco, name in scored[:remaining]]
+
         conn.close()
+
+        rows = list(exact_rows) + fuzzy_rows
 
         if not rows:
             return []
 
         atcos = [r[0] for r in rows]
 
-        # 2) Fetch coordinates from the walking DB if available, else fall back to no-coords
+        # Fetch coordinates from the walking DB if available
         coords_map = {}
         wdb = self.walking_db_path
         if wdb:
