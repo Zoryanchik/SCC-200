@@ -32,6 +32,7 @@ This document contains the full, actionable task list (19 items) with implementa
 - [~] **P2:** Implement 6 missing backend endpoints called by frontend (rail, ~~weather~~, alerts, pricing, bus times, bus arrivals). *(weather done; rail, alerts, pricing, bus times, bus arrivals still missing)*
 
 ## Medium Priority
+- [ ] Refresh only map for live locations, not the whole page
 - [ ] Delay handling for bus
 - [ ] Delay handling for train
 - [ ] Widden searchbar, allow location text shown in one line
