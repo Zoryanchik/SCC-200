@@ -4,7 +4,6 @@ Validates stop search with mocked BusLoader data and geocoding
 with mocked urlopen — no real filesystem, database, or network
 access required.
 """
-import io
 import json
 import sys
 import os
@@ -331,29 +330,25 @@ class TestSearchStopsEndpoint:
 # ── geocode_locations unit tests ──────────────────────────────────────────────
 
 
-def _make_nominatim_response(items):
-    """Create a mock urlopen context-manager returning Nominatim-style JSON."""
-    body = json.dumps(items).encode("utf-8")
-    buf = io.BytesIO(body)
-    buf.read_orig = buf.read
-
-    ctx = MagicMock()
-    ctx.__enter__ = MagicMock(return_value=buf)
-    ctx.__exit__ = MagicMock(return_value=False)
-    return ctx
+def _make_requests_response(items):
+    """Create a mock requests.Response returning Nominatim-style JSON."""
+    resp = MagicMock()
+    resp.json.return_value = items
+    resp.raise_for_status = MagicMock()
+    return resp
 
 
 class TestGeocodeLocations:
     """Unit tests for the geocode_locations helper function."""
 
-    @patch("api.urlopen")
-    def test_returns_locations_from_nominatim(self, mock_urlopen):
+    @patch("requests.get")
+    def test_returns_locations_from_nominatim(self, mock_get):
         """Nominatim results are converted to {id, name, lat, lon, atco_code, type}."""
         nominatim_data = [
             {"lat": "54.047", "lon": "-2.801", "display_name": "Lancaster, UK"},
             {"lat": "51.509", "lon": "-0.118", "display_name": "London, UK"},
         ]
-        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+        mock_get.return_value = _make_requests_response(nominatim_data)
 
         results = api_module.geocode_locations("Lancaster", limit=5)
 
@@ -366,95 +361,95 @@ class TestGeocodeLocations:
         assert results[0]["id"] == "loc:0"
         assert results[1]["id"] == "loc:1"
 
-    @patch("api.urlopen")
-    def test_empty_query_returns_empty(self, mock_urlopen):
+    @patch("requests.get")
+    def test_empty_query_returns_empty(self, mock_get):
         """An empty query string should return [] without calling the API."""
         results = api_module.geocode_locations("", limit=5)
         assert results == []
-        mock_urlopen.assert_not_called()
+        mock_get.assert_not_called()
 
-    @patch("api.urlopen")
-    def test_zero_limit_returns_empty(self, mock_urlopen):
+    @patch("requests.get")
+    def test_zero_limit_returns_empty(self, mock_get):
         """limit=0 should return [] without calling the API."""
         results = api_module.geocode_locations("test", limit=0)
         assert results == []
-        mock_urlopen.assert_not_called()
+        mock_get.assert_not_called()
 
-    @patch("api.urlopen")
-    def test_negative_limit_returns_empty(self, mock_urlopen):
+    @patch("requests.get")
+    def test_negative_limit_returns_empty(self, mock_get):
         """Negative limit should return [] without calling the API."""
         results = api_module.geocode_locations("test", limit=-1)
         assert results == []
-        mock_urlopen.assert_not_called()
+        mock_get.assert_not_called()
 
-    @patch("api.urlopen")
-    def test_skips_entries_with_invalid_coords(self, mock_urlopen):
+    @patch("requests.get")
+    def test_skips_entries_with_invalid_coords(self, mock_get):
         """Entries with non-numeric lat/lon should be skipped."""
         nominatim_data = [
             {"lat": "not-a-number", "lon": "-2.0", "display_name": "Bad"},
             {"lat": "54.0", "lon": "-2.0", "display_name": "Good"},
         ]
-        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+        mock_get.return_value = _make_requests_response(nominatim_data)
 
         results = api_module.geocode_locations("test", limit=5)
         assert len(results) == 1
         assert results[0]["name"] == "Good"
 
-    @patch("api.urlopen")
-    def test_falls_back_to_query_when_no_name(self, mock_urlopen):
+    @patch("requests.get")
+    def test_falls_back_to_query_when_no_name(self, mock_get):
         """If Nominatim provides no display_name/name, use the query string."""
         nominatim_data = [{"lat": "54.0", "lon": "-2.0"}]
-        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+        mock_get.return_value = _make_requests_response(nominatim_data)
 
         results = api_module.geocode_locations("my query", limit=5)
         assert len(results) == 1
         assert results[0]["name"] == "my query"
 
-    @patch("api.urlopen")
-    def test_uses_name_field_when_display_name_missing(self, mock_urlopen):
+    @patch("requests.get")
+    def test_uses_name_field_when_display_name_missing(self, mock_get):
         """fallback to 'name' field if 'display_name' is absent."""
         nominatim_data = [
             {"lat": "54.0", "lon": "-2.0", "name": "Short Name"}
         ]
-        mock_urlopen.return_value = _make_nominatim_response(nominatim_data)
+        mock_get.return_value = _make_requests_response(nominatim_data)
 
         results = api_module.geocode_locations("q", limit=5)
         assert results[0]["name"] == "Short Name"
 
-    @patch("api.urlopen")
-    def test_api_timeout_propagates(self, mock_urlopen):
+    @patch("requests.get")
+    def test_api_timeout_propagates(self, mock_get):
         """Network errors should propagate to the caller."""
-        mock_urlopen.side_effect = Exception("Connection timed out")
+        mock_get.side_effect = Exception("Connection timed out")
 
         with pytest.raises(Exception, match="Connection timed out"):
             api_module.geocode_locations("Lancaster", limit=5)
 
-    @patch("api.urlopen")
-    def test_respects_limit_in_url(self, mock_urlopen):
+    @patch("requests.get")
+    def test_respects_limit_in_url(self, mock_get):
         """The limit parameter should be passed to the Nominatim URL."""
-        mock_urlopen.return_value = _make_nominatim_response([])
+        mock_get.return_value = _make_requests_response([])
 
         api_module.geocode_locations("test", limit=3)
 
-        call_args = mock_urlopen.call_args
-        request_obj = call_args[0][0]
-        assert "limit=3" in request_obj.full_url
+        call_args = mock_get.call_args
+        url = call_args[0][0]  # first positional arg is the URL
+        assert "limit=3" in url
 
-    @patch("api.urlopen")
-    def test_user_agent_header_set(self, mock_urlopen):
+    @patch("requests.get")
+    def test_user_agent_header_set(self, mock_get):
         """Request must include a User-Agent header (Nominatim requirement)."""
-        mock_urlopen.return_value = _make_nominatim_response([])
+        mock_get.return_value = _make_requests_response([])
 
         api_module.geocode_locations("test", limit=3)
 
-        call_args = mock_urlopen.call_args
-        request_obj = call_args[0][0]
-        assert "User-agent" in request_obj.headers
+        call_args = mock_get.call_args
+        headers = call_args[1].get("headers", {})
+        assert "User-Agent" in headers
 
-    @patch("api.urlopen")
-    def test_returns_empty_for_empty_api_response(self, mock_urlopen):
+    @patch("requests.get")
+    def test_returns_empty_for_empty_api_response(self, mock_get):
         """Empty Nominatim response should return []."""
-        mock_urlopen.return_value = _make_nominatim_response([])
+        mock_get.return_value = _make_requests_response([])
 
         results = api_module.geocode_locations("nowhere", limit=5)
         assert results == []

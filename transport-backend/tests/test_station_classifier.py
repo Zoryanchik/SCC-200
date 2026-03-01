@@ -70,11 +70,8 @@ def _make_merged(
     merged.route_stop_departures = route_stop_departures
     merged.route_metadata = route_metadata or []
     merged.stop_metadata = stop_metadata or [""] * len(stop_to_routes)
-    # Provide bus_data / train_data mocks
-    merged.bus_data.stop_to_routes = stop_to_routes
-    merged.bus_data.map_stops = MagicMock()
-    merged.train_data.stop_to_routes = []
-    merged.train_data.map_stops = MagicMock()
+    # Provide _group_mappers for get_atco_code compatibility
+    merged._group_mappers = []
     return merged
 
 
@@ -324,9 +321,8 @@ def client():
         yield c
 
 
-def _build_mock_timetable():
-    """Create a mock timetable with a 4-stop network for classify tests."""
-    timetable = MagicMock()
+def _build_mock_merged():
+    """Create a mock merged data with a 4-stop network for classify tests."""
     merged = _make_merged(
         stop_to_routes=[
             [0, 1, 2, 3, 4],  # stop 0: hub
@@ -349,17 +345,16 @@ def _build_mock_timetable():
         ],
         stop_metadata=["Hub Station", "Interchange St", "Local Rd", "Request Stop"],
     )
-    timetable.today = merged
-    return timetable
+    return merged
 
 
 class TestStopsClassifyEndpoint:
     """Tests for GET /stops/classify."""
 
     def test_returns_all_stops(self, client: TestClient):
-        timetable = _build_mock_timetable()
+        merged = _build_mock_merged()
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             resp = client.get("/stops/classify")
         assert resp.status_code == 200
         data = resp.json()
@@ -369,9 +364,9 @@ class TestStopsClassifyEndpoint:
         assert classes["Request Stop"] == "request_stop"
 
     def test_filter_by_hub(self, client: TestClient):
-        timetable = _build_mock_timetable()
+        merged = _build_mock_merged()
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             resp = client.get("/stops/classify", params={"classification": "hub"})
         data = resp.json()
         assert len(data) == 1
@@ -379,9 +374,9 @@ class TestStopsClassifyEndpoint:
         assert data[0]["name"] == "Hub Station"
 
     def test_filter_by_request_stop(self, client: TestClient):
-        timetable = _build_mock_timetable()
+        merged = _build_mock_merged()
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             resp = client.get("/stops/classify", params={"classification": "request_stop"})
         data = resp.json()
         assert len(data) == 1
@@ -389,14 +384,13 @@ class TestStopsClassifyEndpoint:
 
     def test_filter_no_match(self, client: TestClient):
         """When filtered class has no stops, return empty list."""
-        timetable = MagicMock()
-        timetable.today = _make_merged(
+        merged = _make_merged(
             stop_to_routes=[[0]],
             route_stop_departures=[{0: [(1, 0)]}],
             stop_metadata=["Only Stop"],
         )
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             resp = client.get("/stops/classify", params={"classification": "hub"})
         assert resp.json() == []
 
@@ -413,9 +407,9 @@ class TestStopsClassifyEndpoint:
 
     def test_response_includes_metrics(self, client: TestClient):
         """Each entry should include degree, frequency, interchange, lines."""
-        timetable = _build_mock_timetable()
+        merged = _build_mock_merged()
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             resp = client.get("/stops/classify")
         data = resp.json()
         entry = data[0]
@@ -564,17 +558,14 @@ class TestClassificationHelpers:
         assert result == {"CACHED": "hub"}
         api_module._classification_cache = None  # cleanup
 
-    def test_get_classification_lookup_builds_from_timetable(self):
+    def test_get_classification_lookup_builds_from_merged(self):
         api_module._classification_cache = None
-        timetable = _build_mock_timetable()
-        merged = timetable.today
-        # Make map_stops.get_code return distinct ATCO codes
+        merged = _build_mock_merged()
+        # Make get_atco_code return distinct ATCO codes
         codes = ["ATCO_A", "ATCO_B", "ATCO_C", "ATCO_D"]
-        merged.bus_data.map_stops.get_code = lambda i: codes[i]
-        merged.bus_data.stop_to_routes = merged.stop_to_routes
-        merged.train_data.stop_to_routes = []
+        merged.get_atco_code = lambda i: codes[i] if i < len(codes) else None
         with patch.object(api_module, "get_router_for_date",
-                          return_value=(timetable, MagicMock(), MagicMock())):
+                          return_value=(merged, MagicMock(), MagicMock())):
             result = api_module._get_classification_lookup()
         # Should have 4 entries (one per stop)
         assert len(result) == 4

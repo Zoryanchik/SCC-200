@@ -1,7 +1,8 @@
-﻿"""Transport Backend -€” FastAPI server.
+"""Transport Backend — FastAPI server.
 
 Exposes transport functionality (health check, live buses, journey
-planning) as a JSON API consumed by the frontend.
+planning, stop search, station classification) as a JSON API consumed
+by the frontend.
 """
 
 from contextlib import asynccontextmanager
@@ -32,19 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-
-#Remove later if useless
-"""class BusLiveRequest(BaseModel):
-    lat: float
-    lon: float
-    lat_tol: float = 0.0003
-    lon_tol: float = 0.0003
-
-class BusLiveResponse(BaseModel):
-    success: bool
-    buses: Optional[List[Dict[str, Any]]] = None
-    error: Optional[str] = None"""
 
 
 # Routing request/response models
@@ -86,7 +74,7 @@ class JourneyPlanRequest(BaseModel):
     maxTransfers: int = 5
     mode: str = "both"     # bus | train | both
 
-# -”€-”€ Lifespan (startup / shutdown) -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
+# — Lifespan (startup / shutdown) ——————————————————————————
 
 
 @asynccontextmanager
@@ -102,7 +90,7 @@ async def lifespan(app: FastAPI):
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
         logger.warning(
-            "Backend initialisation failed -€” endpoints requiring "
+            "Backend initialisation failed  — endpoints requiring "
             "transport data will be unavailable: %s", exc,
         )
     # Configure and start the WebSocket/STOMP live-updates broker
@@ -138,7 +126,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -”€-”€ Health check -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
+# — Health check ———————————————————————————————————————————
 
 
 @app.get("/health")
@@ -331,31 +319,16 @@ def _get_classification_lookup() -> Dict[str, str]:
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
-        timetable, _router, _walking = get_router_for_date(date_str)
+        merged, _router, _walking = get_router_for_date(date_str)
     except Exception:
         return {}
 
-    merged = timetable.today
     idx_lookup = classify_to_lookup(merged)
 
-    # Convert stop-int → ATCO code so we can match search results
+    # Convert stop-int → ATCO code using MergedData.get_atco_code
     atco_lookup: Dict[str, str] = {}
-    bus_mapper = getattr(merged.bus_data, "map_stops", None)
-    train_mapper = getattr(merged.train_data, "map_stops", None)
-    bus_stop_count = len(merged.bus_data.stop_to_routes)
-
     for stop_int, cls in idx_lookup.items():
-        code = None
-        if stop_int < bus_stop_count and bus_mapper:
-            try:
-                code = bus_mapper.get_code(stop_int)
-            except Exception:
-                pass
-        elif train_mapper:
-            try:
-                code = train_mapper.get_code(stop_int - bus_stop_count)
-            except Exception:
-                pass
+        code = merged.get_atco_code(stop_int)
         if code:
             atco_lookup[code] = cls
 
@@ -396,14 +369,13 @@ async def stops_classify(classification: Optional[str] = None):
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
-        timetable, _router, _walking = get_router_for_date(date_str)
+        merged, _router, _walking = get_router_for_date(date_str)
     except Exception:
         return JSONResponse(
             status_code=503,
             content={"error": "Backend not initialized"},
         )
 
-    merged = timetable.today
     results = classify_all(merged)
 
     if classification:
@@ -412,7 +384,7 @@ async def stops_classify(classification: Optional[str] = None):
     return results
 
 
-# -”€-”€ Static files & frontend -”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€-”€
+# — Static files & frontend ————————————————————————————————
 
 # Only mount static files if the directory exists (skipped during tests)
 _static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -426,34 +398,6 @@ async def get_frontend():
     return FileResponse(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
     )
-
-
-#Remove later if useless
-"""
-@app.post("/api/bus_live", response_model=BusLiveResponse)
-async def get_live_buses(request: BusLiveRequest):
-    #Get live bus data near a location.
-    try:
-        from bus_live import BusLive as BusLiveClass
-        bl = BusLiveClass(timeout=10)  # 10 second timeout for live data
-        results = bl.get_bus_live(request.lat, request.lon, lat_tol=request.lat_tol, lon_tol=request.lon_tol)
-
-        # Convert tuples to dictionaries for JSON response
-        buses = []
-        for line_ref, dest, lat, lon, operator in results:
-            buses.append({
-                "line_ref": line_ref,
-                "destination": dest,
-                "latitude": lat,
-                "longitude": lon,
-                "operator": operator
-            })
-
-        return BusLiveResponse(success=True, buses=buses)
-
-    except Exception as e:
-        return BusLiveResponse(success=False, error=str(e))
-"""
 
 
 @app.get("/bus/live/{operator}")
@@ -491,8 +435,6 @@ async def bus_live_operator(
             content={"error": str(exc)},
         )
 
-    # debug prints removed
-
     return [
         {
             "line": line_ref,
@@ -504,29 +446,60 @@ async def bus_live_operator(
         for line_ref, dest, lat_v, lon_v, _operator in results
     ]
 
-# Global cache for router/timetable/walking by date
+# Global cache for (merged, router, walking) by (date, AM/PM bucket)
 _router_cache = {}
 _router_cache_lock = threading.Lock()
 _base_cache = None
 
-def get_router_for_date(date_str):
+def get_router_for_date(date_str, start_time=None):
+    """Return (merged, router, walking) for a given date and time bucket.
+
+    The cache key includes the AM/PM bucket so morning and afternoon
+    queries use the correct two-day merge.
+    """
     global _base_cache
+    bucket = "AM" if (start_time is not None and start_time < 43200) else "PM"
+    cache_key = (date_str, bucket)
     with _router_cache_lock:
-        if date_str in _router_cache:
-            return _router_cache[date_str]
+        if cache_key in _router_cache:
+            return _router_cache[cache_key]
         if _base_cache is None:
             from main import initialize_base
             _base_cache = initialize_base()
         loader = _base_cache["loader"]
         walking_raw = _base_cache["walking_raw"]
         from main import build_for_date
-        timetable, router, walking = build_for_date(loader, walking_raw, date_str)
-        _router_cache[date_str] = (timetable, router, walking)
-        return timetable, router, walking
+        merged, router, walking = build_for_date(
+            loader, walking_raw, date_str, start_time=start_time)
+        _router_cache[cache_key] = (merged, router, walking)
+        return merged, router, walking
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+
+def _sanitize_route(route_result):
+    """Return a JSON-serializable copy of the RAPTOR route dict.
+
+    The raw dict uses integer stop-index keys and stores a
+    ``MergedData`` reference in the ``"day"`` field of each leg.
+    This helper converts keys to strings and drops the ``"day"``
+    field so the result can be returned over the API.
+    """
+    if not route_result:
+        return route_result
+    clean = {}
+    for key, value in route_result.items():
+        str_key = str(key) if not isinstance(key, str) else key
+        if isinstance(value, dict):
+            # Remove the non-serializable "day" field (MergedData ref)
+            clean[str_key] = {k: v for k, v in value.items()
+                              if k != "day"}
+        else:
+            clean[str_key] = value
+    return clean
+
 
 def format_route_text(route_result, merged):
     """Format a human-readable route summary.
@@ -566,26 +539,27 @@ def format_route_text(route_result, merged):
         return "\n".join(out)
 
     # Multi-stop transit route
-    meta = route_result.pop("_meta", {})
+    meta = route_result.get("_meta", {})
     start_walk = meta.get("start_walk_seconds", 0)
     end_walk = meta.get("end_walk_seconds", 0)
     total_arrival = meta.get("total_arrival")
     start_point = meta.get("start_point", ())
     destination = meta.get("destination", ())
 
-    all_prevs = {info["prev_stop"] for info in route_result.values()
+    route_data = {k: v for k, v in route_result.items() if k != "_meta"}
+    all_prevs = {info["prev_stop"] for info in route_data.values()
                  if info["prev_stop"] is not None}
-    destinations = [s for s in route_result if s not in all_prevs]
+    destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
-        destinations = list(route_result.keys())
+        destinations = list(route_data.keys())
 
     stop = destinations[0]
     visited = set()
     legs = []
     while stop is not None and stop not in visited:
         visited.add(stop)
-        legs.append((stop, route_result[stop]))
-        stop = route_result[stop]["prev_stop"]
+        legs.append((stop, route_data[stop]))
+        stop = route_data[stop]["prev_stop"]
     legs.reverse()
 
     out = []
@@ -655,7 +629,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
 
     Args:
         route_result: dict returned by RaptorRouter.route()
-        merged: MergedData instance (timetable.today)
+        merged: MergedData instance for the current date/time bucket
         stop_coords: dict {stop_int: (lat, lon)}
 
     Returns:
@@ -932,7 +906,8 @@ async def journey_plan(request: JourneyPlanRequest):
                          else {"bus", "train"})
         start_seconds = seconds_since_midnight(time_str)
 
-        timetable, router, walking = get_router_for_date(date_str)
+        merged, router, walking = get_router_for_date(
+            date_str, start_time=start_seconds)
         result = router.route(
             n_transfer_limit=max_transfers,
             walking=walking,
@@ -943,7 +918,7 @@ async def journey_plan(request: JourneyPlanRequest):
         )
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(
-            result, timetable.today, stop_coords)
+            result, merged, stop_coords)
     except Exception as exc:
         return {"success": False, "error": str(exc),
                 "legs": None, "meta": None, "routeGeometries": None}
@@ -960,7 +935,8 @@ async def get_route(request: RouteRequest):
         allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
         start_seconds = seconds_since_midnight(time_str)
         # Get router
-        timetable, router, walking = get_router_for_date(date_str)
+        merged, router, walking = get_router_for_date(
+            date_str, start_time=start_seconds)
         # Run routing
         result = router.route(
             n_transfer_limit=max_transfers,
@@ -970,8 +946,8 @@ async def get_route(request: RouteRequest):
             destination=destination,
             allowed_modes=allowed_modes,
         )
-        route_text = format_route_text(result, timetable.today)
-        return {"success": True, "route": result, "route_text": route_text}
+        route_text = format_route_text(result, merged)
+        return {"success": True, "route": _sanitize_route(result), "route_text": route_text}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1005,7 +981,8 @@ async def route_by_address(request: AddressRouteRequest):
         allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
         start_seconds = seconds_since_midnight(time_str)
 
-        timetable, router, walking = get_router_for_date(date_str)
+        merged, router, walking = get_router_for_date(
+            date_str, start_time=start_seconds)
         result = router.route(
             n_transfer_limit=max_transfers,
             walking=walking,
@@ -1014,8 +991,8 @@ async def route_by_address(request: AddressRouteRequest):
             destination=destination,
             allowed_modes=allowed_modes,
         )
-        route_text = format_route_text(result, timetable.today)
-        return {"success": True, "route": result, "route_text": route_text}
+        route_text = format_route_text(result, merged)
+        return {"success": True, "route": _sanitize_route(result), "route_text": route_text}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -1127,10 +1104,6 @@ if __name__ == "__main__":
     _kill_process_on_port(5005)
 
     uvicorn.run(app, host="localhost", port=5005)
-
-
-
-
 
 
 

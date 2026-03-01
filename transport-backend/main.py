@@ -1,13 +1,25 @@
-"""
-Transport Backend - Main Entry Point
-Initializes the transit routing system, takes user input for
-start/end points and departure time, and prints the route result.
+"""Transport Backend — system initialisation and per-date network builder.
+
+``initialize_base()``
+    One-time startup: opens database connections for bus, walking and
+    train stores, downloads timetable data if needed, and starts
+    background precomputation of walking transfers.
+
+``build_for_date(loader, walking_raw, date_str, …)``
+    Builds a date-specific MergedData + RaptorRouter + Walking triple.
+    Two adjacent day-halves are merged (yesterday+today or
+    today+tomorrow) depending on the departure time.
+
+``main()``
+    Interactive CLI loop for testing — reads start/end coordinates,
+    departure date/time, runs RAPTOR and pretty-prints the result.
 """
 
 from bus_loader import BusLoader
 from walking_loader import WalkingLoader
 from train_loader import TrainLoader
-from timetable import Timetable
+from merged_data import MergedData
+from raptor_router import RaptorRouter
 from walking import Walking
 from time_utils import seconds_since_midnight, seconds_to_time
 import os
@@ -177,13 +189,9 @@ def initialize_base():
         print("         osrm-routed --algorithm mld -p 5012 /data/nw-england.osrm")
         print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5012")
 
-    # Walking operations moved to WalkingLoader
-    walking_loader = WalkingLoader(WALK_DB_PATH)
-    # Ensure walking DB schema exists
-    walking_loader.create_schema()
+    # Reuse the WalkingLoader from step 1 (already has schema + coords)
     if data_changed:
         walking_loader.clear_walking_transfers()
-    walking_loader.download_stop_coords()
     # Start precompute in background so startup is non-blocking.
     if osrm_ok:
         walking_loader.start_precompute_background(osrm_base=OSRM_URL)
@@ -215,126 +223,169 @@ def initialize_base():
     }
 
 
-def build_for_date(loader, walking_raw, date_str, mode="both"):
-    """Build date-specific Timetable + Router + Walking.
+def build_for_date(loader, walking_raw, date_str, mode="both",
+                   start_time=None):
+    """Build a date-specific MergedData + Router + Walking.
 
-    Loads three date-filtered BusData objects (yesterday, today,
-    tomorrow) so that only journeys operating on each respective day
-    are included in the RAPTOR search.
+    Two adjacent day-halves are merged so that cross-midnight services
+    are visible:
 
-    Walking data is remapped from ATCO codes to the *today* BusData's
-    stop integers so the router's walking lookups stay consistent.
+    * *start_time* < noon  → merge yesterday (−86 400 s) with today (0 s).
+    * *start_time* ≥ noon or ``None`` → merge today (0 s) with tomorrow
+      (+86 400 s).
 
-    Returns (timetable, router, walking).
+    Bus and train data are loaded in parallel.  Walking transfers are
+    remapped from ATCO codes to the combined MergedData stop integers
+    so the router's walking lookups remain consistent.
+
+    Parameters
+    ----------
+    loader : BusLoader
+    walking_raw : dict
+        ``{"transfers": {atco: {atco: secs}}, "coords": {atco: (lat, lon)}}``
+    date_str : str   (YYYY-MM-DD)
+    mode : str
+        ``"bus"``, ``"train"``, or ``"both"``
+    start_time : int | None
+        Seconds since midnight.
+
+    Returns
+    -------
+    tuple[MergedData, RaptorRouter, Walking]
     """
-    query = _date.fromisoformat(date_str)
-    yesterday_str = (query - _timedelta(days=1)).isoformat()
-    tomorrow_str  = (query + _timedelta(days=1)).isoformat()
+    NOON = 43200  # seconds since midnight
+    if start_time is not None and start_time < NOON:
+        # Morning: yesterday + today
+        day_a_str = (_date.fromisoformat(date_str) - _timedelta(days=1)).isoformat()
+        day_b_str = date_str
+        offset_a, offset_b = -86400, 0
+        label = "AM (yesterday + today)"
+    else:
+        # Afternoon / default: today + tomorrow
+        day_a_str = date_str
+        day_b_str = (_date.fromisoformat(date_str) + _timedelta(days=1)).isoformat()
+        offset_a, offset_b = 0, 86400
+        label = "PM (today + tomorrow)"
 
-    print(f"\n  Building network for {date_str} …")
-    # Load bus and train data for yesterday/today/tomorrow concurrently so
-    # they can be merged quickly into the Timetable. Train loading is
-    # currently lightweight (placeholder) but this keeps the pattern
-    # consistent when a fuller TrainLoader is implemented.
+    print(f"\n  Building network for {date_str} — {label}")
+
     from concurrent.futures import ThreadPoolExecutor
-
     train_loader = TrainLoader(TRAIN_DB_PATH)
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        print(f"    Loading yesterday ({yesterday_str}) …", end=" ", flush=True)
-        bus_y_f = ex.submit(loader.load_busdata_for_date, yesterday_str)
-        train_y_f = ex.submit(train_loader.load_traindata_for_date, yesterday_str)
 
-        print(f"    Loading today     ({date_str}) …", end=" ", flush=True)
-        bus_t_f = ex.submit(loader.load_busdata_for_date, date_str)
-        train_t_f = ex.submit(train_loader.load_traindata_for_date, date_str)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        bus_a_f = ex.submit(loader.load_busdata_for_date, day_a_str)
+        train_a_f = ex.submit(train_loader.load_traindata_for_date, day_a_str)
+        bus_b_f = ex.submit(loader.load_busdata_for_date, day_b_str)
+        train_b_f = ex.submit(train_loader.load_traindata_for_date, day_b_str)
 
-        print(f"    Loading tomorrow  ({tomorrow_str}) …", end=" ", flush=True)
-        bus_m_f = ex.submit(loader.load_busdata_for_date, tomorrow_str)
-        train_m_f = ex.submit(train_loader.load_traindata_for_date, tomorrow_str)
+        bus_a = bus_a_f.result()
+        train_a = train_a_f.result()
+        bus_b = bus_b_f.result()
+        train_b = train_b_f.result()
 
-        bus_yesterday = bus_y_f.result()
-        train_yesterday = train_y_f.result()
-        print(f"{len(bus_yesterday.map_journeys)} journeys")
+    print(f"    Day A ({day_a_str}): {len(bus_a.map_journeys)} bus journeys")
+    print(f"    Day B ({day_b_str}): {len(bus_b.map_journeys)} bus journeys")
 
-        bus_today = bus_t_f.result()
-        train_today = train_t_f.result()
-        print(f"{len(bus_today.map_journeys)} journeys")
+    # Build datasets list respecting mode filter
+    datasets = []
+    if mode != "train":
+        datasets.append((bus_a, offset_a))
+    if mode != "bus":
+        datasets.append((train_a, offset_a))
+    if mode != "train":
+        datasets.append((bus_b, offset_b))
+    if mode != "bus":
+        datasets.append((train_b, offset_b))
 
-        bus_tomorrow = bus_m_f.result()
-        train_tomorrow = train_m_f.result()
-        print(f"{len(bus_tomorrow.map_journeys)} journeys")
-
-    timetable = Timetable(
-        bus_yesterday, train_yesterday,
-        bus_today,     train_today,
-        bus_tomorrow,  train_tomorrow,
+    merged = MergedData(
+        datasets,
         stop_name_fn=loader.get_stop_names_bulk,
     )
-    timetable.build_network(mode)
+    router = RaptorRouter(merged)
 
-    # Remap walking data to today's BusData stop integers.
-    # MergedData uses bus stop ints directly (train ints are offset),
-    # so bus_today.map_stops gives us the correct mapping.
-    stop_map = bus_today.map_stops.code_to_int
-
+    # ── Remap walking data to MergedData stop integers ───────────
+    # MergedData._group_mappers gives us (offset, count, mapper) per
+    # dataset group, so we iterate all of them for full coverage.
     raw_transfers = walking_raw["transfers"]
+    raw_coords = walking_raw["coords"]
+
+    # Build a combined ATCO→merged-int mapping from all groups.
+    # A single ATCO code may appear in multiple datasets (e.g. bus_a
+    # and bus_b both serve the same physical stop).  We map every
+    # occurrence so walking transfers work regardless of which
+    # day-half the router reached a stop through.
+    from collections import defaultdict
+    atco_to_merged_all = defaultdict(list)  # {atco: [merged_int, ...]}
+    for g_offset, g_count, mapper in merged._group_mappers:
+        if mapper is None:
+            continue
+        for local_i in range(g_count):
+            try:
+                code = mapper.get_code(local_i)
+            except Exception:
+                continue
+            if code:
+                atco_to_merged_all[code].append(g_offset + local_i)
+
     inter_table = {}
     for from_atco, dests in raw_transfers.items():
-        from_int = stop_map.get(from_atco)
-        if from_int is None:
-            continue
-        inner = {}
-        for to_atco, secs in dests.items():
-            to_int = stop_map.get(to_atco)
-            if to_int is not None:
-                inner[to_int] = secs
-        if inner:
-            inter_table[from_int] = inner
+        from_ints = atco_to_merged_all.get(from_atco, [])
+        for from_int in from_ints:
+            inner = {}
+            for to_atco, secs in dests.items():
+                to_ints = atco_to_merged_all.get(to_atco, [])
+                for to_int in to_ints:
+                    inner[to_int] = secs
+            if inner:
+                inter_table[from_int] = inner
 
-    raw_coords = walking_raw["coords"]
     stop_coords = {}
     for atco, (lat, lon) in raw_coords.items():
-        s_int = stop_map.get(atco)
-        if s_int is not None:
+        for s_int in atco_to_merged_all.get(atco, []):
             stop_coords[s_int] = (lat, lon)
 
     walking = Walking(inter_table, stop_coords)
 
-    print(f"  ✓ Timetable & Router ready for {date_str}")
+    print(f"  ✓ Network & Router ready for {date_str}")
     print(f"    Walking: {len(inter_table)} stops with transfers, "
           f"{len(stop_coords)} with coords")
-    return timetable, timetable.raptor_router, walking
+    return merged, router, walking
 
 
 def print_route(route_result, merged):
-    """Pretty-print the route returned by RaptorRouter.route()."""
+    """Pretty-print the route returned by RaptorRouter.route().
+
+    Non-destructive: does not modify *route_result*.
+    """
     if not route_result:
         print("\n  No route found.")
         return
 
-    # Extract walk-leg metadata
-    meta = route_result.pop('_meta', {})
+    # Extract walk-leg metadata (use .get() to avoid mutating the dict)
+    meta = route_result.get('_meta', {})
     start_walk = meta.get('start_walk_seconds', 0)
     end_walk   = meta.get('end_walk_seconds', 0)
     total_arrival = meta.get('total_arrival')
     start_point = meta.get('start_point', ())
     destination = meta.get('destination', ())
 
-    # Build ordered leg list by walking the prev_stop chain
+    # Build ordered leg list by walking the prev_stop chain.
+    # Filter out the _meta key so we only iterate stop entries.
+    route_data = {k: v for k, v in route_result.items() if k != '_meta'}
     legs = []
-    # Find the destination (stop with no outgoing – i.e. not a prev_stop of anyone else)
-    all_prevs = {info["prev_stop"] for info in route_result.values() if info["prev_stop"] is not None}
-    destinations = [s for s in route_result if s not in all_prevs]
+    # Find the destination (stop with no outgoing — not a prev_stop of anyone else)
+    all_prevs = {info["prev_stop"] for info in route_data.values() if info["prev_stop"] is not None}
+    destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
-        destinations = list(route_result.keys())
+        destinations = list(route_data.keys())
 
     # Trace back from destination to origin
     stop = destinations[0]
     visited = set()
     while stop is not None and stop not in visited:
         visited.add(stop)
-        legs.append((stop, route_result[stop]))
-        stop = route_result[stop]["prev_stop"]
+        legs.append((stop, route_data[stop]))
+        stop = route_data[stop]["prev_stop"]
     legs.reverse()
 
     print(f"\n{'='*60}")
@@ -412,7 +463,8 @@ def main():
 
     # Track the current date so we only rebuild when it changes
     current_date = None
-    timetable = None
+    current_time_bucket = None  # "AM" or "PM"
+    merged    = None
     router    = None
     walking   = None
 
@@ -471,16 +523,17 @@ def main():
             print(f"✗ Invalid time format '{time_str}'. Expected HH:MM:SS.")
             continue
 
-        # Build / rebuild the date-specific network if the date changed
-        if date_str != current_date:
+        # Build / rebuild the date-specific network if the date or time bucket changed
+        time_bucket = "AM" if start_seconds < 43200 else "PM"
+        if date_str != current_date or time_bucket != current_time_bucket:
             try:
-                timetable, router, walking = build_for_date(loader, walking_raw, date_str)
+                merged, router, walking = build_for_date(
+                    loader, walking_raw, date_str, start_time=start_seconds)
                 current_date = date_str
+                current_time_bucket = time_bucket
             except Exception as e:
                 print(f"\n✗ Failed to build network for {date_str}: {e}")
                 continue
-
-        merged = timetable.today  # MergedData for today (for display)
 
         start_loc = (start_lat, start_lon)
         end_loc   = (end_lat, end_lon)

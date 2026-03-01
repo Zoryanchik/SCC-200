@@ -124,7 +124,7 @@ class TestJourneyPlanResponseShape:
         mock_router = MagicMock()
         mock_router.route.return_value = route_return
         mock_timetable = MagicMock()
-        mock_timetable.today.stop_metadata = ["Stop A", "Stop B", "Stop C"]
+        mock_timetable.stop_metadata = ["Stop A", "Stop B", "Stop C"]
         mock_walking = MagicMock()
         mock_walking._coords = {
             0: (54.05, -2.80),
@@ -293,7 +293,7 @@ class TestJourneyPlanMultiLeg:
         mock_router = MagicMock()
         mock_router.route.return_value = dict(self.MULTI_LEG_RESULT)
         mock_timetable = MagicMock()
-        mock_timetable.today.stop_metadata = ["Stop A", "Stop B", "Stop C"]
+        mock_timetable.stop_metadata = ["Stop A", "Stop B", "Stop C"]
         mock_walking = MagicMock()
         mock_walking._coords = {
             0: (54.05, -2.79),

@@ -228,9 +228,10 @@ class TestGetRouterForDate:
         api_module._base_cache = None
 
     def test_returns_cached_router(self):
-        """Subsequent calls for the same date return cached result."""
+        """Subsequent calls for the same date+bucket return cached result."""
         mock_result = (MagicMock(), MagicMock(), MagicMock())
-        api_module._router_cache["2026-02-16"] = mock_result
+        # Cache key is now (date_str, bucket)
+        api_module._router_cache[("2026-02-16", "PM")] = mock_result
         result = get_router_for_date("2026-02-16")
         assert result is mock_result
 
@@ -242,17 +243,17 @@ class TestGetRouterForDate:
             "loader": mock_loader,
             "walking_raw": mock_walking_raw,
         }
-        mock_timetable = MagicMock()
+        mock_merged = MagicMock()
         mock_router = MagicMock()
         mock_walking = MagicMock()
         sys.modules["main"].build_for_date.return_value = (
-            mock_timetable, mock_router, mock_walking,
+            mock_merged, mock_router, mock_walking,
         )
 
         result = get_router_for_date("2026-02-16")
-        assert result == (mock_timetable, mock_router, mock_walking)
-        # Should now be cached
-        assert "2026-02-16" in api_module._router_cache
+        assert result == (mock_merged, mock_router, mock_walking)
+        # Should now be cached with (date, bucket) key
+        assert ("2026-02-16", "PM") in api_module._router_cache
 
     def test_initializes_base_when_cache_is_none(self):
         """When _base_cache is None, it calls initialize_base()."""
