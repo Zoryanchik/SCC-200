@@ -505,6 +505,23 @@ async def get_frontend():
     )
 
 
+# Some browsers (Safari / iOS) request apple-touch-icon files from root.
+# These are optional and not present in the project by default; return a
+# tiny 1x1 transparent PNG so requests don't 404 and clutter logs.
+@app.get("/apple-touch-icon.png")
+@app.get("/apple-touch-icon-precomposed.png")
+async def _apple_touch_icon():
+    from fastapi.responses import Response
+    import base64
+
+    # 1x1 transparent PNG (very small, base64-encoded)
+    png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+    )
+    data = base64.b64decode(png_b64)
+    return Response(content=data, media_type="image/png")
+
+
 @app.get("/bus/live/{operator}")
 async def bus_live_operator(
     operator: str,
