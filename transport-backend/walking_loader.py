@@ -1,20 +1,14 @@
 import bisect
 import json
-import os
-import ssl
 import psycopg
-from psycopg.rows import dict_row
 import urllib.request
-import re
-import shutil
 import math
-import threading
+
 
 class WalkingLoader:
     def __init__(self, db_path):
         self.db_path = db_path
-        # Precompute progress state
-        self.precompute_thread = None
+        # Precompute progress state (used by /status endpoint)
         self.precomputing = False
         self.precompute_total = 0
         self.precompute_processed = 0
@@ -28,114 +22,35 @@ class WalkingLoader:
         return pg_conn
 
     def create_schema(self):
-        """Create walking DB tables: stop_coords and walking_transfers."""
+        """Create walking DB table: walking_transfers.
+
+        Note: the ``stop_coords`` table is owned by ``AtcoLoader`` —
+        use ``AtcoLoader.create_schema()`` and
+        ``AtcoLoader.download_stop_coords()`` for stop coordinate data.
+        """
         conn = self._connect(self.db_path)
-        schema = '''
-            CREATE TABLE IF NOT EXISTS stop_coords (
-                atco_code   TEXT PRIMARY KEY,
-                lat         REAL NOT NULL,
-                lon         REAL NOT NULL
-            );
+        cur = conn.cursor()
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS walking_transfers (
                 from_atco   TEXT NOT NULL,
                 to_atco     TEXT NOT NULL,
                 walk_seconds INTEGER NOT NULL,
                 PRIMARY KEY (from_atco, to_atco)
             );
-        '''
-        import re as _re
-        cur = conn.cursor()
-        for stmt in schema.split(';'):
-            stmt = stmt.strip()
-            if not stmt:
-                continue
-            stmt2 = _re.sub(r"CHAR\s*\(\s*\d+\s*\)", "TEXT", stmt, flags=_re.I)
-            cur.execute(stmt2)
+        """)
         conn.commit()
         conn.close()
 
-    def download_stop_coords(self):
-        """Download NaPTAN XML and populate stop_coords with every AtcoCode.
-
-        Caches the XML locally to avoid repeated large downloads. Uses
-        INSERT OR REPLACE so the operation is idempotent.
-        """
-        # When db_path is a DSN (Postgres) it isn't a filesystem path.
-        # Use a repository-local cache directory for downloaded XML so
-        # caching doesn't depend on the DB path type.
-        repo_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-        os.makedirs(repo_cache, exist_ok=True)
-        xml_path = os.path.join(repo_cache, "naptan.xml")
-
-        # Download only if local file missing / too small
-        if not os.path.exists(xml_path) or os.path.getsize(xml_path) < 1_000_000:
-            print("  Downloading NaPTAN XML (≈100 MB)...")
-            url = "https://transport.scc.lancs.ac.uk//nptg/naptan.xml"
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            try:
-                with urllib.request.urlopen(url, context=ctx, timeout=180) as resp, open(xml_path, "wb") as out:
-                    shutil.copyfileobj(resp, out)
-            except Exception as e:
-                raise RuntimeError(f"NaPTAN download failed: {e}")
-        else:
-            print("  Using cached NaPTAN XML...")
-
-        print(f"  Parsing {os.path.getsize(xml_path)//1024}KB...")
-        xml_map = {}
-        try:
-            with open(xml_path, 'r', encoding='utf-8') as fh:
-                data = fh.read()
-
-            # Find StopPoint blocks and extract AtcoCode, Latitude, Longitude
-            for m in re.finditer(r'<StopPoint\b.*?</StopPoint>', data, flags=re.DOTALL):
-                block = m.group(0)
-                atco_m = re.search(r'<AtcoCode>\s*([^<\s]+)\s*</AtcoCode>', block)
-                lat_m = re.search(r'<Latitude>\s*([^<\s]+)\s*</Latitude>', block)
-                lon_m = re.search(r'<Longitude>\s*([^<\s]+)\s*</Longitude>', block)
-                if not atco_m or not lat_m or not lon_m:
-                    continue
-                try:
-                    atco = atco_m.group(1).strip()
-                    lat = float(lat_m.group(1).strip())
-                    lon = float(lon_m.group(1).strip())
-                except Exception:
-                    continue
-                xml_map[atco] = (lat, lon)
-        except Exception as e:
-            raise RuntimeError(f"Error parsing NaPTAN XML: {e}")
-
-        rows = [(atco, lat, lon) for atco, (lat, lon) in xml_map.items()]
-
-        if not rows:
-            print("  ✗ No coordinates found in NaPTAN XML")
-            return
-
-        conn = self._connect(self.db_path)
-        cur = conn.cursor()
-        cur.executemany(
-            "INSERT INTO stop_coords (atco_code, lat, lon) VALUES (%s, %s, %s) "
-            "ON CONFLICT (atco_code) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon",
-            rows,
-        )
-        conn.commit()
-        conn.close()
-        print(f"  ✓ Coordinates loaded for {len(rows)} stops")
-
-    def get_all_stop_coords(self):
-        """Return dict {atco_code: (lat, lon)} for all stops with coords."""
-        conn = self._connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT atco_code, lat, lon FROM stop_coords")
-        result = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-        conn.close()
-        return result
-
-    def precompute_walking_transfers(self, osrm_base="http://localhost:5012",
+    def precompute_walking_transfers(self, coords, osrm_base="http://localhost:5012",
                                       max_walk_seconds=600,
                                       bbox_margin=0.012):
         """Precompute walking transfers between nearby stops using OSRM.
+
+        Parameters
+        ----------
+        coords : dict
+            ``{atco_code: (lat, lon)}`` — obtained from
+            ``AtcoLoader.get_all_stop_coords()``.
 
         For each stop, finds other stops within *bbox_margin* degrees,
         queries OSRM /table endpoint for walking durations, and stores pairs
@@ -151,9 +66,8 @@ class WalkingLoader:
         done_sources = {r[0] for r in cur.fetchall()}
         conn.close()
 
-        coords = self.get_all_stop_coords()
         if not coords:
-            print("  ✗ No stop coordinates — run download_stop_coords first")
+            print("  ✗ No stop coordinates — run AtcoLoader.download_stop_coords() first")
             return
 
         atco_list = list(coords.keys())
@@ -255,10 +169,16 @@ class WalkingLoader:
         # clear running flag
         self.precomputing = False
 
-    def precompute_walking_transfers_fallback(self, max_walk_seconds=600,
+    def precompute_walking_transfers_fallback(self, coords, max_walk_seconds=600,
                                               walk_speed_mps=1.4,
                                               bbox_margin=0.012):
         """Fallback precompute using straight-line (haversine) distances.
+
+        Parameters
+        ----------
+        coords : dict
+            ``{atco_code: (lat, lon)}`` — obtained from
+            ``AtcoLoader.get_all_stop_coords()``.
 
         This computes approximate walk seconds = distance_m / walk_speed_mps
         for nearby stops (selected via the same latitude bbox heuristic used
@@ -284,9 +204,8 @@ class WalkingLoader:
         done_sources = {r[0] for r in cur.fetchall()}
         conn.close()
 
-        coords = self.get_all_stop_coords()
         if not coords:
-            print("  ✗ No stop coordinates — run download_stop_coords first")
+            print("  ✗ No stop coordinates — run AtcoLoader.download_stop_coords() first")
             return
 
         atco_list = list(coords.keys())
@@ -375,38 +294,11 @@ class WalkingLoader:
         # clear running flag
         self.precomputing = False
 
-    def start_precompute_background(self, osrm_base=None, use_fallback=False, **kwargs):
-        """Start precomputing walking transfers in a background thread.
-
-        If use_fallback is True, the haversine approximation is used.
-        Additional kwargs are passed to the precompute function.
-        """
-        if self.precomputing:
-            return self.precompute_thread
-
-        def _worker():
-            try:
-                if use_fallback:
-                    self.precompute_walking_transfers_fallback(**kwargs)
-                else:
-                    self.precompute_walking_transfers(osrm_base=osrm_base, **kwargs)
-            except Exception as e:
-                # Log to stdout — caller can inspect flags
-                print(f"  Precompute background error: {e}")
-            finally:
-                self.precomputing = False
-
-        th = threading.Thread(target=_worker, name="walking-precompute", daemon=True)
-        self.precompute_thread = th
-        th.start()
-        return th
-
     def clear_walking_transfers(self):
         """Remove all precomputed walking transfers (e.g. after data update)."""
         conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("DELETE FROM walking_transfers")
-        cur.execute("DELETE FROM stop_coords")
         conn.commit()
         conn.close()
 

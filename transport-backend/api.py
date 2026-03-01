@@ -1165,7 +1165,7 @@ if __name__ == "__main__":
     import os
     import logging
 
-    def _kill_process_on_port(port: int = 5005, timeout: float = 2.0) -> None:
+    def _kill_process_on_port(port: int = 5050, timeout: float = 2.0) -> None:
         logger = logging.getLogger(__name__)
         lsof = shutil.which("lsof")
         if not lsof:
@@ -1206,9 +1206,9 @@ if __name__ == "__main__":
                 break
             time.sleep(0.05)
 
-    _kill_process_on_port(5005)
+    _kill_process_on_port(5050)
 
-    uvicorn.run(app, host="localhost", port=5005)
+    uvicorn.run(app, host="localhost", port=5050)
 
 
 

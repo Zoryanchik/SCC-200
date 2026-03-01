@@ -2,8 +2,9 @@
 
 ``initialize_base()``
     One-time startup: opens database connections for bus, walking and
-    train stores, downloads timetable data if needed, and starts
-    background precomputation of walking transfers.
+    train stores, downloads timetable data if needed, and precomputes
+    walking transfers.  All heavy work runs concurrently — startup
+    blocks until every task is complete.
 
 ``build_for_date(loader, walking_raw, date_str, …)``
     Builds a date-specific MergedData + RaptorRouter + Walking triple.
@@ -17,6 +18,7 @@
 
 from bus_loader import BusLoader
 from walking_loader import WalkingLoader
+from atco_loader import AtcoLoader
 from train_loader import TrainLoader
 from merged_data import MergedData
 from raptor_router import RaptorRouter
@@ -35,31 +37,36 @@ WALK_DB_PATH  = os.environ.get("WALK_DB_DSN") or DEFAULT_PG
 
 
 def initialize_base():
-    """One-time setup: database, downloads, walking infrastructure.
+    """One-time setup: database, downloads, walking precompute.
 
-    Returns a dict with 'loader' and 'walking_raw'.  Walking data
-    is stored by ATCO code and remapped to per-date stop integers
-    each time build_for_date() is called.
+    All heavy work (bus download, stop-coord download, walking
+    precompute, train init) runs concurrently.  This function blocks
+    until everything is complete — "Base Initialization Complete!" is
+    only printed once all data is ready.
+
+    Returns a dict with 'loader', 'walking_raw', and 'walking_loader'.
     """
     print("=" * 60)
     print("Initializing Transport Backend System")
     print("=" * 60)
 
-    # 1. Database & downloads ------------------------------------------
-    print("\n[1/2] Initialising bus, walking and train stores (concurrent)...")
+    print("\nStarting all tasks concurrently...")
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    # We'll run bus, walking (download only), and train init concurrently.
     from concurrent.futures import ThreadPoolExecutor
-    # SQLite fallback removed — backend is Postgres-first. We keep
-    # DSN-based defaults so local development still works without env
-    # variables being set.
+    import urllib.request as _ur
+    import urllib.error as _ue
+
+    # Allow the OSRM endpoint to be overridden by env var so containers
+    # can address an OSRM sidecar by name (e.g. http://osrm:5012).
+    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
+
+    # ── Task 1: Bus data ─────────────────────────────────────────
 
     def _bus_task():
         loader = BusLoader(BUS_DB_PATH, walking_db_path=WALK_DB_PATH)
         loader.ensure_db()
         loader.create_schema()
-        # Use the loader's connection helper so DB DSNs (Postgres) work
         conn = loader._connect()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM bus_route_stops")
@@ -70,10 +77,6 @@ def initialize_base():
             print("  Bus DB empty — downloading timetable data...")
             datasets = loader._fetch_dataset_info()
             print(f"  Got {len(datasets)} download URLs")
-            # Download and load datasets concurrently (one worker per URL).
-            # Each worker will perform the download/load and then persist the
-            # dataset metadata using its own DB connection to avoid sharing
-            # cursors between threads.
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             def _download_and_save(ds, retries=3, backoff=1.0):
@@ -82,7 +85,6 @@ def initialize_base():
                 for attempt in range(1, retries + 1):
                     try:
                         loader.download_and_load(ds['download_url'])
-                        # Persist dataset metadata using a fresh connection
                         conn2 = loader._connect()
                         cur2 = conn2.cursor()
                         cur2.execute(
@@ -95,11 +97,9 @@ def initialize_base():
                         return (ds, None)
                     except Exception as e:
                         last_exc = e
-                        # simple backoff
                         if attempt < retries:
                             time.sleep(backoff * (2 ** (attempt - 1)))
                         else:
-                            # final failure, return exception info
                             tb = traceback.format_exc()
                             return (ds, (e, tb))
 
@@ -127,11 +127,52 @@ def initialize_base():
         print("  ✓ Bus DB ready")
         return loader, data_changed
 
-    def _walking_download_task():
+    # ── Task 2: Walking — download coords + precompute transfers ──
+
+    def _walking_task():
+        """Download stop coords, probe OSRM, and precompute transfers.
+
+        This runs the full precompute (OSRM or haversine fallback)
+        synchronously so that walking data is ready before startup
+        completes.
+        """
+        # 2a. Schema + download stop coordinates via AtcoLoader
+        al = AtcoLoader(WALK_DB_PATH)
+        al.create_schema()
+        al.download_stop_coords()
+
         wl = WalkingLoader(WALK_DB_PATH)
         wl.create_schema()
-        wl.download_stop_coords()
-        return wl
+
+        # 2b. Probe OSRM availability
+        osrm_ok = False
+        try:
+            probe_url = OSRM_URL.rstrip("/") + "/"
+            _r = _ur.urlopen(probe_url, timeout=3)
+            _r.close()
+            osrm_ok = True
+        except _ue.HTTPError:
+            osrm_ok = True
+        except _ue.URLError:
+            osrm_ok = False
+
+        if not osrm_ok:
+            print(f"  ⚠  OSRM not reachable at {OSRM_URL} — using haversine fallback")
+
+        # 2c. Get coords and precompute walking transfers (blocking)
+        raw_coords = al.get_all_stop_coords()
+
+        if osrm_ok:
+            wl.precompute_walking_transfers(raw_coords, osrm_base=OSRM_URL)
+        else:
+            wl.precompute_walking_transfers_fallback(raw_coords)
+
+        raw_transfers = wl.get_walking_transfers()
+        print(f"  ✓ Walking ready  ({len(raw_transfers)} stops with transfers, "
+              f"{len(raw_coords)} with coords)")
+        return al, wl, raw_coords, raw_transfers
+
+    # ── Task 3: Train init ────────────────────────────────────────
 
     def _train_task():
         tl = TrainLoader(TRAIN_DB_PATH)
@@ -140,77 +181,44 @@ def initialize_base():
         print("  ✓ Train DB ready")
         return tl
 
+    # ── Run all three concurrently ────────────────────────────────
+
     with ThreadPoolExecutor(max_workers=3) as ex:
         bus_fut = ex.submit(_bus_task)
-        walk_fut = ex.submit(_walking_download_task)
+        walk_fut = ex.submit(_walking_task)
         train_fut = ex.submit(_train_task)
 
-        # Wait for bus and walking download to finish; train is a lightweight init
         loader, data_changed = bus_fut.result()
-        walking_loader = walk_fut.result()
+        atco_loader, walking_loader, raw_coords, raw_transfers = walk_fut.result()
         train_loader = train_fut.result()
 
-    print("  ✓ Databases initialised")
-
-    # 2. Walking — coords, precomputed transfers, OSRM ----------------
-    print("\n[2/2] Preparing walking data...")
-
-    import urllib.request as _ur
-    import urllib.error as _ue
-    
-    osrm_ok = False
-    # Allow the OSRM endpoint to be overridden by env var so containers can
-    # address an OSRM sidecar by name (e.g. http://osrm:5012) or use host
-    # networking. Default for local development is http://localhost:5012.
-    OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
-    try:
-        # Probe the server root and treat any HTTP response (including
-        # HTTPError) as evidence the service is reachable.
-        probe_url = OSRM_URL.rstrip("/") + "/"
-        _r = _ur.urlopen(probe_url, timeout=3)
-        _r.close()
-        osrm_ok = True
-    except _ue.HTTPError:
-        osrm_ok = True
-    except _ue.URLError:
-        osrm_ok = False
-
-    if not osrm_ok:
-        print(f"  ⚠  OSRM not reachable at {OSRM_URL}")
-        print("     Walking transfers will be unavailable.")
-        print("     To enable, run an OSRM server and ensure the backend can reach it.")
-        print("     Examples:")
-        print("       # Run OSRM on the host (backend running on host will reach it):")
-        print("       docker run -d -p 5012:5012 -v /path/to/data:/data \\")
-        print("         osrm/osrm-backend osrm-routed --algorithm mld -p 5012 /data/nw-england.osrm")
-        print("       # Run OSRM as a separate container and point backend to it:")
-        print("       docker network create scc-net || true")
-        print("       docker run -d --name osrm --network scc-net osrm/osrm-backend \\")
-        print("         osrm-routed --algorithm mld -p 5012 /data/nw-england.osrm")
-        print("       # Then run the backend on the same network and set OSRM_URL=http://osrm:5012")
-
-    # Reuse the WalkingLoader from step 1 (already has schema + coords)
+    # If bus data changed, wipe stale walking transfers and recompute.
+    # (The walking task above used whatever was in the DB; if bus data
+    # changed we need a clean slate.)
     if data_changed:
+        print("  Bus data changed — recomputing walking transfers...")
         walking_loader.clear_walking_transfers()
-    # Start precompute in background so startup is non-blocking.
-    if osrm_ok:
-        walking_loader.start_precompute_background(osrm_base=OSRM_URL)
-    else:
-        # If OSRM is not available, run the haversine fallback in background
-        walking_loader.start_precompute_background(use_fallback=True)
-
-    # Build inter_walk table keyed by ATCO codes (will be remapped
-    # to per-date integer IDs when the network is built)
-    raw_transfers = walking_loader.get_walking_transfers()
-    raw_coords    = walking_loader.get_all_stop_coords()
+        osrm_ok = False
+        try:
+            probe_url = OSRM_URL.rstrip("/") + "/"
+            _r = _ur.urlopen(probe_url, timeout=3)
+            _r.close()
+            osrm_ok = True
+        except _ue.HTTPError:
+            osrm_ok = True
+        except _ue.URLError:
+            osrm_ok = False
+        if osrm_ok:
+            walking_loader.precompute_walking_transfers(raw_coords, osrm_base=OSRM_URL)
+        else:
+            walking_loader.precompute_walking_transfers_fallback(raw_coords)
+        raw_transfers = walking_loader.get_walking_transfers()
+        print(f"  ✓ Walking re-done ({len(raw_transfers)} stops with transfers)")
 
     walking_raw = {
         "transfers": raw_transfers,   # {atco: {atco: secs}}
         "coords":    raw_coords,      # {atco: (lat, lon)}
     }
-
-    print(f"  ✓ Walking ready  ({len(raw_transfers)} stops with transfers, "
-          f"{len(raw_coords)} with coords)")
 
     print("\n" + "=" * 60)
     print("Base Initialization Complete!")
