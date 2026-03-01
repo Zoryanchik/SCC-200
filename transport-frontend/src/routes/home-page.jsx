@@ -142,7 +142,7 @@ export default function HomePage() {
   } = useLiveBusLocations("SCCU", {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
-    refreshInterval: 30000,
+    refreshInterval: 10000,
     debounceMs: 800,
   });
   const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 30000);
