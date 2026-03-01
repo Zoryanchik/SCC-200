@@ -12,7 +12,7 @@ set -euo pipefail
 
 ENGINE=${ENGINE:-podman}
 CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-local}
-IMAGE=${IMAGE:-postgres:15}
+IMAGE=${IMAGE:-docker.io/library/postgres:15}
 HOST_PORT=${HOST_PORT:-5011}
 CONTAINER_PORT=${CONTAINER_PORT:-5011}
 PG_USER=${PG_USER:-pguser}
