@@ -152,11 +152,15 @@ describe('fetchLiveBusLocations — GET /bus/live/{operator}', () => {
 // ---- POST /journey/plan contract ------------------------------------------
 
 describe('getJourneyPlans — POST /journey/plan', () => {
+  // Mock reflects exact JSON returned by api.py build_journey_plan_response().
+  // Legs use the 'mode' field ("walking" | "bus" | "train").
+  // getJourneyPlans() normalises mode → type ("walking"→"walk") so consumers
+  // can read leg.type === 'walk' | 'bus' | 'train'.
   const MOCK_JOURNEY_SUCCESS = {
     success: true,
     legs: [
       {
-        type: 'walking',
+        mode: 'walking',
         from_stop: { name: 'Start', lat: 54.048, lon: -2.801 },
         to_stop: { name: 'Lancaster Bus Station', lat: 54.049, lon: -2.800 },
         duration_seconds: 120,
@@ -164,7 +168,7 @@ describe('getJourneyPlans — POST /journey/plan', () => {
         arrival_time: '10:02:00',
       },
       {
-        type: 'bus',
+        mode: 'bus',
         from_stop: { name: 'Lancaster Bus Station', lat: 54.049, lon: -2.800 },
         to_stop: { name: 'Preston Bus Station', lat: 53.759, lon: -2.699 },
         duration_seconds: 1800,
@@ -200,7 +204,7 @@ describe('getJourneyPlans — POST /journey/plan', () => {
     success: true,
     legs: [
       {
-        type: 'walking',
+        mode: 'walking',
         from_stop: { lat: 54.048, lon: -2.801 },
         to_stop: { lat: 54.050, lon: -2.799 },
         duration_seconds: 300,
@@ -254,7 +258,7 @@ describe('getJourneyPlans — POST /journey/plan', () => {
     expect(result.meta).toHaveProperty('total_arrival');
   });
 
-  test('leg object has required fields: type, from_stop, to_stop, arrival_time', async () => {
+  test('leg object has required fields: mode, type (normalised), from_stop, to_stop, arrival_time', async () => {
     fetch.mockReturnValueOnce(jsonResponse(MOCK_JOURNEY_SUCCESS));
 
     const result = await getJourneyPlans(
@@ -264,6 +268,9 @@ describe('getJourneyPlans — POST /journey/plan', () => {
     );
 
     for (const leg of result.legs) {
+      // 'mode' is the raw backend field; 'type' is the normalised field
+      // added by getJourneyPlans() so UI components can read leg.type.
+      expect(leg).toHaveProperty('mode');
       expect(leg).toHaveProperty('type');
       expect(leg).toHaveProperty('from_stop');
       expect(leg).toHaveProperty('to_stop');
@@ -280,8 +287,10 @@ describe('getJourneyPlans — POST /journey/plan', () => {
       '2026-02-19T10:00:00Z'
     );
 
+    // mode: 'bus' normalises to type: 'bus'
     const busLeg = result.legs.find(l => l.type === 'bus');
     expect(busLeg).toBeDefined();
+    expect(busLeg.mode).toBe('bus');
     expect(busLeg.line_name).toBe('40');
     expect(busLeg.journey_origin).toBe('Lancaster');
     expect(busLeg.journey_destination).toBe('Preston');
@@ -322,7 +331,9 @@ describe('getJourneyPlans — POST /journey/plan', () => {
 
     expect(result.success).toBe(true);
     expect(result.legs).toHaveLength(1);
-    expect(result.legs[0].type).toBe('walking');
+    // backend mode "walking" normalises to type "walk"
+    expect(result.legs[0].mode).toBe('walking');
+    expect(result.legs[0].type).toBe('walk');
     expect(result.routeGeometries[0].color).toBe('#888888');
   });
 
@@ -368,7 +379,7 @@ describe('getJourneyPlans — POST /journey/plan', () => {
       success: true,
       legs: [
         {
-          type: 'bus',
+          mode: 'bus',  // backend uses 'mode'; service normalises to type:'bus'
           from_stop: { name: 'A', lat: 54.048, lon: -2.801 },
           to_stop: { name: 'B', lat: 53.759, lon: -2.699 },
           departure_time: '23:50:00',
@@ -425,13 +436,16 @@ describe('fetchRailDepartures — GET /rail/departures/{station}', () => {
 });
 
 // ---- GET /weather ---------------------------------------------------------
+// api.py /weather proxies SCC weather and returns OpenWeatherMap-shaped JSON:
+//   { weather: [{main, description, icon}], wind: {speed}, main: {temp, humidity, ...} }
+// WeatherWidget.jsx reads result.weather[0].main, result.main.temp, result.wind.speed.
 
 describe('fetchWeatherData — GET /weather', () => {
+  // Reflects the actual shape returned by api.py /weather (OpenWeatherMap proxy)
   const MOCK_WEATHER = {
-    temperature: 12,
-    summary: 'Cloudy',
-    icon: 'cloudy',
-    forecast: [{ day: 'Mon', high: 14, low: 8 }],
+    weather: [{ main: 'Clouds', description: 'overcast clouds', icon: '04d' }],
+    wind: { speed: 5.2, deg: 210 },
+    main: { temp: 12.3, feels_like: 10.1, humidity: 68, pressure: 1012 },
   };
 
   test('fetches weather with default coords', async () => {
@@ -439,6 +453,17 @@ describe('fetchWeatherData — GET /weather', () => {
     const result = await fetchWeatherData();
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/weather?lat=54.05&lon=-2.8'));
     expect(result).toEqual(MOCK_WEATHER);
+  });
+
+  test('response has OpenWeatherMap shape: weather[], wind, main', async () => {
+    fetch.mockReturnValueOnce(jsonResponse(MOCK_WEATHER));
+    const result = await fetchWeatherData();
+    expect(Array.isArray(result.weather)).toBe(true);
+    expect(result.weather[0]).toHaveProperty('main');
+    expect(result).toHaveProperty('wind');
+    expect(result).toHaveProperty('main');
+    expect(typeof result.main.temp).toBe('number');
+    expect(typeof result.wind.speed).toBe('number');
   });
 
   test('passes custom lat/lon', async () => {

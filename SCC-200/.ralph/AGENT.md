@@ -65,6 +65,13 @@ cargo run
 - Walking class (walking.py) uses OSRM_URL env var (default http://localhost:5012) configurable per container. osrm_available property probes once and caches. When OSRM is down, reachable_stops() falls back to precomputed inter-walk table (originally computed via OSRM during data loading) plus haversine estimates. _haversine_m() is a proper great-circle distance function.
 - main.py now passes OSRM_URL through walking_raw dict to build_for_date() so Walking() uses the configured URL, not the default. precompute_walking_transfers() also receives osrm_base explicitly.
 - GET /walking/status returns {osrm_url, osrm_available, max_walk_seconds, precomputed_stops, stops_with_coords}. GET /walking/reachable?lat=&lon= returns nearby walkable stops sorted by walk_seconds, with ATCO codes and coords resolved from merged-data.
+- [API SCHEMA] Journey plan legs from api.py use field "mode" (values: "walking"|"bus"|"train"), NOT "type". getJourneyPlans() in transportApi.js normalises mode→type and maps "walking"→"walk" so UI components (RouteCard, home-page) can read leg.type === "walk"|"bus"|"train".
+- [API SCHEMA] /weather proxies the SCC OpenWeatherMap feed; response shape is {weather:[{main,description,icon}], wind:{speed,deg}, main:{temp,feels_like,humidity,pressure}}. NOT {temperature, summary, icon, forecast}. WeatherWidget reads result.weather[0].main, result.main.temp, result.wind.speed.
+- [API SCHEMA] /bus/live/{operator} returns [{line, destination, lat, lon, operator}] — note the extra "operator" field not all tests assert on.
+- [API SCHEMA] /search/stops returns [{id, name, atco_code, lat, lon, type}] where type is "stop" or "location"; geocode-only results (locations) have atco_code: null and id like "loc:0".
+- [API SCHEMA] POST /journey/plan body: {fromStop:{lat,lon}, toStop:{lat,lon}, departureTime:"HH:MM:SS", date:"YYYY-MM-DD", maxTransfers:int, mode:"bus"|"train"|"both"}. Response: {success, legs[], meta:{start_walk_seconds,end_walk_seconds,total_arrival,start_point,destination}, routeGeometries:[{id,name,coords,color}]}.
+- [API SCHEMA] legs may include departure_day_offset/arrival_day_offset integers; getJourneyPlans() appends arrival_time_with_offset, departure_time_with_offset, and _iso datetime fields for UI display.
+- [UNIMPLEMENTED] /rail/departures/{station}, /alerts, /pricing, /bus/times/{stopCode}, /bus/arrivals/{stopCode} are called by the frontend but not yet defined in api.py (will 404).
 
 ## Feature Development Quality Standards
 

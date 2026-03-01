@@ -184,6 +184,16 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
       const requestDate = date; // YYYY-MM-DD from earlier normalizeDateTime
       responseJson.legs = (responseJson.legs || []).map((leg) => {
         const copy = { ...leg };
+
+        // Normalise backend 'mode' field → frontend 'type' field.
+        // api.py build_journey_plan_response() uses key "mode" with values
+        // "walking" | "bus" | "train".  UI components (RouteCard, home-page)
+        // read "type" with values "walk" | "bus" | "train".
+        // We derive 'type' from 'mode' here so both fields are available.
+        if (copy.mode !== undefined && copy.type === undefined) {
+          copy.type = copy.mode === 'walking' ? 'walk' : copy.mode;
+        }
+
         const makeWithOffset = (timeStr, dayOffset) => {
           if (!timeStr) return null;
           const offset = Number.isFinite(dayOffset) && dayOffset > 0 ? ` (+${dayOffset}d)` : "";

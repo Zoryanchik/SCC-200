@@ -37,12 +37,15 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// Exact backend response shapes from api.py build_journey_plan_response
+// Shapes below match what getJourneyPlans() returns AFTER normalisation:
+// - backend 'mode' field is preserved
+// - 'type' is derived by the service: mode 'walking' → type 'walk', 'bus' → 'bus', 'train' → 'train'
 const BACKEND_MULTI_LEG = {
   success: true,
   legs: [
     {
-      type: 'walking',
+      mode: 'walking',
+      type: 'walk',  // normalised by getJourneyPlans()
       from_stop: { name: 'Start', lat: 54.048, lon: -2.801 },
       to_stop: { name: 'Lancaster Bus Station', lat: 54.049, lon: -2.800 },
       duration_seconds: 120,
@@ -50,7 +53,8 @@ const BACKEND_MULTI_LEG = {
       arrival_time: '10:02:00',
     },
     {
-      type: 'bus',
+      mode: 'bus',
+      type: 'bus',  // normalised by getJourneyPlans()
       from_stop: { name: 'Lancaster Bus Station', lat: 54.049, lon: -2.800 },
       to_stop: { name: 'Preston Bus Station', lat: 53.759, lon: -2.699 },
       duration_seconds: 1800,
@@ -61,7 +65,8 @@ const BACKEND_MULTI_LEG = {
       journey_destination: 'Preston',
     },
     {
-      type: 'walking',
+      mode: 'walking',
+      type: 'walk',  // normalised by getJourneyPlans()
       from_stop: { name: 'Preston Bus Station', lat: 53.759, lon: -2.699 },
       to_stop: { name: 'Destination', lat: 53.760, lon: -2.700 },
       duration_seconds: 60,
@@ -87,7 +92,8 @@ const BACKEND_WALKING_ONLY = {
   success: true,
   legs: [
     {
-      type: 'walking',
+      mode: 'walking',
+      type: 'walk',  // normalised by getJourneyPlans()
       from_stop: { lat: 54.048, lon: -2.801 },
       to_stop: { lat: 54.050, lon: -2.799 },
       duration_seconds: 300,
@@ -142,9 +148,9 @@ describe('useJourneyPlans — backend integration', () => {
       expect(result.current.routes.legs).toHaveLength(3);
     });
 
-    // Verify leg types
+    // Verify leg types (mode 'walking' normalises to type 'walk' in service layer)
     const legTypes = result.current.routes.legs.map(l => l.type);
-    expect(legTypes).toEqual(['walking', 'bus', 'walking']);
+    expect(legTypes).toEqual(['walk', 'bus', 'walk']);
 
     // Verify routeGeometries are available for polyline rendering
     expect(result.current.routes.routeGeometries).toHaveLength(3);
@@ -168,7 +174,8 @@ describe('useJourneyPlans — backend integration', () => {
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
       expect(result.current.routes.legs).toHaveLength(1);
-      expect(result.current.routes.legs[0].type).toBe('walking');
+      // mode 'walking' normalises to type 'walk'
+      expect(result.current.routes.legs[0].type).toBe('walk');
     });
   });
 
