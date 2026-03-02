@@ -131,12 +131,19 @@ class MergedData:
                     pass
 
         all_codes = {c for c in codes_by_index.values() if c}
+
+        # Resolve stop names: prefer AtcoLoader (NaPTAN) first, then
+        # fall back to bus-derived stop names for any codes the ATCO
+        # source doesn't cover.
+        name_map = {}
         if atco_loader and all_codes:
             name_map = atco_loader.get_stop_names_bulk(all_codes)
-        elif stop_name_fn and all_codes:
-            name_map = stop_name_fn(all_codes)
-        else:
-            name_map = {}
+        # Fill gaps with bus stop names (stop_name_fn)
+        if stop_name_fn and all_codes:
+            missing_codes = all_codes - set(name_map)
+            if missing_codes:
+                bus_names = stop_name_fn(missing_codes)
+                name_map.update(bus_names)
 
         self.stop_metadata = []
         for i in range(total_stops):

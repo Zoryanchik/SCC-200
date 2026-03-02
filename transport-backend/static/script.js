@@ -2,7 +2,7 @@
 // browser will treat leading '/' paths as file URLs (which fail when
 // the backend is running on http). Detect that case and fall back to
 // the local backend address used in development.
-const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5005' : '';
+const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5050' : '';
 
 // Ensure date/time inputs for the address route form have sensible defaults so
 // browser validation doesn't prevent the JS handler from running when the user
@@ -203,17 +203,25 @@ if (routeAddrForm) {
             const sq = encodeURIComponent(formData.start);
             const eq = encodeURIComponent(formData.end);
             // Request only Lancashire candidates to avoid results from other countries
-            const sResp = await fetch(`${API_BASE}/api/geocode?q=${sq}&limit=5&county=Lancashire`);
-            const eResp = await fetch(`${API_BASE}/api/geocode?q=${eq}&limit=5&county=Lancashire`);
+            // Match the real frontend: call /search/stops (no county or
+            // limit) so the same fuzzy-correction and filtering logic is
+            // used — the backend default limit (10) matches what the real
+            // frontend receives.
+            const sResp = await fetch(`${API_BASE}/search/stops?q=${sq}`);
+            const eResp = await fetch(`${API_BASE}/search/stops?q=${eq}`);
+            if (!sResp.ok || !eResp.ok) {
+                throw new Error('Geocoding failed for one or both addresses');
+            }
             const sJson = await sResp.json();
             const eJson = await eResp.json();
 
-            if (!sJson.success || !eJson.success) {
-                throw new Error('Geocoding failed for one or both addresses');
-            }
+            // /search/stops returns a plain JSON array of candidates
+            const startCandidates = Array.isArray(sJson) ? sJson : (sJson.candidates || []);
+            const endCandidates = Array.isArray(eJson) ? eJson : (eJson.candidates || []);
 
-            const startCandidates = sJson.candidates || [];
-            const endCandidates = eJson.candidates || [];
+            if (startCandidates.length === 0 && endCandidates.length === 0) {
+                throw new Error('No location candidates found for the given addresses');
+            }
 
             // Populate selects
             const startSel = document.getElementById('start_candidates');
@@ -296,7 +304,11 @@ if (computeBtn) {
             resultDiv.style.display = 'block';
             if (data.success) {
                 resultDiv.className = 'result success';
-                resultDiv.textContent = data.route_text || formatRouteResult(data.route);
+                if (data.route_text) {
+                    resultDiv.textContent = data.route_text;
+                } else {
+                    resultDiv.textContent = formatRouteResult(data.route);
+                }
             } else {
                 resultDiv.className = 'result error';
                 resultDiv.textContent = `Error: ${data.error}`;

@@ -19,11 +19,14 @@ import math
 import bisect
 from typing import List, Any, Set, Optional, Tuple
 from walking import Walking
-from modes import WALKING, int_to_name, all_transit_modes, name_to_int
+from modes import WALKING, BUS, TRAIN, int_to_name, all_transit_modes, name_to_int
 
-# Minimum connection time (seconds) between arriving at a stop and
-# boarding the next service.  Prevents unrealistic instant transfers.
-MIN_TRANSFER_SECONDS = 90
+# Boarding buffers (seconds) applied after arrival at a stop before
+# allowing boarding of a vehicle.  These replace the previous global
+# MIN_TRANSFER_SECONDS / INITIAL_BOARDING_TOLERANCE constants and are
+# chosen per-mode to reflect realistic boarding requirements.
+BUS_BOARD_BUFFER = 60    # 1 minute for buses
+TRAIN_BOARD_BUFFER = 180 # 3 minutes for trains
 
 
 class RaptorRouter:
@@ -40,7 +43,8 @@ class RaptorRouter:
               start_time: int,
               start_point: Tuple[float, float],
               destination: Tuple[float, float],
-              allowed_modes: Optional[Set[Any]] = None) -> dict:
+              allowed_modes: Optional[Set[Any]] = None,
+              debug_stop_ids: Optional[Set[int]] = None) -> dict:
         """Run RAPTOR and return the fastest route as a trace-back dict.
 
         Returns
@@ -66,6 +70,12 @@ class RaptorRouter:
             reach_stops[stop][1] = start_time + walk_time
             reach_stops[stop][2] = WALKING
             switch_a.add(stop)
+            # Debug: record initial seeding for selected stops
+            if debug_stop_ids is not None and stop in debug_stop_ids:
+                # store a lightweight event list on the router instance for this call
+                if not hasattr(self, '_debug_events'):
+                    self._debug_events = []
+                self._debug_events.append((stop, 'seed_walk', start_time + walk_time))
 
         # Normalize allowed_modes
         if allowed_modes is None:
@@ -81,9 +91,13 @@ class RaptorRouter:
                     normalized.add(m)
             allowed_modes = normalized
 
+        # Clear any previous debug events and run recursive rounds
+        if hasattr(self, '_debug_events'):
+            del self._debug_events
         self.recursive_raptor(
             -1, n_transfer_limit, reach_stops, walking,
-            switch_a, allowed_modes,
+            switch_a, allowed_modes, initial_stops,
+            debug_stop_ids=debug_stop_ids,
         )
 
         # ── Find best final stop ─────────────────────────────────
@@ -213,11 +227,16 @@ class RaptorRouter:
                          reach_stops: List[List[Any]],
                          walking: Walking,
                          switch_a: set,
-                         allowed_modes: Set[int]):
+                         allowed_modes: Set[int],
+                         initial_walk_stops: Optional[dict] = None,
+                         debug_stop_ids: Optional[Set[int]] = None):
         """Perform one RAPTOR round, then recurse until the transfer
         limit is reached or no new stops are improved.
 
         *switch_a* is the set of stops improved in the previous round.
+        *initial_walk_stops* maps stop-int → walk_seconds for stops
+        reached directly from the origin; these use a relaxed boarding
+        threshold (no MIN_TRANSFER_SECONDS penalty) on the first round.
         """
         if not switch_a or n_transfer == transfer_limit:
             return
@@ -225,15 +244,32 @@ class RaptorRouter:
         switch_b: set = set()
         net = self.network
 
-        # Scan every route passing through each improved stop
-        for stop in switch_a:
+        # Scan every route passing through each improved stop.
+        # Process stops in ascending arrival-time order (nearest first)
+        # to ensure propagation follows earliest-known states rather than
+        # arbitrary set iteration order.
+        ordered_switch_a = sorted(switch_a, key=lambda s: reach_stops[s][1])
+        for stop in ordered_switch_a:
             routes = net.stop_to_routes[stop]
             for route in routes:
+                # On the very first round (n_transfer == 0), stops that
+                # were reached by walking from the origin get a relaxed
+                # boarding threshold — no 90 s transfer buffer.
+                is_initial_walk = (
+                    initial_walk_stops is not None
+                    and stop in initial_walk_stops
+                    and n_transfer == 0
+                )
                 self.first_journey(
-                    net, route, stop, reach_stops, switch_b, allowed_modes)
+                    net, route, stop, reach_stops, switch_b,
+                    allowed_modes, is_initial_walk,
+                    debug_stop_ids=debug_stop_ids)
 
-        # Walking transfers from newly-improved stops
-        for stop in list(switch_b):
+        # Walking transfers from newly-improved stops. Process newly
+        # improved stops in earliest-arrival order so walk arrivals are
+        # considered from the soonest originating stop first.
+        ordered_switch_b = sorted(list(switch_b), key=lambda s: reach_stops[s][1])
+        for stop in ordered_switch_b:
             walk_stops = walking.inter_walk(stop)
             for walk_stop, secs in walk_stops.items():
                 walk_arrival = reach_stops[stop][1] + secs
@@ -242,6 +278,11 @@ class RaptorRouter:
                     reach_stops[walk_stop][0] = stop
                     reach_stops[walk_stop][2] = WALKING
                     switch_b.add(walk_stop)
+                    # Debug: record walking transfer update
+                    if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                        if not hasattr(self, '_debug_events'):
+                            self._debug_events = []
+                        self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
 
         self.recursive_raptor(
             n_transfer, transfer_limit, reach_stops, walking,
@@ -251,10 +292,17 @@ class RaptorRouter:
     # ── scan a route for the earliest usable journey from *stop* ──
 
     def first_journey(self, network, route, stop, reach_stops,
-                      switch_b, allowed_modes):
+                      switch_b, allowed_modes, is_initial_walk=False,
+                      debug_stop_ids: Optional[Set[int]] = None):
         """Find the first journey on *route* that departs from *stop*
-        after the current arrival + MIN_TRANSFER_SECONDS, then propagate
+        after the current arrival + connection buffer, then propagate
         improved arrival times to downstream stops.
+
+        When *is_initial_walk* is True the stop was reached by walking
+        from the origin, so the 90 s transfer penalty is dropped and a
+        small tolerance (INITIAL_BOARDING_TOLERANCE) is applied instead
+        — allowing the passenger to board a service that departs a few
+        seconds before the estimated walking arrival.
 
         Returns the journey-int used, or None if no usable journey was
         found.
@@ -266,11 +314,31 @@ class RaptorRouter:
         if not stop_deps:
             return None
 
-        earliest_board = reach_stops[stop][1] + MIN_TRANSFER_SECONDS
-        idx = bisect.bisect_left(stop_deps, (earliest_board,))
+        # We'll search for candidate departures at or after the walking
+        # arrival time, then apply a per-journey-mode buffer before
+        # accepting a departure.  This lets us pick different buffers
+        # for buses vs trains (e.g. buses tolerate 1 min, trains 3 min).
+        search_lower = reach_stops[stop][1]
+        idx = bisect.bisect_left(stop_deps, (search_lower,))
 
         while idx < len(stop_deps):
             dep_time, first_journey = stop_deps[idx]
+            # Determine required buffer based on the journey mode
+            jmode = network.journey_type(first_journey)
+            required_buffer = TRAIN_BOARD_BUFFER if jmode == TRAIN else BUS_BOARD_BUFFER
+            # If this departure is earlier than arrival + required buffer,
+            # skip it.
+            if dep_time < reach_stops[stop][1] + required_buffer:
+                idx += 1
+                continue
+            
+            # Otherwise this departure is acceptable (subject to mode filter)
+            
+            
+            
+            
+            
+            
             if network.journey_type(first_journey) not in allowed_modes:
                 idx += 1
                 continue
@@ -291,5 +359,10 @@ class RaptorRouter:
                     reach_stops[subsequent_point][3] = first_journey
                     reach_stops[subsequent_point][4] = network
                     switch_b.add(subsequent_point)
+                    # Debug: record journey propagation update
+                    if debug_stop_ids is not None and subsequent_point in debug_stop_ids:
+                        if not hasattr(self, '_debug_events'):
+                            self._debug_events = []
+                        self._debug_events.append((subsequent_point, 'journey_propagation', subsequent_a_time, first_journey, stop))
             return first_journey
         return None

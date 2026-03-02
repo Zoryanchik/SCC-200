@@ -280,7 +280,11 @@ def initialize_base():
             (bus_b, offset_b),
             (train_b, offset_b),
         ]
-        merged = MergedData(datasets, stop_name_fn=loader.get_stop_names_bulk)
+        merged = MergedData(
+            datasets,
+            atco_loader=atco_loader,
+            stop_name_fn=loader.get_stop_names_bulk,
+        )
         router = RaptorRouter(merged)
 
         # Remap walking data
@@ -346,12 +350,13 @@ def initialize_base():
         "loader": loader,
         "walking_raw": walking_raw,
         "walking_loader": walking_loader,
+        "atco_loader": atco_loader,
         "prebuilt_cache": prebuilt_cache,
     }
 
 
 def build_for_date(loader, walking_raw, date_str, mode="both",
-                   start_time=None):
+                   start_time=None, atco_loader=None):
     """Build a date-specific MergedData + Router + Walking.
 
     Two adjacent day-halves are merged so that cross-midnight services
@@ -375,6 +380,8 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
         ``"bus"``, ``"train"``, or ``"both"``
     start_time : int | None
         Seconds since midnight.
+    atco_loader : AtcoLoader | None
+        If provided, stop names are resolved from NaPTAN first.
 
     Returns
     -------
@@ -426,6 +433,7 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
 
     merged = MergedData(
         datasets,
+        atco_loader=atco_loader,
         stop_name_fn=loader.get_stop_names_bulk,
     )
     router = RaptorRouter(merged)
@@ -587,6 +595,7 @@ def main():
     base = initialize_base()
     loader      = base["loader"]
     walking_raw = base["walking_raw"]
+    al          = base.get("atco_loader")
 
     # Track the current date so we only rebuild when it changes
     current_date = None
@@ -655,7 +664,8 @@ def main():
         if date_str != current_date or time_bucket != current_time_bucket:
             try:
                 merged, router, walking = build_for_date(
-                    loader, walking_raw, date_str, start_time=start_seconds)
+                    loader, walking_raw, date_str, start_time=start_seconds,
+                    atco_loader=al)
                 current_date = date_str
                 current_time_bucket = time_bucket
             except Exception as e:

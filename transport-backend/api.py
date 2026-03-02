@@ -597,9 +597,11 @@ def get_router_for_date(date_str, start_time=None):
                 return _router_cache[cache_key]
         loader = _base_cache["loader"]
         walking_raw = _base_cache["walking_raw"]
+        al = _base_cache.get("atco_loader")
         from main import build_for_date
         merged, router, walking = build_for_date(
-            loader, walking_raw, date_str, start_time=start_time)
+            loader, walking_raw, date_str, start_time=start_time,
+            atco_loader=al)
         _router_cache[cache_key] = (merged, router, walking)
         return merged, router, walking
 
