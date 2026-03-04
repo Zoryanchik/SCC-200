@@ -523,6 +523,19 @@ async def _apple_touch_icon():
     return Response(content=data, media_type="image/png")
 
 
+def _bus_delay_status(delay_s: Optional[int]) -> str:
+    """Convert delay_seconds to a human-readable bus status string."""
+    if delay_s is None:
+        return "On time"
+    if delay_s >= 120:
+        minutes = round(delay_s / 60)
+        return f"Delayed {minutes} min"
+    if delay_s <= -60:
+        minutes = round(-delay_s / 60)
+        return f"Early {minutes} min"
+    return "On time"
+
+
 @app.get("/bus/live/{operator}")
 async def bus_live_operator(
     operator: str,
@@ -565,8 +578,10 @@ async def bus_live_operator(
             "lat": lat_v,
             "lon": lon_v,
             "operator": _operator,
+            "delay_minutes": round(delay_s / 60, 1) if delay_s is not None else None,
+            "status": _bus_delay_status(delay_s),
         }
-        for line_ref, dest, lat_v, lon_v, _operator in results
+        for line_ref, dest, lat_v, lon_v, _operator, delay_s in results
     ]
 
 # Global cache for (merged, router, walking) by (date, AM/PM bucket)
