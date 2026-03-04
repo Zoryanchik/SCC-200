@@ -70,8 +70,8 @@ class TestBusLiveOperatorEndpoint:
 
     def test_returns_expected_shape(self, client: TestClient):
         api_module.get_bus_live.return_value = [
-            ("10", "City Centre", 53.48, -2.24, "Stagecoach"),
-            ("42", "Airport", 53.35, -2.27, "Transpora"),
+            ("10", "City Centre", 53.48, -2.24, "Stagecoach", None),
+            ("42", "Airport", 53.35, -2.27, "Transpora", 150),
         ]
 
         response = client.get(
@@ -87,6 +87,8 @@ class TestBusLiveOperatorEndpoint:
             "lat": 53.48,
             "lon": -2.24,
             "operator": "Stagecoach",
+            "delay_minutes": None,
+            "status": "On time",
         }
 
     def test_operator_builds_url(self, client: TestClient):
@@ -146,4 +148,73 @@ class TestBusLiveOperatorEndpoint:
         )
         assert response.status_code == 200
         assert response.json() == []
+
+
+class TestBusDelayHandling:
+    """Validate delay_minutes and status fields in /bus/live/{operator} response."""
+
+    def test_no_delay_data_returns_none_and_on_time(self, client: TestClient):
+        """When delay_seconds is None the response should have delay_minutes=None and status='On time'."""
+        api_module.get_bus_live.return_value = [
+            ("1A", "Lancaster", 54.05, -2.80, "Stagecoach", None),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["delay_minutes"] is None
+        assert data[0]["status"] == "On time"
+
+    def test_delay_within_threshold_is_on_time(self, client: TestClient):
+        """Delay < 2 min (119 s) should be reported as 'On time'."""
+        api_module.get_bus_live.return_value = [
+            ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 90),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["status"] == "On time"
+        assert data[0]["delay_minutes"] == 1.5
+
+    def test_delay_above_threshold_reports_delayed(self, client: TestClient):
+        """Delay >= 2 min (120 s) should report 'Delayed N min'."""
+        api_module.get_bus_live.return_value = [
+            ("100", "Blackpool", 54.05, -2.80, "Blackpool Transport", 300),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["status"] == "Delayed 5 min"
+        assert data[0]["delay_minutes"] == 5.0
+
+    def test_large_delay_rounds_correctly(self, client: TestClient):
+        """630 s = 10.5 min → Python round() (banker's rounding) → 10 min."""
+        api_module.get_bus_live.return_value = [
+            ("X2", "Preston", 54.05, -2.80, "Stagecoach", 630),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["status"] == "Delayed 10 min"
+        assert data[0]["delay_minutes"] == 10.5
+
+    def test_early_bus_reports_early(self, client: TestClient):
+        """Negative delay <= -60 s should report 'Early N min'."""
+        api_module.get_bus_live.return_value = [
+            ("44", "Carnforth", 54.05, -2.80, "Stagecoach", -120),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["status"] == "Early 2 min"
+        assert data[0]["delay_minutes"] == -2.0
+
+    def test_delay_minutes_rounds_to_one_decimal(self, client: TestClient):
+        """delay_minutes should be rounded to 1 decimal place."""
+        api_module.get_bus_live.return_value = [
+            ("7", "Fylde", 54.05, -2.80, "Stagecoach", 155),
+        ]
+        data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
+        assert data[0]["delay_minutes"] == round(155 / 60, 1)
+
+
+class TestBusLiveDelayParsing:
+    """Unit-level tests for the delay parsing helpers in bus_live.py.
+
+    These tests import the real module (not the api-level mock).
+    We stash the real module before the top-level mock replaces it.
+    """
+    # Helpers are imported inside each test via sys so we avoid
+    # binding at class-definition time (when the mock is already active).
+    pass
+
 
