@@ -12,7 +12,7 @@ Updated: 2026-03-04
 ## Medium Priority
 - [ ] Refresh only map for live locations, not the whole page
 - [ ] Delay handling for train
-- [ ] Widen search bar — allow location text shown in one line
+- [x] Widen search bar — allow location text shown in one line
 - [ ] Implement `/rail/departures/{station}` endpoint *(not implemented)*
 - [ ] Implement timetable / bus filtering
 - [ ] Implement `/pricing` endpoint (distance-based stub ok) *(not implemented)*
@@ -102,7 +102,7 @@ Focus: Connecting the frontend to the backend, UI, docs, and hardening.
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | — | Implement frontend routing UI (journey results display) | **High** | ❌ open |
-| — | Widen search bar — allow location text on one line | Medium | ❌ open |
+| — | Widen search bar — allow location text on one line | Medium | ✅ done |
 | P6 | Make CORS origins env-configurable (`CORS_ORIGINS` env var) | Medium | ❌ open |
 | 14 | Add developer docs and Docker compose | Medium | ❌ open (~done: READMEs exist; docker-compose missing) |
 | 16 | Harden production config (CORS, auth, rate limits) | Low | ❌ open |
