@@ -182,18 +182,23 @@ export default function HomePage() {
           operatorName = operatorName || bus?.operator_name || bus?.operatorName || bus?.operator_ref || bus?.operatorRef || null;
           // Remove any operator-like keys from meta so it doesn't duplicate
           ['operator', 'operator_name', 'operatorName', 'operator_ref', 'operatorRef'].forEach((k) => delete meta[k]);
+          // Remove delay/status keys – shown in the popup header, not in meta
+          ['delay_minutes', 'delayMinutes', 'status'].forEach((k) => delete meta[k]);
 
           const displayName = (bus.line ? String(bus.line) : '')
                               + (bus.destination ? (' → ' + bus.destination) : '')
                               || (bus.name || `Bus ${bus.id || ''}`);
+
+          const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 
           newMarkers.push({
             id: id++,
             position: [lat, lon],
             name: displayName,
             type: "bus",
-            status: bus.status || "On time",
+            status: bus.status || (delayMinutes != null && delayMinutes >= 2 ? `Delayed ${Math.round(delayMinutes)} min` : "On time"),
             routeNumber: bus.routeNumber || bus.route || bus.line,
+            delayMinutes,
             operator: operatorName,
             meta: meta,
           });
