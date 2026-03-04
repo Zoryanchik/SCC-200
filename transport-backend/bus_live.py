@@ -1,7 +1,39 @@
-﻿import ssl
+﻿import re
+import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from typing import List, Tuple, Iterable, Optional
+
+
+def _parse_iso_duration(s: str) -> Optional[int]:
+    """Parse ISO 8601 duration string to seconds (positive = late, negative = early).
+
+    Examples: 'PT2M30S' → 150, '-PT1M' → -60, 'PT0S' → 0.
+    Returns None if the string cannot be parsed.
+    """
+    if not s:
+        return None
+    sign = -1 if s.startswith('-') else 1
+    s = s.lstrip('-')
+    m = re.match(r'P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?', s)
+    if not m or not any(m.groups()):
+        return None
+    h = int(m.group(1) or 0)
+    mins = int(m.group(2) or 0)
+    secs = float(m.group(3) or 0)
+    return sign * int(h * 3600 + mins * 60 + secs)
+
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    """Parse ISO 8601 datetime string to a timezone-aware datetime."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
 
 
 class BusLive:
@@ -62,8 +94,14 @@ class BusLive:
         return (c.text or '').strip()
 
     def get_bus_live(self, lat: float, lon: float, urls: Iterable[str] = None,
-                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple[str, str, float, float, str]]:
-        """Return nearby live vehicles as (line_ref, destination_name, lat, lon, operator_name).
+                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple]:
+        """Return nearby live vehicles.
+
+        Each element is a 6-tuple:
+            (line_ref, destination_name, lat, lon, operator_name, delay_seconds)
+
+        ``delay_seconds`` is an int (positive = late, negative = early) or
+        ``None`` when no timing data is available in the feed.
 
         lat, lon are the centre point; lat_tol/lon_tol define the half-widths of
         the allowed rectangle.
@@ -137,8 +175,35 @@ class BusLive:
                     except Exception:
                         continue
 
+                    # --- delay extraction -----------------------------------
+                    # Strategy 1: explicit <Delay> ISO 8601 duration element
+                    delay_seconds: Optional[int] = None
+                    delay_raw = (self._get_text(mvj, 'delay') or
+                                 self._get_text(mvj, 'Delay'))
+                    if delay_raw:
+                        delay_seconds = _parse_iso_duration(delay_raw)
+
+                    # Strategy 2: difference between ExpectedDeparture and AimedDeparture
+                    if delay_seconds is None:
+                        aimed_raw = (self._get_text(mvj, 'aimeddeparturetime') or
+                                     self._get_text(mvj, 'AimedDepartureTime'))
+                        expected_raw = (self._get_text(mvj, 'expecteddeparturetime') or
+                                        self._get_text(mvj, 'ExpectedDepartureTime'))
+                        if not aimed_raw or not expected_raw:
+                            # try AimedArrivalTime / ExpectedArrivalTime as fallback
+                            aimed_raw = (self._get_text(mvj, 'aimedarrivaltime') or
+                                         self._get_text(mvj, 'AimedArrivalTime'))
+                            expected_raw = (self._get_text(mvj, 'expectedarrivaltime') or
+                                            self._get_text(mvj, 'ExpectedArrivalTime'))
+                        aimed_dt = _parse_iso_dt(aimed_raw)
+                        expected_dt = _parse_iso_dt(expected_raw)
+                        if aimed_dt and expected_dt:
+                            diff = (expected_dt - aimed_dt).total_seconds()
+                            delay_seconds = int(diff)
+                    # --------------------------------------------------------
+
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        results.append((line_ref, dest, lat_v, lon_v, operator_name))
+                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds))
 
         return results
 
@@ -190,8 +255,9 @@ def main():
 
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
-    for i, (line, dest, lat, lon, operator) in enumerate(display_results):
-        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}")
+    for i, (line, dest, lat, lon, operator, delay_s) in enumerate(display_results):
+        delay_str = f", delay={delay_s}s" if delay_s is not None else ""
+        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}{delay_str}")
 
 
 if __name__ == "__main__":
