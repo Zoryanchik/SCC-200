@@ -7,7 +7,8 @@ Updated: 2026-03-04
 ## Open Tasks
 
 ## High Priority
-- [ ] Implement frontend for routing (journey results display)
+- [x] Implement frontend for routing (journey results display)
+- [ ] Number of transfer limit botton in frontend
 
 ## Medium Priority
 - [ ] Refresh only map for live locations, not the whole page
