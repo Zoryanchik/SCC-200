@@ -21,6 +21,23 @@ Updated: 2026-03-04
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/arrivals/{stopCode}` endpoint *(not implemented)*
 
+## Bus Stops on Map
+- [x] Create `busStopsApi.js` service with mock fallback (12 Lancaster-area stops)
+- [x] Create `useBusStops` React hook (loading/error/refetch state)
+- [x] Create `BusStopLayer` component (colour-coded markers with popup info)
+- [x] Integrate `BusStopLayer` into `MapViewMap.jsx` (additive only)
+- [x] Write tests for all new modules (44 tests passing)
+- [x] Fix mock fallback — API returns geocoded locations not bus stops
+- [x] Add backend `GET /stops/geo` endpoint — merges classification data with NaPTAN lat/lon coords
+- [x] Update frontend `busStopsApi.js` to consume `/stops/geo` for real classified stops
+- [x] Add `?bbox=south,west,north,east` viewport filter to `/stops/geo`
+- [x] Strip internal line IDs → human-readable route names (1, 1A, 100, etc.)
+- [x] Replace CircleMarker with SVG bus-stop sign icon (circle on post, scales with zoom)
+- [x] Raise minZoom to 14 — stops only appear at street-level to avoid map clutter
+- [ ] Pass viewport bbox from `BusStopLayer` → hook → API to reduce data transfer (currently fetches all, filters client-side)
+- [ ] Add click-to-filter: click a bus route badge to highlight all stops on that route
+- [ ] Show real-time arrival data in stop popup (requires `GET /bus/arrivals/{stopCode}` backend endpoint)
+
 ## Low Priority
 - [ ] Harden production config (CORS, auth, rate limits) *(not implemented — no auth, no rate limits, CORS hardcoded)*
 - [ ] Add analytics and frequent routes endpoint *(not implemented)*

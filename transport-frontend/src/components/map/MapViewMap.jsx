@@ -9,6 +9,7 @@ import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
 import { useEffect } from "react";
 import WeatherWidget from "../common/WeatherWidget";
+import BusStopLayer from "./BusStopLayer";
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -256,6 +257,8 @@ export default function MapViewMap({
 						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 						url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 					/>
+					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
+					<BusStopLayer />
 					{filteredMarkers.map((marker) => (
 						<Marker
 							key={marker.id}
