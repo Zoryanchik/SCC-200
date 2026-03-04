@@ -489,6 +489,117 @@ async def stops_classify(classification: Optional[str] = None):
     return results
 
 
+# ── Geo-enriched classified stops ────────────────────────────────────
+# Cache the combined result so repeated requests are instant.
+_stops_geo_cache: Optional[List[Dict[str, Any]]] = None
+
+
+@app.get("/stops/geo")
+async def stops_geo(
+    classification: Optional[str] = None,
+    bbox: Optional[str] = None,
+):
+    """Return classified bus stops with lat/lon coordinates.
+
+    Merges ``/stops/classify`` data with NaPTAN coordinates so every
+    stop has ``lat``, ``lon``, ``name``, ``classification``, ``lines``,
+    and ``atco_code``.
+
+    Query params:
+        classification: optional filter (hub | interchange | local | request_stop)
+        bbox:           optional viewport filter as ``south,west,north,east``
+
+    Response: JSON list of
+        ``{id, name, lat, lon, atco_code, classification, lines,
+           degree, frequency}``.
+    """
+    from fastapi.responses import JSONResponse
+
+    _VALID_CLASSES = {"hub", "interchange", "local", "request_stop"}
+    if classification and classification not in _VALID_CLASSES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid classification '{classification}'. "
+                     f"Must be one of: {', '.join(sorted(_VALID_CLASSES))}"},
+        )
+
+    # Parse optional bounding box
+    south = west = north = east = None
+    if bbox:
+        try:
+            parts = [float(x) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("need 4 values")
+            south, west, north, east = parts
+        except (ValueError, TypeError):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "bbox must be 4 comma-separated floats: south,west,north,east"},
+            )
+
+    # Build (or reuse) the full enriched list
+    global _stops_geo_cache
+    if _stops_geo_cache is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            merged, _router, _walking = get_router_for_date(date_str)
+        except Exception:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Backend not initialized"},
+            )
+
+        # Get NaPTAN coords: {atco_code: (lat, lon)}
+        atco = _base_cache.get("atco_loader") if _base_cache else None
+        coord_map: Dict[str, tuple] = {}
+        if atco:
+            try:
+                coord_map = atco.get_all_stop_coords()
+            except Exception as exc:
+                logger.warning("Failed to load stop coords: %s", exc)
+
+        # Classify every stop in the merged network
+        all_classified = classify_all(merged)
+
+        enriched: List[Dict[str, Any]] = []
+        for stop in all_classified:
+            atco_code = merged.get_atco_code(stop["stop_index"])
+            if not atco_code:
+                continue
+            coords = coord_map.get(atco_code)
+            if not coords:
+                continue
+            lat, lon = coords
+            enriched.append({
+                "id": atco_code,
+                "name": stop["name"],
+                "lat": lat,
+                "lon": lon,
+                "atco_code": atco_code,
+                "classification": stop["classification"],
+                "lines": sorted({
+                    ln.split(":")[-1] for ln in stop["lines"]
+                    if ln
+                }),
+                "degree": stop["degree"],
+                "frequency": stop["frequency"],
+            })
+
+        _stops_geo_cache = enriched
+
+    # Apply filters on the cached list
+    results = _stops_geo_cache
+    if classification:
+        results = [s for s in results if s["classification"] == classification]
+    if south is not None:
+        results = [
+            s for s in results
+            if south <= s["lat"] <= north and west <= s["lon"] <= east
+        ]
+
+    return results
+
+
 # — Static files & frontend ————————————————————————————————
 
 # Only mount static files if the directory exists (skipped during tests)
