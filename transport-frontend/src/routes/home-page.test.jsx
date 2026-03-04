@@ -41,6 +41,18 @@ vi.mock("../components/map/MapViewMap", () => ({
         <span data-testid="marker-count">{filteredMarkers.length}</span>
         {busLoading && <span data-testid="bus-loading">loading</span>}
         {trainLoading && <span data-testid="train-loading">loading</span>}
+        {filteredMarkers.map((m) => (
+          <div key={m.id} data-testid={`marker-${m.type}`}>
+            {m.routeNumber != null && (
+              <span data-testid="bus-route-number">{m.routeNumber}</span>
+            )}
+            <span data-testid="marker-name">{m.name}</span>
+            <span data-testid="marker-status">{m.status}</span>
+            {m.delayMinutes != null && (
+              <span data-testid="bus-delay-minutes">{m.delayMinutes}</span>
+            )}
+          </div>
+        ))}
       </div>
     );
   },
@@ -336,5 +348,175 @@ describe("fetchLiveBusLocations API contract", () => {
 
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+});
+
+describe("Bus route number display on markers", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("bus markers carry routeNumber equal to bus.line from API response", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster" },
+      { lat: 54.06, lon: -2.81, line: "44", destination: "Morecambe" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const routeNumbers = screen.getAllByTestId("bus-route-number");
+      const texts = routeNumbers.map((el) => el.textContent);
+      expect(texts).toContain("1A");
+      expect(texts).toContain("44");
+    });
+  });
+
+  test("bus markers display name combining line and destination", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const names = screen.getAllByTestId("marker-name");
+      expect(names.some((el) => el.textContent.includes("100"))).toBe(true);
+      expect(names.some((el) => el.textContent.includes("Blackpool"))).toBe(true);
+    });
+  });
+
+  test("bus marker routeNumber falls back to bus.routeNumber if line is absent", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, routeNumber: "X2", destination: "Preston" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const routeNumbers = screen.getAllByTestId("bus-route-number");
+      expect(routeNumbers.some((el) => el.textContent === "X2")).toBe(true);
+    });
+  });
+
+  test("bus markers without a line/routeNumber show no route number element", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, destination: "Unknown" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      // Marker should render but without a route-number span
+      const busMarkers = screen.queryAllByTestId("marker-bus");
+      expect(busMarkers.length).toBe(1);
+      const routeNumbers = screen.queryAllByTestId("bus-route-number");
+      expect(routeNumbers.length).toBe(0);
+    });
+  });
+});
+
+describe("Bus delay handling on markers", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("bus with no delay shows 'On time' status", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster", delay_minutes: null, status: "On time" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const statuses = screen.getAllByTestId("marker-status");
+      expect(statuses.some((el) => el.textContent === "On time")).toBe(true);
+    });
+  });
+
+  test("bus with delay_minutes >= 2 shows delayed status", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "2", destination: "Morecambe", delay_minutes: 5.0, status: "Delayed 5 min" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const statuses = screen.getAllByTestId("marker-status");
+      expect(statuses.some((el) => el.textContent === "Delayed 5 min")).toBe(true);
+    });
+  });
+
+  test("bus with delay_minutes propagated as numeric to marker", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool", delay_minutes: 10.5, status: "Delayed 11 min" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const delays = screen.getAllByTestId("bus-delay-minutes");
+      expect(delays.some((el) => el.textContent === "10.5")).toBe(true);
+    });
+  });
+
+  test("bus with early arrival shows early status", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "X2", destination: "Preston", delay_minutes: -2.0, status: "Early 2 min" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const statuses = screen.getAllByTestId("marker-status");
+      expect(statuses.some((el) => el.textContent === "Early 2 min")).toBe(true);
+    });
+  });
+
+  test("bus with no delay info shows no delay-minutes element", async () => {
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "44", destination: "Carnforth", delay_minutes: null, status: "On time" },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("bus-delay-minutes").length).toBe(0);
+    });
+  });
+
+  test("status derived from delay_minutes when status field absent", async () => {
+    // Backend might not always return status; frontend computes it from delay_minutes
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "7", destination: "Fylde", delay_minutes: 7 },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    await waitFor(() => {
+      const statuses = screen.getAllByTestId("marker-status");
+      // 7 min delay should show delayed status
+      expect(statuses.some((el) => el.textContent.toLowerCase().includes("delay"))).toBe(true);
+    });
   });
 });

@@ -23,12 +23,28 @@ let DefaultIcon = L.icon({
 
 L.Marker.prototype.options.icon = DefaultIcon;
 
-const createCustomIcon = (type, color) => {
+/**
+ * Creates a custom Leaflet divIcon for a bus or train marker.
+ * @param {'bus'|'train'} type
+ * @param {string} color  - hex/named CSS colour
+ * @param {string|null} [label] - for bus markers, the route/line number to display on the icon
+ */
+const createCustomIcon = (type, color, label = null) => {
+	let innerSvg;
+	if (type === 'bus' && label) {
+		// Show route number prominently inside the circle
+		const text = String(label).substring(0, 4); // cap at 4 chars
+		const fontSize = text.length >= 4 ? 9 : text.length === 3 ? 11 : 13;
+		innerSvg = `<text x="20" y="25" text-anchor="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="${color}">${text}</text>`;
+	} else if (type === 'bus') {
+		innerSvg = '<path d="M12 14h16v8H12z" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="2" fill="' + color + '"/><circle cx="24" cy="24" r="2" fill="' + color + '"/>';
+	} else {
+		innerSvg = '<path d="M20 12l-6 4v8h12v-8z" fill="none" stroke="' + color + '" stroke-width="2"/><line x1="14" y1="24" x2="26" y2="24" stroke="' + color + '" stroke-width="2"/>';
+	}
+
 	const svg = `<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
 		<circle cx="20" cy="20" r="18" fill="white" stroke="${color}" stroke-width="3"/>
-		${type === 'bus' 
-			? '<path d="M12 14h16v8H12z" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="2" fill="' + color + '"/><circle cx="24" cy="24" r="2" fill="' + color + '"/>' 
-			: '<path d="M20 12l-6 4v8h12v-8z" fill="none" stroke="' + color + '" stroke-width="2"/><line x1="14" y1="24" x2="26" y2="24" stroke="' + color + '" stroke-width="2"/>'}
+		${innerSvg}
 	</svg>`;
 
 	return L.divIcon({
@@ -55,7 +71,18 @@ const createUserIcon = () => {
 	});
 };
 
-const BUS_ICON = createCustomIcon('bus', '#1976d2');
+/**
+ * Returns the colour to use for a bus marker icon based on delay.
+ * @param {number|null} delayMinutes
+ */
+const busIconColor = (delayMinutes) => {
+	if (delayMinutes == null) return '#1976d2';      // unknown → blue
+	if (delayMinutes >= 10) return '#d32f2f';        // very late → red
+	if (delayMinutes >= 2) return '#f57c00';         // delayed → orange
+	if (delayMinutes <= -1) return '#7b1fa2';        // early → purple
+	return '#1976d2';                                // on time → blue
+};
+
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32');
 const USER_ICON = createUserIcon();
 
@@ -233,7 +260,9 @@ export default function MapViewMap({
 						<Marker
 							key={marker.id}
 							position={marker.position}
-							icon={marker.type === 'bus' ? BUS_ICON : TRAIN_ICON}
+							icon={marker.type === 'bus'
+							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null)
+								: TRAIN_ICON}
 							eventHandlers={{
 								click: () => onOpenPopup(marker.id)
 							}}
@@ -247,21 +276,47 @@ export default function MapViewMap({
 										<Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
 											{marker.name}
 										</Typography>
-										<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+										<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.5 }}>
 											{marker.type === 'bus' ? '\U0001f68c Bus' : '\U0001f682 Train'}
 										</Typography>
-										<Box sx={{
-											display: 'inline-block',
-											padding: '4px 12px',
-											borderRadius: '12px',
-											backgroundColor: marker.status === 'On time' ? '#e8f5e9' : '#ffebee',
-											color: marker.status === 'On time' ? '#2e7d32' : '#c62828',
-											fontSize: '12px',
-											fontWeight: '600',
-											marginBottom: '8px'
-										}}>
-											{marker.status === 'On time' ? '\u2713' : '\u26a0'} {marker.status}
-										</Box>
+										{marker.type === 'bus' && marker.routeNumber != null && (
+											<Box sx={{
+												display: 'inline-flex',
+												alignItems: 'center',
+												gap: '4px',
+												padding: '2px 10px',
+												borderRadius: '10px',
+												backgroundColor: busIconColor(marker.delayMinutes),
+												color: 'white',
+												fontSize: '13px',
+												fontWeight: '700',
+												mb: 1,
+											}}>
+												Route {String(marker.routeNumber)}
+											</Box>
+										)}
+										{(() => {
+											const dm = marker.delayMinutes;
+											const isOnTime = dm == null || (dm > -1 && dm < 2);
+											const isEarly = dm != null && dm <= -1;
+											const bgColor = isOnTime ? '#e8f5e9' : isEarly ? '#f3e5f5' : (dm >= 10 ? '#ffebee' : '#fff3e0');
+											const txtColor = isOnTime ? '#2e7d32' : isEarly ? '#6a1b9a' : (dm >= 10 ? '#c62828' : '#e65100');
+											const icon = isOnTime ? '\u2713' : isEarly ? '\u23eb' : '\u26a0';
+											return (
+												<Box sx={{
+													display: 'inline-block',
+													padding: '4px 12px',
+													borderRadius: '12px',
+													backgroundColor: bgColor,
+													color: txtColor,
+													fontSize: '12px',
+													fontWeight: '600',
+													marginBottom: '8px'
+												}}>
+													{icon} {marker.status}
+												</Box>
+											);
+										})()}
 										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
 										{marker.operator && (
 											// force a full-width break before operator so it is always on its own line
@@ -276,7 +331,7 @@ export default function MapViewMap({
 												{Object.entries(marker.meta)
 													.filter(([k]) => {
 														const kk = String(k).toLowerCase();
-														return !['lat', 'lon', 'latitude', 'longitude', 'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname'].includes(kk);
+														return !['lat', 'lon', 'latitude', 'longitude', 'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname', 'delay_minutes', 'delayminutes', 'status'].includes(kk);
 													})
 													.map(([key, value]) => (
 														<Typography key={key} variant="body2" sx={{ mb: 0.5 }}>
