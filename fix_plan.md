@@ -1,6 +1,6 @@
 ﻿# Transport Backend — Fix Plan
 
-Updated: 2026-03-04
+Updated: 2026-03-05
 
 ---
 
@@ -36,8 +36,24 @@ Updated: 2026-03-04
 - [x] Replace CircleMarker with SVG bus-stop sign icon (circle on post, scales with zoom)
 - [x] Raise minZoom to 14 — stops only appear at street-level to avoid map clutter
 - [ ] Pass viewport bbox from `BusStopLayer` → hook → API to reduce data transfer (currently fetches all, filters client-side)
-- [ ] Add click-to-filter: click a bus route badge to highlight all stops on that route
 - [ ] Show real-time arrival data in stop popup (requires `GET /bus/arrivals/{stopCode}` backend endpoint)
+
+## Bus Route Lines on Map
+- [x] Add backend `GET /routes/line/{line}` endpoint — returns ordered stop sequences with coords
+- [x] Use journey-level stop sequences (not merged route_stops) to avoid interleaved inbound/outbound
+- [x] Mean-gap heuristic to pick tightest single-direction journey per route
+- [x] Post-filter: drop variants with max gap >2.5 km or mean gap >1.8× best
+- [x] Create `routeLineApi.js` service — fetches route data, converts stops to LatLng arrays
+- [x] Create `useRouteLine` hook — toggle state with ref+tick pattern (no infinite re-renders)
+- [x] Create `RouteLineLayer` component — coloured polylines + circle markers at stops
+- [x] Wire popup route buttons to toggle route lines via capture-phase pointerdown listener
+- [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
+- [ ] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
+- [ ] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
+- [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
+- [ ] Verify button highlight color toggle works (dark blue + ✓ on click)
+- [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
+- [ ] Update/write backend tests for `/routes/line/{line}` endpoint
 
 ## Low Priority
 - [ ] Harden production config (CORS, auth, rate limits) *(not implemented — no auth, no rate limits, CORS hardcoded)*
