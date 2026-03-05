@@ -270,19 +270,38 @@ class RaptorRouter:
         # considered from the soonest originating stop first.
         ordered_switch_b = sorted(list(switch_b), key=lambda s: reach_stops[s][1])
         for stop in ordered_switch_b:
-            walk_stops = walking.inter_walk(stop)
-            for walk_stop, secs in walk_stops.items():
-                walk_arrival = reach_stops[stop][1] + secs
-                if reach_stops[walk_stop][1] > walk_arrival:
-                    reach_stops[walk_stop][1] = walk_arrival
-                    reach_stops[walk_stop][0] = stop
-                    reach_stops[walk_stop][2] = WALKING
-                    switch_b.add(walk_stop)
-                    # Debug: record walking transfer update
-                    if debug_stop_ids is not None and walk_stop in debug_stop_ids:
-                        if not hasattr(self, '_debug_events'):
-                            self._debug_events = []
-                        self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
+            if reach_stops[stop][2] == WALKING:
+                pre = reach_stops[stop][0]
+                if pre is None:
+                    continue
+                walk_stops = walking.inter_walk(stop)
+                for walk_stop, _ in walk_stops.items():
+                    walk_arrival = reach_stops[pre][1] + walking.walking_time_between(
+                        walking.get_loc_coords(pre), walking.get_loc_coords(walk_stop))
+                    if reach_stops[walk_stop][1] > walk_arrival:
+                        reach_stops[walk_stop][1] = walk_arrival
+                        reach_stops[walk_stop][0] = pre
+                        reach_stops[walk_stop][2] = WALKING
+                        switch_b.add(walk_stop)
+                        # Debug: record walking transfer update
+                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                            if not hasattr(self, '_debug_events'):
+                                self._debug_events = []
+                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, pre))        
+            else:
+                walk_stops = walking.inter_walk(stop)
+                for walk_stop, secs in walk_stops.items():
+                    walk_arrival = reach_stops[stop][1] + secs
+                    if reach_stops[walk_stop][1] > walk_arrival:
+                        reach_stops[walk_stop][1] = walk_arrival
+                        reach_stops[walk_stop][0] = stop
+                        reach_stops[walk_stop][2] = WALKING
+                        switch_b.add(walk_stop)
+                        # Debug: record walking transfer update
+                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                            if not hasattr(self, '_debug_events'):
+                                self._debug_events = []
+                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
 
         self.recursive_raptor(
             n_transfer, transfer_limit, reach_stops, walking,
