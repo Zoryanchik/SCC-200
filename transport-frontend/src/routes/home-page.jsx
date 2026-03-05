@@ -442,23 +442,21 @@ export default function HomePage() {
         </Stack>
 
         <Suspense fallback={<MapFallback />}>
-          <Box sx={{ height: { xs: 350, md: 450 }, borderRadius: "12px", overflow: "hidden" }}>
-            <MapViewMap
-              filteredMarkers={filteredMarkers}
-              openPopupId={openPopupId}
-              onOpenPopup={setOpenPopupId}
-              onClosePopup={() => setOpenPopupId(null)}
-              userLocation={null}
-              nearestStop={null}
-              busLoading={busLoading}
-              busRefreshing={busRefreshing}
-              busCountdown={busCountdown}
-              busRefreshInterval={busRefreshInterval}
-              trainLoading={trainLoading}
-              onMapReady={setMapInstance}
-              onMoveEnd={handleMoveEnd}
-            />
-          </Box>
+          <MapViewMap
+            filteredMarkers={filteredMarkers}
+            openPopupId={openPopupId}
+            onOpenPopup={setOpenPopupId}
+            onClosePopup={() => setOpenPopupId(null)}
+            userLocation={null}
+            nearestStop={null}
+            busLoading={busLoading}
+            busRefreshing={busRefreshing}
+            busCountdown={busCountdown}
+            busRefreshInterval={busRefreshInterval}
+            trainLoading={trainLoading}
+            onMapReady={setMapInstance}
+            onMoveEnd={handleMoveEnd}
+          />
         </Suspense>
       </Paper>
 

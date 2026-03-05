@@ -142,7 +142,7 @@ export default function MapViewMap({
 	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
 
 	return (
-		<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
+	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 600 } }}>
 			<Box sx={{
 				flex: 1,
 				position: 'relative',
@@ -151,7 +151,7 @@ export default function MapViewMap({
 				boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
 				border: '1px solid',
 				borderColor: 'divider',
-				height: { xs: 420, sm: 520, md: '100%' }
+				height: { xs: 320, sm: 420, md: '100%' }
 			}}>
 				{/* Full overlay only on the very first load — not on every 30-second refresh */}
 				{(busLoading || trainLoading) && (
