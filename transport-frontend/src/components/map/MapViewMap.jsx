@@ -10,6 +10,8 @@ import "leaflet/dist/leaflet.css";
 import { useEffect } from "react";
 import WeatherWidget from "../common/WeatherWidget";
 import BusStopLayer from "./BusStopLayer";
+import RouteLineLayer from "./RouteLineLayer";
+import { useRouteLine } from "../../hooks/useRouteLine";
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -137,6 +139,8 @@ export default function MapViewMap({
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
+	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
+
 	return (
 		<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
 			<Box sx={{
@@ -258,7 +262,8 @@ export default function MapViewMap({
 						url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 					/>
 					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
-					<BusStopLayer />
+					<BusStopLayer onToggleRoute={toggleRoute} isRouteActive={isActive} />
+					<RouteLineLayer activeRoutes={activeRoutes} />
 					{filteredMarkers.map((marker) => (
 						<Marker
 							key={marker.id}

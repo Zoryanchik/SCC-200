@@ -600,6 +600,191 @@ async def stops_geo(
     return results
 
 
+# ── Route line stops for a given line name ───────────────────────────
+# Returns the ordered list of stops (with lat/lon) for every route
+# variant that matches the requested line name.  Used by the frontend
+# to draw polylines on the map when a user clicks a line chip.
+
+_route_line_cache: Dict[str, Any] = {}
+
+
+@app.get("/routes/line/{line}")
+async def routes_for_line(line: str):
+    """Return route variants for a bus line, each with ordered stops + coords.
+
+    Response::
+
+        {
+          "line": "100",
+          "variants": [
+            {
+              "route_id": "ROUTE_abc",
+              "stops": [
+                {"name": "Stop A", "lat": 54.0, "lon": -2.8, "atco_code": "250..."},
+                ...
+              ]
+            },
+            ...           // max 3 most-distinct variants
+          ]
+        }
+    """
+    from fastapi.responses import JSONResponse
+
+    # Normalise the line name for cache lookup (case-insensitive)
+    line_key = line.strip().upper()
+
+    if line_key in _route_line_cache:
+        return _route_line_cache[line_key]
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        merged, _router, _walking = get_router_for_date(date_str)
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Backend not initialized"},
+        )
+
+    # NaPTAN coordinate lookup
+    atco = _base_cache.get("atco_loader") if _base_cache else None
+    coord_map: Dict[str, tuple] = {}
+    if atco:
+        try:
+            coord_map = atco.get_all_stop_coords()
+        except Exception:
+            pass
+
+    # ── Collect route indices whose line_name matches ──────────────
+    # line_name may be prefixed like "PC0002407:425:100" — match the
+    # part after the last colon, which is what the frontend shows.
+    matching_routes: list[int] = []
+    for r_idx, meta in enumerate(merged.route_metadata):
+        if meta is None:
+            continue
+        raw_line = (meta.get("line_name") or "").strip()
+        rline = raw_line.split(":")[-1].upper()
+        if rline == line_key:
+            matching_routes.append(r_idx)
+
+    # ── Build variants from *journey-level* stop sequences ───────
+    # Using route_stops directly can produce interleaved inbound/outbound
+    # lists (e.g. 98 stops zigzagging across the map).  Instead, for each
+    # matching route we pick the representative journey with the most stops
+    # — a single trip A→B whose stops are in correct geographic order.
+    #
+    # Build route_idx → list[journey_idx] mapping.
+    route_journeys: dict[int, list[int]] = {r: [] for r in matching_routes}
+    for j_idx, r_idx in enumerate(merged.journey_to_route):
+        if r_idx in route_journeys:
+            route_journeys[r_idx].append(j_idx)
+
+    def _journey_stops(j_idx: int) -> list[dict]:
+        """Extract ordered stop dicts from a single journey."""
+        stops = []
+        for entry in merged.journey_times[j_idx]:
+            s_int = entry[0]
+            atco_code = merged.get_atco_code(s_int)
+            if not atco_code:
+                continue
+            coords = coord_map.get(atco_code)
+            if not coords:
+                continue
+            lat, lon = coords
+            name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
+            stops.append({
+                "name": name or atco_code,
+                "lat": lat,
+                "lon": lon,
+                "atco_code": atco_code,
+            })
+        return stops
+
+    import math
+
+    def _mean_gap(stops: list[dict]) -> float:
+        """Mean consecutive distance in metres (cheap Euclidean approx)."""
+        if len(stops) < 2:
+            return 0.0
+        total = 0.0
+        cos_lat = math.cos(math.radians(stops[0]["lat"]))
+        for i in range(len(stops) - 1):
+            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+            total += math.sqrt(dlat * dlat + dlon * dlon)
+        return total / (len(stops) - 1)
+
+    variants = []
+    for r_idx in matching_routes:
+        j_list = route_journeys[r_idx]
+        if not j_list:
+            continue
+
+        # Pick the best representative journey.  We want:
+        #  - enough stops to trace the route (>= 10)
+        #  - tight stop spacing (low mean gap) — avoids circular/merged
+        #    journeys whose stops zigzag across the map.
+        # Strategy: build stops for a few candidate journeys, pick the
+        # one with the lowest mean consecutive gap.
+        # To keep it fast, sample up to 8 candidates per route.
+        candidates = sorted(
+            j_list, key=lambda j: len(merged.journey_times[j]), reverse=True
+        )[:8]
+
+        best_stops = None
+        best_gap = float("inf")
+        for j in candidates:
+            s = _journey_stops(j)
+            if len(s) < 10:
+                continue
+            gap = _mean_gap(s)
+            if gap < best_gap:
+                best_gap = gap
+                best_stops = s
+
+        if best_stops and len(best_stops) >= 2:
+            meta = merged.route_metadata[r_idx] or {}
+            route_id = meta.get("route_id", f"route_{r_idx}")
+            variants.append({"route_id": route_id, "stops": best_stops})
+
+    # De-duplicate: keep only the most-distinct variants (by ATCO signature).
+    seen_sigs: set[tuple] = set()
+    unique = []
+    for v in variants:
+        sig = tuple(s["atco_code"] for s in v["stops"])
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(v)
+
+    # Sort by number of stops descending (longest single-direction routes
+    # first), take top 3 to avoid visual clutter.
+    unique.sort(key=lambda v: len(v["stops"]), reverse=True)
+    unique = unique[:3]
+
+    # Drop variants whose mean gap is much worse than the best,
+    # or that contain any single gap > 2 km — these are typically
+    # messy journey patterns that zigzag across the map.
+    if unique:
+        def _max_gap(stops):
+            cos_lat = math.cos(math.radians(stops[0]["lat"]))
+            mx = 0.0
+            for i in range(len(stops) - 1):
+                dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+                dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+                mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
+            return mx
+
+        mean_gaps = [_mean_gap(v["stops"]) for v in unique]
+        best = min(mean_gaps)
+        unique = [
+            v for v, mg in zip(unique, mean_gaps)
+            if mg <= best * 1.8 and _max_gap(v["stops"]) < 2500
+        ]
+
+    result = {"line": line, "variants": unique}
+    _route_line_cache[line_key] = result
+    return result
+
+
 # — Static files & frontend ————————————————————————————————
 
 # Only mount static files if the directory exists (skipped during tests)
