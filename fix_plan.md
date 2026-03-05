@@ -1,18 +1,19 @@
 ﻿# Transport Backend — Fix Plan
 
-Updated: 2026-03-04
+Updated: 2026-03-05
 
 ---
 
 ## Open Tasks
 
 ## High Priority
-- [ ] Implement frontend for routing (journey results display)
+- [x] Implement frontend for routing (journey results display)
+- [ ] Number of transfer limit botton in frontend
 
 ## Medium Priority
 - [ ] Refresh only map for live locations, not the whole page
 - [ ] Delay handling for train
-- [ ] Widen search bar — allow location text shown in one line
+- [x] Widen search bar — allow location text shown in one line
 - [ ] Implement `/rail/departures/{station}` endpoint *(not implemented)*
 - [ ] Implement timetable / bus filtering
 - [ ] Implement `/pricing` endpoint (distance-based stub ok) *(not implemented)*
@@ -20,6 +21,39 @@ Updated: 2026-03-04
 - [ ] Implement `/alerts` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/arrivals/{stopCode}` endpoint *(not implemented)*
+
+## Bus Stops on Map
+- [x] Create `busStopsApi.js` service with mock fallback (12 Lancaster-area stops)
+- [x] Create `useBusStops` React hook (loading/error/refetch state)
+- [x] Create `BusStopLayer` component (colour-coded markers with popup info)
+- [x] Integrate `BusStopLayer` into `MapViewMap.jsx` (additive only)
+- [x] Write tests for all new modules (44 tests passing)
+- [x] Fix mock fallback — API returns geocoded locations not bus stops
+- [x] Add backend `GET /stops/geo` endpoint — merges classification data with NaPTAN lat/lon coords
+- [x] Update frontend `busStopsApi.js` to consume `/stops/geo` for real classified stops
+- [x] Add `?bbox=south,west,north,east` viewport filter to `/stops/geo`
+- [x] Strip internal line IDs → human-readable route names (1, 1A, 100, etc.)
+- [x] Replace CircleMarker with SVG bus-stop sign icon (circle on post, scales with zoom)
+- [x] Raise minZoom to 14 — stops only appear at street-level to avoid map clutter
+- [ ] Pass viewport bbox from `BusStopLayer` → hook → API to reduce data transfer (currently fetches all, filters client-side)
+- [ ] Show real-time arrival data in stop popup (requires `GET /bus/arrivals/{stopCode}` backend endpoint)
+
+## Bus Route Lines on Map
+- [x] Add backend `GET /routes/line/{line}` endpoint — returns ordered stop sequences with coords
+- [x] Use journey-level stop sequences (not merged route_stops) to avoid interleaved inbound/outbound
+- [x] Mean-gap heuristic to pick tightest single-direction journey per route
+- [x] Post-filter: drop variants with max gap >2.5 km or mean gap >1.8× best
+- [x] Create `routeLineApi.js` service — fetches route data, converts stops to LatLng arrays
+- [x] Create `useRouteLine` hook — toggle state with ref+tick pattern (no infinite re-renders)
+- [x] Create `RouteLineLayer` component — coloured polylines + circle markers at stops
+- [x] Wire popup route buttons to toggle route lines via capture-phase pointerdown listener
+- [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
+- [ ] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
+- [ ] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
+- [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
+- [ ] Verify button highlight color toggle works (dark blue + ✓ on click)
+- [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
+- [ ] Update/write backend tests for `/routes/line/{line}` endpoint
 
 ## Low Priority
 - [ ] Harden production config (CORS, auth, rate limits) *(not implemented — no auth, no rate limits, CORS hardcoded)*
@@ -73,85 +107,25 @@ Focus: Building out the remaining REST endpoints and data layer.
 ### Anton — Real-time Systems, Routing & Geometry
 Focus: Live data, routing infrastructure, bus tracking, and station features.
 
-| # | Task | Priority |
-|---|------|----------|
-| P3 | ~~Deprecate/remove duplicate `POST /api/bus_live` endpoint (different shape from GET)~~ ✅ | **Medium** |
-| P4 | ~~Document `[lat, lon]` vs GeoJSON `[lon, lat]` coord order in code comments~~ ✅ | Low |
-| — | ~~Review mock FastAPI frontend for integration cues~~ (done) | ~~High~~ |
-| 8 | ~~Add WebSocket/STOMP live updates adapter~~ ✅ | Medium |
-| 9 | Ensure multi-leg route geometry export for map polylines | ✅ Done |
-| 10+11 | ~~Add station classification (P27) and filtering (P28)~~ | ✅ Done |
-| 13 | ~~Add OSRM integration with walking fallback~~ | ✅ Done |
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| — | Refresh only map for live locations (not full page) | **Medium** | ❌ open |
+| — | Bus timetable filtering on map | Medium | ❌ open |
+| 18 | Add analytics and frequent routes endpoint | Low | ❌ open |
 
 ### Jamie — Frontend Integration & DevOps
 Focus: Connecting the frontend to the backend, UI, docs, and hardening.
 
-| # | Task | Priority |
-|---|------|----------|
-| P1 | ~~Fix `API_BASE_URL` — switch to `VITE_API_BASE_URL` env variable~~ ✅ | ~~High~~ |
-| P6 | Make CORS origins env-configurable (currently hardcoded) | **Medium** |
-| 15 | ~~Update frontend services and hooks to match API responses~~ ✅ *(mode→type normalisation, weather mock fix, 86 tests)* | ~~Medium~~ |
-| 14 | Add developer docs and Docker compose | Medium |
-| 16 | Harden production config (CORS, auth, rate limits) | Low |
-| 18 | Add analytics and frequent routes endpoint | Low |
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| — | Implement frontend routing UI (journey results display) | **High** | ❌ open |
+| — | Widen search bar — allow location text on one line | Medium | ✅ done |
+| P6 | Make CORS origins env-configurable (`CORS_ORIGINS` env var) | Medium | ❌ open |
+| 14 | Add developer docs and Docker compose | Medium | ❌ open (~done: READMEs exist; docker-compose missing) |
+| 16 | Harden production config (CORS, auth, rate limits) | Low | ❌ open |
+
 
 ---
-
-## Recent requests (2026-02-16)
-- Tried to connect backend bus live with frontend but it did not work well. The function takes `latitude` and `longitude` as parameters (current map center). Request: modify frontend to adapt. Note: not familiar with frontend.
-- Search bar should support any location search (ideally with prompt), not just stations. Suggests putting the map on the same page as search bar and prioritizing locations on the map.
-- Created a simple mock frontend using FastAPI to connect with backend; pushed it. Run `api.py` and go to http://localhost:5050. Note: check overall project in case something changed.
-
-## Session log (2026-03-02)
-- **Schema audit of `api.py`:** Mapped all endpoint request/response shapes; identified two critical mismatches:
-  1. Journey legs backend field is `mode: "walking"/"bus"/"train"` — NOT `type`. Fixed in `getJourneyPlans()` by adding `mode → type` normalisation (`"walking"` → `"walk"`) so UI components reading `leg.type === 'walk'` work correctly.
-  2. `/weather` returns OpenWeatherMap-shaped JSON `{weather:[{main,description,icon}], wind:{speed}, main:{temp,humidity}}` — test mocks were wrong shape. Fixed.
-- **Tests:** 86 frontend tests, 100% pass rate. `transportApi.js` statement coverage 90.66%, branches 75.38%, functions 100%.
-- **Committed:** `chore(api): document mock FastAPI endpoints and integration cues` → pushed to `origin/main`.
-- **AGENT.md updated** with all endpoint payload schemas and gotchas.
-- **Bus update countdown badge (2026-03-02):** `useLiveBusLocations` now distinguishes `loading` (first-load overlay) from `refreshing` (background re-fetch). A circular countdown ring is pinned top-right on the map showing seconds until next refresh; it spins purple while fetching and turns green while counting down. Full white overlay is removed from 30-second background polls — map stays usable. 86 tests, 100% pass.
-
----
-
-## 1. API: Scaffold FastAPI server
-- Summary: Add a lightweight HTTP server that exposes the backend functionality to the frontend.
-- Files to create/edit: `transport-backend/api.py`, small runner `transport-backend/__main__.py`, `tests/test_api.py`.
-- Steps:
-  1. Add `FastAPI` and `pytest` dependencies.
-  2. Create `api.py` with `app = FastAPI()` and a `/health` endpoint returning `{status: "ok"}`.
-  3. Write a test in `test_api.py` using `TestClient` to assert `/health` returns 200.
-  4. On startup, call `initialize_base()` from `main.py` to create `BusLoader`.
-- Acceptance: `pytest` passes with 100% coverage for new code. `uvicorn transport-backend.api:app --reload` starts successfully.
-
-## 2. Endpoint: /journey/plan
-- Summary: POST endpoint to plan journeys; uses RAPTOR router and returns human-friendly JSON plus geometry.
-- Files to edit: `api.py`, `raptor_router.py`, `merged_data.py`, `tests/test_journey.py`.
-- Payload: `{fromStop, toStop, departureTime (ISO), date, maxTransfers, mode}`
-- Steps:
-  1. Receive POST request and validate payload.
-  2. Write a mock test verifying payload validation and expected JSON return shape.
-  3. Call `build_for_date()` and `router.route(...)`.
-  4. Convert returned merged stop ids to coordinates using `MergedData`; construct `routeGeometries`.
-  5. Return JSON: `{legs: [...], _meta: {...}, routeGeometries: [...]}`.
-- Acceptance: Tests pass. Frontend can consume `routeGeometries[*].coords` to draw polylines.
-
-## 3. Endpoint: /search/stops
-- Summary: GET search endpoint for stops (NaPTAN) used by frontend autocomplete.
-- Files: `api.py`, `tests/test_search.py`.
-- Query: `GET /search/stops?q=cent&limit=10`
-- Steps:
-  1. Write a test mocking `cache/naptan.csv` to ensure search returns correct formatting.
-  2. Implement matching by scanning cache or using `BusLoader.get_stop_names_bulk`.
-  3. Return list of `{id, name, atco_code, lat, lon}`.
-- Acceptance: Pytest passes. Results returned in the same shape the frontend expects.
-
-## 4. Endpoint: /bus/live/{operator}
-- Summary: Live vehicle positions for a bus operator using `bus_live.py` logic.
-- Files: `api.py`, `tests/test_bus_live.py`.
-- Steps:
-  1. Create test to assert endpoint returns `[{line, destination, lat, lon}]`.
-  2. Create GET route calling `get_bus_live(lat, lon, urls=[...])`.
-- Acceptance: Tests pass. Frontend `fetchLiveBusLocations` receives expected JSON.
 
 ## 5. Endpoint: /rail/departures/{station}
 - Summary: Return upcoming departures for a station CRS code.

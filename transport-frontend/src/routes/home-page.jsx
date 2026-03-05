@@ -5,7 +5,6 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
-import Grid from "@mui/material/Grid";
 import InputAdornment from "@mui/material/InputAdornment";
 import Paper from "@mui/material/Paper";
 import Skeleton from "@mui/material/Skeleton";
@@ -511,175 +510,188 @@ export default function HomePage() {
         </Stack>
       </Paper>
 
-      <Grid container spacing={{ xs: 2, md: 3 }}>
-        <Grid item xs={12} md={8}>
-          <Paper
-            elevation={0}
-            sx={{
-              p: { xs: 2.5, md: 3.5 },
-              height: "100%",
-              borderRadius: "16px",
-              border: "1px solid",
-              borderColor: "divider",
-            }}
+      <Paper
+        elevation={0}
+        sx={{
+          p: { xs: 2, md: 3 },
+          borderRadius: "16px",
+          border: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Stack spacing={2}>
+          <Typography variant="h6" fontWeight={700}>
+            Quick journey search
+          </Typography>
+
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={2}
+            alignItems={{ md: "flex-start" }}
           >
-            <Stack spacing={2.5}>
-              <Typography variant="h6" fontWeight={700}>
-                Quick journey search
+                <Autocomplete
+                  fullWidth
+                  freeSolo
+                  filterOptions={(x) => x}
+                  options={allStops.from}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
+                  value={selectedFromStop}
+                  onChange={(e, value) => {
+                    if (typeof value === "string") {
+                      setSelectedFromStop(null);
+                      setFromLocation(value);
+                      return;
+                    }
+                    setSelectedFromStop(value);
+                    if (value && typeof value === "object") setFromLocation(value.name || "");
+                  }}
+                  inputValue={fromLocation}
+                  onInputChange={(e, value) => setFromLocation(value)}
+                  loading={fromLoading}
+                  renderOption={(props, option) => {
+                    const label = typeof option === "string" ? option : option.name;
+                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                    return (
+                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                        <Box sx={{ flexGrow: 1 }}>
+                          <Typography variant="body2" fontWeight={600}>
+                            {label}
+                          </Typography>
+                          {optionType === "location" && (
+                            <Typography variant="caption" color="text.secondary">
+                              Location
+                            </Typography>
+                          )}
+                        </Box>
+                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                      </Box>
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="From"
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <MapPin size={18} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: fromLoading ? (
+                          <CircularProgress color="inherit" size={20} />
+                        ) : (
+                          params.InputProps.endAdornment
+                        ),
+                      }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                        },
+                        "& .MuiInputBase-input": {
+                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
+                          textOverflow: "ellipsis",
+                        },
+                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      }}
+                    />
+                  )}
+                />
+
+                <Autocomplete
+                  fullWidth
+                  freeSolo
+                  filterOptions={(x) => x}
+                  options={allStops.to}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
+                  value={selectedToStop}
+                  onChange={(e, value) => {
+                    if (typeof value === "string") {
+                      setSelectedToStop(null);
+                      setToLocation(value);
+                      return;
+                    }
+                    setSelectedToStop(value);
+                    if (value && typeof value === "object") setToLocation(value.name || "");
+                  }}
+                  inputValue={toLocation}
+                  onInputChange={(e, value) => setToLocation(value)}
+                  loading={toLoading}
+                  renderOption={(props, option) => {
+                    const label = typeof option === "string" ? option : option.name;
+                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                    return (
+                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                        <Box sx={{ flexGrow: 1 }}>
+                          <Typography variant="body2" fontWeight={600}>
+                            {label}
+                          </Typography>
+                          {optionType === "location" && (
+                            <Typography variant="caption" color="text.secondary">
+                              Location
+                            </Typography>
+                          )}
+                        </Box>
+                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                      </Box>
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="To"
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <NavIcon size={18} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: toLoading ? (
+                          <CircularProgress color="inherit" size={20} />
+                        ) : (
+                          params.InputProps.endAdornment
+                        ),
+                      }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                        },
+                        "& .MuiInputBase-input": {
+                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
+                          textOverflow: "ellipsis",
+                        },
+                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      }}
+                    />
+                  )}
+                />
+
+            <Button
+              variant="contained"
+              size="large"
+              sx={{
+                minWidth: { xs: "100%", md: 180 },
+                height: 56,
+                flexShrink: 0,
+              }}
+              onClick={handleSearch}
+              disabled={!fromCoords || !toCoords || isSearching}
+            >
+              {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
+            </Button>
+          </Stack>
+
+          {favorites.length > 0 && (
+            <Box>
+              <Typography variant="caption" fontWeight={700} display="block" mb={1}>
+                Recent Journeys
               </Typography>
-
-              <Autocomplete
-                fullWidth
-                freeSolo
-                filterOptions={(x) => x}
-                options={allStops.from}
-                getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
-                value={selectedFromStop}
-                onChange={(e, value) => {
-                  if (typeof value === "string") {
-                    setSelectedFromStop(null);
-                    setFromLocation(value);
-                    return;
-                  }
-                  setSelectedFromStop(value);
-                  if (value && typeof value === "object") setFromLocation(value.name || "");
-                }}
-                inputValue={fromLocation}
-                onInputChange={(e, value) => setFromLocation(value)}
-                loading={fromLoading}
-                renderOption={(props, option) => {
-                  const label = typeof option === "string" ? option : option.name;
-                  const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                  return (
-                    <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                      {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                      <Box sx={{ flexGrow: 1 }}>
-                        <Typography variant="body2" fontWeight={600}>
-                          {label}
-                        </Typography>
-                        {optionType === "location" && (
-                          <Typography variant="caption" color="text.secondary">
-                            Location
-                          </Typography>
-                        )}
-                      </Box>
-                      <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                    </Box>
-                  );
-                }}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="From"
-                    InputProps={{
-                      ...params.InputProps,
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <MapPin size={18} />
-                        </InputAdornment>
-                      ),
-                      endAdornment: fromLoading ? (
-                        <CircularProgress color="inherit" size={20} />
-                      ) : (
-                        params.InputProps.endAdornment
-                      ),
-                    }}
-                    sx={{
-                      "& .MuiOutlinedInput-root": {
-                        "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                        "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                      },
-                      "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                      "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                    }}
-                  />
-                )}
-              />
-
-              <Autocomplete
-                fullWidth
-                freeSolo
-                filterOptions={(x) => x}
-                options={allStops.to}
-                getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
-                value={selectedToStop}
-                onChange={(e, value) => {
-                  if (typeof value === "string") {
-                    setSelectedToStop(null);
-                    setToLocation(value);
-                    return;
-                  }
-                  setSelectedToStop(value);
-                  if (value && typeof value === "object") setToLocation(value.name || "");
-                }}
-                inputValue={toLocation}
-                onInputChange={(e, value) => setToLocation(value)}
-                loading={toLoading}
-                renderOption={(props, option) => {
-                  const label = typeof option === "string" ? option : option.name;
-                  const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                  return (
-                    <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                      {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                      <Box sx={{ flexGrow: 1 }}>
-                        <Typography variant="body2" fontWeight={600}>
-                          {label}
-                        </Typography>
-                        {optionType === "location" && (
-                          <Typography variant="caption" color="text.secondary">
-                            Location
-                          </Typography>
-                        )}
-                      </Box>
-                      <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                    </Box>
-                  );
-                }}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    label="To"
-                    InputProps={{
-                      ...params.InputProps,
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <NavIcon size={18} />
-                        </InputAdornment>
-                      ),
-                      endAdornment: toLoading ? (
-                        <CircularProgress color="inherit" size={20} />
-                      ) : (
-                        params.InputProps.endAdornment
-                      ),
-                    }}
-                    sx={{
-                      "& .MuiOutlinedInput-root": {
-                        "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                        "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                      },
-                      "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                      "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                    }}
-                  />
-                )}
-              />
-
-              <Button
-                variant="contained"
-                size="large"
-                sx={{ alignSelf: "stretch" }}
-                onClick={handleSearch}
-                disabled={!fromCoords || !toCoords || isSearching}
-              >
-                {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
-              </Button>
-
-              {favorites.length > 0 && (
-                <Box>
-                  <Typography variant="caption" fontWeight={700} display="block" mb={1}>
-                    Recent Journeys
-                  </Typography>
-                  <Stack spacing={1}>
+              <Stack spacing={1}>
                     {favorites.slice(0, 3).map((fav, idx) => (
                       <Box
                         key={idx}
@@ -703,34 +715,32 @@ export default function HomePage() {
                   </Stack>
                 </Box>
               )}
-            </Stack>
-          </Paper>
-        </Grid>
+        </Stack>
+      </Paper>
 
-        <Grid item xs={12} md={4}>
-          <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, height: "100%" }}>
-            <Stack spacing={2}>
-              <Stack direction="row" spacing={1} alignItems="center">
-                <Clock size={18} />
-                <Typography variant="h6" fontWeight={700}>
-                  Nearby departures
-                </Typography>
-              </Stack>
-              <Stack spacing={1.5}>
-                {departuresLoading ? (
-                  <Stack spacing={1}>
-                    {[1, 2, 3].map((i) => (
-                      <Skeleton key={i} height={80} variant="rounded" />
-                    ))}
-                  </Stack>
-                ) : (
-                  liveDepartures.map((dep) => <DepartureCard key={dep.id} departure={dep} />)
-                )}
-              </Stack>
-            </Stack>
-          </Paper>
-        </Grid>
-      </Grid>
+      <Paper elevation={1} sx={{ p: { xs: 2, md: 3 } }}>
+        <Stack spacing={2}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Clock size={18} />
+            <Typography variant="h6" fontWeight={700}>
+              Nearby departures
+            </Typography>
+          </Stack>
+          <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+            {departuresLoading ? (
+              [1, 2, 3].map((i) => (
+                <Skeleton key={i} height={80} sx={{ flex: 1 }} variant="rounded" />
+              ))
+            ) : (
+              liveDepartures.map((dep) => (
+                <Box key={dep.id} sx={{ flex: 1 }}>
+                  <DepartureCard departure={dep} />
+                </Box>
+              ))
+            )}
+          </Stack>
+        </Stack>
+      </Paper>
 
       <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
         <Stack spacing={2}>

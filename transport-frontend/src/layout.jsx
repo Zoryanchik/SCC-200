@@ -133,7 +133,7 @@ export default function AppLayout({ children }) {
 			<CssBaseline enableColorScheme />
 			<AppBar position="sticky" color="default" enableColorOnDark>
 				<Toolbar>
-					<Container maxWidth="lg" disableGutters>
+					<Container maxWidth={false} disableGutters sx={{ px: { xs: 2, md: 4 } }}>
 						<Stack direction="row" alignItems="center" justifyContent="space-between" spacing={3}>
 							<Typography 
 								variant="h6" 
@@ -187,7 +187,7 @@ export default function AppLayout({ children }) {
 				</Toolbar>
 			</AppBar>
 			<Box component="main" sx={{ bgcolor: "background.default", minHeight: "100vh", pb: 6 }}>
-				<Container maxWidth="lg" sx={{ pt: 4 }}>
+				<Container maxWidth={false} sx={{ pt: 4, px: { xs: 2, md: 4 } }}>
 					<ErrorBoundary>
 						{children}
 					</ErrorBoundary>
