@@ -29,7 +29,14 @@ export function useBusStops({ classification, enabled = true } = {}) {
 
     try {
       const data = await getBusStopsWithFallback({ classification });
-      setStops(data);
+      // Deduplicate by stop id (ATCO code) — the API can return duplicates
+      const seen = new Set();
+      const unique = data.filter((s) => {
+        if (seen.has(s.id)) return false;
+        seen.add(s.id);
+        return true;
+      });
+      setStops(unique);
     } catch (err) {
       setError(err.message || 'Failed to load bus stops');
     } finally {

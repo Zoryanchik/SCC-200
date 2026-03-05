@@ -5,10 +5,6 @@ import { useBusStops } from '../../hooks/useBusStops';
 
 /**
  * Colour palette for stop classifications.
- * hub          → vivid red-pink (major interchange)
- * interchange  → orange
- * local        → blue
- * request_stop → grey
  */
 const CLASS_COLORS = {
   hub: '#E91E63',
@@ -24,10 +20,6 @@ const CLASS_LABELS = {
   request_stop: 'Request Stop',
 };
 
-/**
- * Returns the marker dimensions for a given zoom level.
- * Keeps markers tiny at lower zooms to reduce clutter.
- */
 const getMarkerSize = (zoom) => {
   if (zoom <= 14) return { circle: 6, post: 8, stroke: 1.5, total: 16 };
   if (zoom <= 15) return { circle: 8, post: 10, stroke: 2, total: 20 };
@@ -35,10 +27,6 @@ const getMarkerSize = (zoom) => {
   return { circle: 12, post: 14, stroke: 2.5, total: 28 };
 };
 
-/**
- * Build an SVG bus-stop sign icon: a coloured circle on a thin post.
- * Returns a Leaflet DivIcon.
- */
 const makeBusStopIcon = (color, zoom) => {
   const s = getMarkerSize(zoom);
   const w = s.circle + s.stroke * 2;
@@ -63,16 +51,64 @@ const makeBusStopIcon = (color, zoom) => {
 };
 
 /**
- * Renders a single bus-stop marker as a small coloured bus-stop sign.
- * Clicking opens a Popup listing the bus lines that serve the stop.
- *
- * @param {{ stop: Object, zoom: number }} props
+ * Build popup HTML as a plain string with real <button> elements
+ * and inline onclick attributes.  This is the ONLY way to get
+ * clickable elements inside a Leaflet popup because Leaflet blocks
+ * every other form of event handling (React synthetic events,
+ * addEventListener, etc.).  Inline onclick fires directly on the
+ * element before any propagation.
  */
-function BusStopMarker({ stop, zoom = 16 }) {
+function buildPopupHtml(stop) {
   const color = CLASS_COLORS[stop.classification] || CLASS_COLORS.local;
   const label = CLASS_LABELS[stop.classification] || 'Stop';
 
+  let html = '<div style="min-width:160px;font-family:Arial,sans-serif">';
+
+  html += '<div data-testid="bus-stop-name" style="font-weight:700;font-size:14px;margin-bottom:4px">'
+    + stop.name + '</div>';
+
+  html += '<div data-testid="bus-stop-classification" style="display:inline-block;padding:2px 8px;'
+    + 'border-radius:10px;background:' + color + ';color:#fff;font-size:11px;font-weight:600;'
+    + 'margin-bottom:6px">' + label + '</div>';
+
+  if (stop.atco_code) {
+    html += '<div data-testid="bus-stop-atco" style="font-size:11px;color:#666;margin-bottom:4px">'
+      + stop.atco_code + '</div>';
+  }
+
+  if (stop.lines && stop.lines.length > 0) {
+    html += '<div data-testid="bus-stop-lines">';
+    html += '<div style="font-size:12px;font-weight:600;margin:4px 0">'
+      + 'Bus routes: <span style="font-size:10px;font-weight:400;color:#888">'
+      + '(click to show route)</span></div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
+
+    for (const line of stop.lines) {
+      const safe = line.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += '<button onclick="window.__busRouteToggle(\'' + safe + '\')" '
+        + 'data-testid="route-chip-' + line + '" '
+        + 'style="display:inline-block;padding:4px 10px;border-radius:8px;'
+        + 'background:#E3F2FD;color:#1565C0;font-size:12px;font-weight:700;'
+        + 'cursor:pointer;border:2px solid #90CAF9;margin:0;line-height:1.2;'
+        + 'min-height:0;min-width:0">'
+        + line + '</button>';
+    }
+
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+/**
+ * Renders a single bus-stop marker.
+ * Popup content is plain HTML with inline onclick handlers.
+ */
+function BusStopMarker({ stop, zoom = 16 }) {
+  const color = CLASS_COLORS[stop.classification] || CLASS_COLORS.local;
   const icon = useMemo(() => makeBusStopIcon(color, zoom), [color, zoom]);
+  const popupHtml = useMemo(() => buildPopupHtml(stop), [stop]);
 
   return (
     <Marker
@@ -80,73 +116,8 @@ function BusStopMarker({ stop, zoom = 16 }) {
       icon={icon}
       data-testid={`bus-stop-marker-${stop.id}`}
     >
-      <Popup>
-        <div style={{ minWidth: 160, fontFamily: 'Arial, sans-serif' }}>
-          <div
-            style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}
-            data-testid="bus-stop-name"
-          >
-            {stop.name}
-          </div>
-
-          <div
-            style={{
-              display: 'inline-block',
-              padding: '2px 8px',
-              borderRadius: 10,
-              backgroundColor: color,
-              color: '#fff',
-              fontSize: 11,
-              fontWeight: 600,
-              marginBottom: 6,
-            }}
-            data-testid="bus-stop-classification"
-          >
-            {label}
-          </div>
-
-          {stop.atco_code && (
-            <div
-              style={{ fontSize: 11, color: '#666', marginBottom: 4 }}
-              data-testid="bus-stop-atco"
-            >
-              {stop.atco_code}
-            </div>
-          )}
-
-          {stop.lines && stop.lines.length > 0 && (
-            <div data-testid="bus-stop-lines">
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 600,
-                  marginBottom: 4,
-                  marginTop: 4,
-                }}
-              >
-                Bus routes:
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {stop.lines.map((line) => (
-                  <span
-                    key={line}
-                    style={{
-                      display: 'inline-block',
-                      padding: '2px 8px',
-                      borderRadius: 8,
-                      backgroundColor: '#E3F2FD',
-                      color: '#1565C0',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    {line}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+      <Popup closeOnClick={false}>
+        <div dangerouslySetInnerHTML={{ __html: popupHtml }} />
       </Popup>
     </Marker>
   );
@@ -155,37 +126,38 @@ function BusStopMarker({ stop, zoom = 16 }) {
 /**
  * Map layer that renders all bus stops as small bus-stop sign icons.
  *
- * Props are forwarded to `useBusStops` so the parent can control
- * classification filtering and enabled state.
- *
- * Bus stops are only rendered when the map zoom level is ≥ 14 to
- * prevent visual clutter at low zoom levels.
- *
- * @param {Object}  [props]
- * @param {string}  [props.classification] - Optional classification filter
- * @param {boolean} [props.enabled=true]   - Enable/disable the layer
- * @param {number}  [props.minZoom=14]     - Min zoom level to show stops
+ * Registers window.__busRouteToggle so inline onclick handlers
+ * in Leaflet popups can trigger route line toggling.
  */
 export default function BusStopLayer({
   classification,
   enabled = true,
   minZoom = 14,
+  onToggleRoute,
+  isRouteActive,
 }) {
   const map = useMap();
   const { stops, loading } = useBusStops({ classification, enabled });
 
-  // Only render stops when zoomed in enough
+  // Register global function for popup button clicks
+  const toggleRef = React.useRef(onToggleRoute);
+  toggleRef.current = onToggleRoute;
+
+  React.useEffect(() => {
+    window.__busRouteToggle = (line) => {
+      if (toggleRef.current) toggleRef.current(line);
+    };
+    return () => { delete window.__busRouteToggle; };
+  }, []);
+
   const [zoom, setZoom] = React.useState(map.getZoom());
 
   React.useEffect(() => {
     const onZoom = () => setZoom(map.getZoom());
     map.on('zoomend', onZoom);
-    return () => {
-      map.off('zoomend', onZoom);
-    };
+    return () => { map.off('zoomend', onZoom); };
   }, [map]);
 
-  // Filter stops that fall within the current map bounds for performance
   const visibleStops = useMemo(() => {
     if (zoom < minZoom) return [];
     const bounds = map.getBounds();
@@ -209,5 +181,4 @@ export default function BusStopLayer({
   );
 }
 
-// Named export for testing
 export { BusStopMarker };
