@@ -13,7 +13,7 @@ Updated: 2026-03-05
 - [x] Number of transfer limit button in frontend
 - [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
 - [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
-- [x] Add search to map page to avoid scrolling
+- [ ] Add search to map page to avoid scrolling
 - [ ] After searching, display the route on the map
 - [ ] Show multiple route options from a search so the user can choose and select one
 - [ ] When sharing location, show closest bus stops and nearest bus (check map page)
@@ -143,7 +143,7 @@ Focus: Connecting the frontend to the backend, UI, docs, and hardening.
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| — | Implement frontend routing UI (journey results display) | **High** | !done |
+| — | Implement frontend routing UI (journey results display) | **High** | ❌ open |
 | — | Widen search bar — allow location text on one line | Medium | ✅ done |
 | P6 | Make CORS origins env-configurable (`CORS_ORIGINS` env var) | Medium | ❌ open |
 | 14 | Add developer docs and Docker compose | Medium | ❌ open (~done: READMEs exist; docker-compose missing) |
