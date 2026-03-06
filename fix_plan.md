@@ -8,6 +8,7 @@ Updated: 2026-03-05
 
 ## High Priority
 - [x] Implement frontend for routing (journey results display)
+- [ ] Allow arbitrary start date-time input in fronttend
 - [ ] Number of transfer limit button in frontend
 - [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
 - [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
@@ -24,6 +25,7 @@ Updated: 2026-03-05
 
 ## Medium Priority
 - [ ] Refresh only map for live locations, not the whole page
+- [ ] Delay handling for bus
 - [ ] Delay handling for train
 - [ ] Make weather widget nicer
 - [ ] Add number icon for tracked buses on the map page and make icons smaller
