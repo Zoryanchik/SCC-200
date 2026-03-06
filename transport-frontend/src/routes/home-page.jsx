@@ -134,6 +134,9 @@ export default function HomePage() {
   const [mapInstance, setMapInstance] = useState(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
   const [geoError, setGeoError] = useState(null);
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationStatus, setLocationStatus] = useState('idle');
+  const [locationError, setLocationError] = useState(null);
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
   const handleMoveEnd = useCallback(({ lat, lon }) => {
@@ -160,15 +163,62 @@ export default function HomePage() {
         setSelectedFromStop(loc);
         setFromLocation('My location');
         setMapCenter({ lat, lon });
+        // also set userLocation for map-level centering/follow
+        setUserLocation([lat, lon]);
+        setLocationStatus('granted');
+        setLocationError(null);
         setGeoError(null);
       },
       (err) => {
         setGeoError(err.message || 'Failed to get location');
+        setLocationStatus('error');
+        setLocationError(err.message || 'Failed to get location');
         setTimeout(() => setGeoError(null), 4000);
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
   }, [setSelectedFromStop, setFromLocation, setMapCenter]);
+
+  const requestLocation = useCallback(() => {
+    if (!navigator || !navigator.geolocation) {
+      setLocationStatus('error');
+      setLocationError('Geolocation not supported by your browser');
+      setTimeout(() => setLocationError(null), 4000);
+      return;
+    }
+    setLocationStatus('loading');
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords = [pos.coords.latitude, pos.coords.longitude];
+        setUserLocation(coords);
+        setLocationStatus('granted');
+        setLocationError(null);
+        // centre map if we have the instance
+        if (mapInstance && typeof mapInstance.flyTo === 'function') {
+          try {
+            mapInstance.flyTo(coords, Math.max(mapInstance.getZoom(), 12), { duration: 1.0 });
+          } catch (e) {
+            // ignore
+          }
+        }
+      },
+      (err) => {
+        setLocationStatus('error');
+        setLocationError(err?.message || 'Location permission denied');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  }, [mapInstance]);
+
+  const handleCenterOnUser = useCallback(() => {
+    if (!userLocation || !mapInstance) return;
+    try {
+      mapInstance.flyTo(userLocation, Math.max(mapInstance.getZoom(), 12), { duration: 1.0 });
+    } catch (e) {
+      // ignore
+    }
+  }, [userLocation, mapInstance]);
 
   // Debounced live bus data tied to the current map center
   const {
@@ -290,6 +340,24 @@ export default function HomePage() {
     () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
     [markers, filters.showBuses, filters.showTrains]
   );
+
+  const nearestStop = useMemo(() => {
+    if (!userLocation || !Array.isArray(filteredMarkers) || filteredMarkers.length === 0) return null;
+    const toRadians = (deg) => (deg * Math.PI) / 180;
+    const R = 6371000;
+    const [ulat, ulon] = userLocation;
+    let nearest = null;
+    for (const marker of filteredMarkers) {
+      const [mlat, mlon] = marker.position;
+      const dLat = toRadians(mlat - ulat);
+      const dLon = toRadians(mlon - ulon);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(ulat)) * Math.cos(toRadians(mlat)) * Math.sin(dLon / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const dist = R * c;
+      if (!nearest || dist < nearest.distance) nearest = { ...marker, distance: dist };
+    }
+    return nearest;
+  }, [userLocation, filteredMarkers]);
   // ---- end map state ----
 
   const getCoordsFromOption = (option) => {
@@ -495,6 +563,33 @@ export default function HomePage() {
           >
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
           </Box>
+          <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={requestLocation}
+            disabled={locationStatus === 'loading'}
+            sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+          >
+            {locationStatus === 'loading' ? (
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={16} />
+                <Typography variant="caption">Locating</Typography>
+              </Stack>
+            ) : (
+              'Use my location'
+            )}
+          </Button>
+          {userLocation && (
+            <Button
+              variant="contained"
+              size="small"
+              onClick={handleCenterOnUser}
+              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+            >
+              Center on me
+            </Button>
+          )}
         </Stack>
 
         <Suspense fallback={<MapFallback />}>
@@ -503,8 +598,8 @@ export default function HomePage() {
             openPopupId={openPopupId}
             onOpenPopup={setOpenPopupId}
             onClosePopup={() => setOpenPopupId(null)}
-            userLocation={null}
-            nearestStop={null}
+            userLocation={userLocation}
+            nearestStop={nearestStop}
             busLoading={busLoading}
             busRefreshing={busRefreshing}
             busCountdown={busCountdown}

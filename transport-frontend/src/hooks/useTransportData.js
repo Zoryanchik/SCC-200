@@ -353,11 +353,19 @@ export const usePricing = (fromStop, toStop) => {
  * Hook for managing favorite/recent routes with localStorage
  */
 export const useFavoriteRoutes = () => {
+  // Safely access localStorage: in some test environments (or unusual browsers)
+  // localStorage may be missing or its methods not available. Provide a
+  // no-op fallback to avoid throwing during hook initialization.
+  const safeLS = (typeof window !== 'undefined' && window.localStorage && typeof window.localStorage.getItem === 'function')
+    ? window.localStorage
+    : { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+
   const [favorites, setFavorites] = useState(() => {
     try {
-      const saved = localStorage.getItem('favoriteRoutes');
+      const saved = safeLS.getItem('favoriteRoutes');
       return saved ? JSON.parse(saved) : [];
     } catch (error) {
+      // Keep console.error but continue with empty favorites in tests.
       console.error('Error loading favorites:', error);
       return [];
     }
@@ -370,7 +378,11 @@ export const useFavoriteRoutes = () => {
         ...prev.filter(r => !(r.from === route.from && r.to === route.to))
       ].slice(0, 20); // Keep only last 20
       
-      localStorage.setItem('favoriteRoutes', JSON.stringify(updated));
+      try {
+        safeLS.setItem('favoriteRoutes', JSON.stringify(updated));
+      } catch (e) {
+        // ignore storage write errors (e.g., quota or not available in tests)
+      }
       return updated;
     });
   }, []);
@@ -378,14 +390,22 @@ export const useFavoriteRoutes = () => {
   const removeFavorite = useCallback((fromStop, toStop) => {
     setFavorites(prev => {
       const updated = prev.filter(r => !(r.from === fromStop && r.to === toStop));
-      localStorage.setItem('favoriteRoutes', JSON.stringify(updated));
+      try {
+        safeLS.setItem('favoriteRoutes', JSON.stringify(updated));
+      } catch (e) {
+        // ignore
+      }
       return updated;
     });
   }, []);
 
   const clearAll = useCallback(() => {
     setFavorites([]);
-    localStorage.removeItem('favoriteRoutes');
+    try {
+      safeLS.removeItem('favoriteRoutes');
+    } catch (e) {
+      // ignore
+    }
   }, []);
 
   return { favorites, saveFavorite, removeFavorite, clearAll };
