@@ -96,7 +96,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
           sx={(theme) => ({
             padding: '8px 16px',
             border: 'none',
-            borderRadius: '10px',
+            borderRadius: '12px',
             display: 'flex',
             alignItems: 'center',
             gap: 1,
@@ -105,7 +105,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
             color: 'white',
             fontWeight: 600,
             minWidth: 140,
-            minHeight: 40,
+            minHeight: 48,
             '&:hover': { filter: 'brightness(0.98)' },
             outline: 'none',
           })}

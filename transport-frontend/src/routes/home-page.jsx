@@ -14,7 +14,7 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
-import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart, X } from "lucide-react";
+import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Crosshair, Train, Heart, X } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
@@ -565,64 +565,10 @@ export default function HomePage() {
         }}
       >
           <Stack spacing={2}>
-            <Stack direction="row" alignItems="center" spacing={2} justifyContent="space-between">
+            <Stack direction="row" alignItems="center" spacing={2} justifyContent="center">
               {/* Quick journey search heading removed per UI update */}
 
-              {/* Date/time/transfers: right-aligned in header */}
-              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                <TextField
-                  label="Date"
-                  type="date"
-                  size="small"
-                  value={departureDate}
-                  onChange={(e) => setDepartureDate(e.target.value)}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ minWidth: 140 }}
-                />
-                <TextField
-                  label="Time"
-                  type="time"
-                  size="small"
-                  value={departureClock}
-                  onChange={(e) => setDepartureClock(e.target.value)}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ minWidth: 110 }}
-                />
-                <TextField
-                  label="Transfers"
-                  type="number"
-                  size="small"
-                  value={maxTransfers}
-                  onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-                  InputProps={{ inputProps: { min: 0, max: 10 } }}
-                  sx={{ width: 110 }}
-                />
-                <TextField
-                  select
-                  size="small"
-                  value={transportMode}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val !== null) setTransportMode(val);
-                  }}
-                  sx={{
-                    ml: 1,
-                    minWidth: 120,
-                    maxWidth: 180,
-                  }}
-                  SelectProps={{
-                    renderValue: (selected) => {
-                      // only show the selected value
-                      if (!selected) return '';
-                      return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1);
-                    },
-                  }}
-                >
-                  <MenuItem value="all">All</MenuItem>
-                  <MenuItem value="bus">Bus</MenuItem>
-                  <MenuItem value="train">Train</MenuItem>
-                </TextField>
-              </Box>
+              {/* Date/time/transfers moved below the search inputs */}
             </Stack>
 
             <Stack
@@ -637,7 +583,7 @@ export default function HomePage() {
                   size="large"
                   sx={{ alignSelf: 'center' }}
                 >
-                  <NavIcon size={18} />
+                    <Crosshair size={18} />
                 </IconButton>
 
                 <Autocomplete
@@ -793,7 +739,7 @@ export default function HomePage() {
                       InputProps={{
                         ...params.InputProps,
                         startAdornment: (
-                          <InputAdornment position="start">
+                            <InputAdornment position="start">
                             <NavIcon size={18} />
                           </InputAdornment>
                         ),
@@ -833,7 +779,56 @@ export default function HomePage() {
             </Button>
           </Stack>
 
-          {/* Date/time/transfers were moved into the header (right-aligned) above */}
+          {/* Date/time/transfers controls moved here (below search inputs) */}
+          <Box sx={{ mt: 2, display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <TextField
+              label="Date"
+              type="date"
+              size="small"
+              value={departureDate}
+              onChange={(e) => setDepartureDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 140 }}
+            />
+            <TextField
+              label="Time"
+              type="time"
+              size="small"
+              value={departureClock}
+              onChange={(e) => setDepartureClock(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 110 }}
+            />
+            <TextField
+              label="Transfers"
+              type="number"
+              size="small"
+              value={maxTransfers}
+              onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+              InputProps={{ inputProps: { min: 0, max: 10 } }}
+              sx={{ width: 110 }}
+            />
+            <TextField
+              select
+              size="small"
+              value={transportMode}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val !== null) setTransportMode(val);
+              }}
+              sx={{ ml: 1, minWidth: 120, maxWidth: 180 }}
+              SelectProps={{
+                renderValue: (selected) => {
+                  if (!selected) return '';
+                  return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1);
+                },
+              }}
+            >
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="bus">Bus</MenuItem>
+              <MenuItem value="train">Train</MenuItem>
+            </TextField>
+          </Box>
 
           {geoError && (
             <Box sx={{ mt: 1 }}>
@@ -878,7 +873,7 @@ export default function HomePage() {
         elevation={0}
         sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
       >
-        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={0}>
           {/* Map header - icon intentionally removed */}
         </Stack>
 
@@ -889,8 +884,9 @@ export default function HomePage() {
             sx={{
               padding: "8px 16px",
               border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
+              borderRadius: "12px",
+              minHeight: 48,
+              display: "inline-flex",
               alignItems: "center",
               gap: 1,
               cursor: "pointer",
@@ -908,8 +904,9 @@ export default function HomePage() {
             sx={{
               padding: "8px 16px",
               border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
+              borderRadius: "12px",
+              minHeight: 48,
+              display: "inline-flex",
               alignItems: "center",
               gap: 1,
               cursor: "pointer",
@@ -921,23 +918,32 @@ export default function HomePage() {
           >
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
           </Box>
-          {/* Compact weather aligned with the filter pills */}
-          <Box sx={{ display: { xs: 'none', sm: 'flex' }, ml: 1 }}>
-            <WeatherWidget variant="inline" />
-          </Box>
           <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
           {!userLocation && (
             <Button
               variant="outlined"
-              size="small"
+              size="large"
               onClick={requestLocation}
               disabled={locationStatus === 'loading'}
-              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+              sx={(theme) => ({
+                borderRadius: '12px',
+                textTransform: 'none',
+                width: { xs: '100%', sm: 160 },
+                height: 48,
+                px: 2,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: theme.palette.mode === 'dark' ? 'white' : undefined,
+                borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.7)' : undefined,
+                // ensure icon/text inside follow the color
+                '& .MuiButton-startIcon, & .MuiTypography-root': { color: theme.palette.mode === 'dark' ? 'white' : undefined },
+              })}
             >
               {locationStatus === 'loading' ? (
                 <Stack direction="row" spacing={1} alignItems="center">
-                  <CircularProgress size={16} />
-                  <Typography variant="caption">Locating</Typography>
+                  <CircularProgress size={18} />
+                  <Typography variant="body2">Locating</Typography>
                 </Stack>
               ) : (
                 'Use my location'
@@ -947,13 +953,26 @@ export default function HomePage() {
           {userLocation && (
             <Button
               variant="contained"
-              size="small"
+              size="large"
               onClick={handleCenterOnUser}
-              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+              sx={{
+                borderRadius: '12px',
+                textTransform: 'none',
+                width: { xs: '100%', sm: 160 },
+                height: 48,
+                px: 2,
+                backgroundColor: '#D97974',
+                color: '#ffffff',
+                '&:hover': { backgroundColor: '#c86b66' },
+              }}
             >
               Center on me
             </Button>
           )}
+          {/* Compact weather aligned to the right of the filter row */}
+          <Box sx={{ display: { xs: 'none', sm: 'flex' }, ml: 1 }}>
+            <WeatherWidget variant="inline" />
+          </Box>
         </Stack>
 
         <Suspense fallback={<MapFallback />}>

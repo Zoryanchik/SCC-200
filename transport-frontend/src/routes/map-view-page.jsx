@@ -355,7 +355,7 @@ Trains {filteredMarkers.filter(m => m.type === 'train').length}
 variant="contained"
 size="small"
 onClick={handleCenterOnUser}
-sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' }, backgroundColor: '#D97974', color: '#ffffff', '&:hover': { backgroundColor: '#c86b66' } }}
 >
 Center on me
 </Button>
