@@ -154,6 +154,7 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
     }
     const { date, time } = normalizeDateTime(departureTime);
     const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 5;
+    const mode = typeof options.mode === 'string' ? options.mode : 'combined';
     const response = await fetch(
       `${API_BASE_URL}/journey/plan`,
       {
@@ -166,7 +167,8 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
           toStop: to,
           departureTime: time,
           date,
-          maxTransfers
+          maxTransfers,
+          mode
         })
       }
     );
