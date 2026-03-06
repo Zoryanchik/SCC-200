@@ -8,7 +8,7 @@ import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
 import { useEffect } from "react";
-import WeatherWidget from "../common/WeatherWidget";
+// Allow a sideContent prop to be injected by the parent (e.g. Suggested routes)
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
@@ -134,7 +134,8 @@ export default function MapViewMap({
 	/** true while a background re-fetch is in-flight */
 	busRefreshing = false,
 	onMapReady,
-	onMoveEnd
+	onMoveEnd,
+	sideContent,
 }) {
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
@@ -372,8 +373,9 @@ export default function MapViewMap({
 				</MapContainer>
 			</Box>
 
+			{/* Right column: render any sideContent provided by the parent (e.g. Suggested routes) */}
 			<Box sx={{ minWidth: { xs: '100%', md: 320 } }}>
-				<WeatherWidget />
+				{sideContent || null}
 			</Box>
 		</Stack>
 	);

@@ -12,7 +12,7 @@ import Box from '@mui/material/Box';
 import { Cloud, CloudRain, Sun, Wind, Droplets, X } from 'lucide-react';
 import { fetchWeatherData } from '../../services/transportApi';
 
-export function WeatherWidget() {
+export function WeatherWidget({ compact = false, variant = 'full' }) {
   const DEFAULT_LOCATION = { lat: 54.050556, lon: -2.800556 };
   // Mock data so something shows up always
   const [weather, setWeather] = useState({
@@ -23,6 +23,7 @@ export function WeatherWidget() {
     icon: 'cloud'
   });
   const [visible, setVisible] = useState(true);
+  const [showDetails, setShowDetails] = useState(false);
   // Default to Lancaster
   const [location, setLocation] = useState(DEFAULT_LOCATION);
 
@@ -62,18 +63,152 @@ export function WeatherWidget() {
     updateWeather();
   }, [location]);
 
-  const getWeatherIcon = () => {
+  const getWeatherIcon = (size = 32, colorOverride) => {
+    const color = colorOverride || (weather.icon === 'cloudRain' ? '#2196F3' : weather.icon === 'sun' ? '#FFC107' : '#9E9E9E');
     switch (weather.icon) {
       case 'cloudRain':
-        return <CloudRain size={32} color="#2196F3" />;
+        return <CloudRain size={size} color={color} />;
       case 'sun':
-        return <Sun size={32} color="#FFC107" />;
+        return <Sun size={size} color={color} />;
       default:
-        return <Cloud size={32} color="#9E9E9E" />;
+        return <Cloud size={size} color={color} />;
     }
   };
 
   if (!visible) return null;
+
+  const mode = variant === 'inline' ? 'inline' : (compact ? 'compact' : variant);
+
+  // Inline flattened pill (single-line) used in the map filter row.
+  // Clicking the pill should show the details in a separate small box
+  // (so the pill doesn't expand). We render the pill and, when
+  // requested, a sibling details box to the right.
+  if (mode === 'inline') {
+    return (
+      <Box sx={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 1 }}>
+        <Box
+          role="button"
+          tabIndex={0}
+          onClick={() => setShowDetails((s) => !s)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') setShowDetails((s) => !s);
+          }}
+          sx={(theme) => ({
+            padding: '8px 16px',
+            border: 'none',
+            borderRadius: '10px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            backgroundColor: theme.palette.info ? theme.palette.info.light : '#EFF6FF',
+            cursor: 'pointer',
+            color: 'white',
+            fontWeight: 600,
+            minWidth: 140,
+            minHeight: 40,
+            '&:hover': { filter: 'brightness(0.98)' },
+            outline: 'none',
+          })}
+        >
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 36 }}>
+            {getWeatherIcon(18, 'white')}
+          </Box>
+          <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: 700, lineHeight: 1 }}>
+              {weather.temp}°C — {weather.condition}
+            </Typography>
+          </Box>
+        </Box>
+
+        {showDetails && (
+          <Paper
+            elevation={4}
+            sx={(theme) => ({
+              position: 'absolute',
+              bottom: 'calc(100% + 8px)', // place above the pill
+              left: '50%',
+              transform: 'translateX(-50%)',
+              p: '8px 16px',
+              borderRadius: '10px',
+                border: 'none',
+                minWidth: 180,
+                minHeight: 40,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                backgroundColor: theme.palette.info ? theme.palette.info.light : '#EFF6FF',
+                color: 'white',
+                zIndex: theme.zIndex.tooltip || 1300,
+                boxShadow: theme.shadows[4],
+                pointerEvents: 'auto',
+                fontWeight: 600,
+            })}
+          >
+              <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1, color: 'white' }}>
+                <Typography variant="body2" fontWeight={600} sx={{ color: 'white' }}>
+                  Humidity: {weather.humidity}%
+                </Typography>
+                <Typography variant="body2" fontWeight={600} sx={{ color: 'white' }}>
+                  Wind: {weather.windSpeed} km/h
+                </Typography>
+              </Box>
+              <Box sx={{ flex: 1 }} />
+              <Typography variant="caption" sx={{ opacity: 0.95, color: 'white' }}>
+                Updates every minute
+              </Typography>
+          </Paper>
+        )}
+      </Box>
+    );
+  }
+
+  if (mode === 'compact') {
+    return (
+      <Paper
+        sx={{
+          p: 1,
+          cursor: 'default',
+          minWidth: 140,
+          maxWidth: 220,
+          background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
+          color: 'white',
+          boxShadow: '0 6px 18px rgba(99,102,241,0.18)',
+          borderRadius: '12px',
+          userSelect: 'none',
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 44 }}>
+            {getWeatherIcon(28)}
+          </Box>
+          <Box sx={{ flex: 1 }}>
+            <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1 }}>
+              {weather.temp}°C
+            </Typography>
+            <Typography variant="caption" sx={{ opacity: 0.95, display: 'block' }}>
+              {weather.condition}
+            </Typography>
+            <Typography variant="caption" sx={{ opacity: 0.85, display: 'block' }}>
+              Hum {weather.humidity}% • Wind {weather.windSpeed} km/h
+            </Typography>
+          </Box>
+          <IconButton
+            size="small"
+            onClick={() => setVisible(false)}
+            sx={{ 
+              color: 'white', 
+              '&:hover': { backgroundColor: 'rgba(255,255,255,0.12)' },
+              ml: 0.5
+            }}
+          >
+            <X size={16} />
+          </IconButton>
+        </Box>
+      </Paper>
+    );
+  }
 
   return (
     <Paper

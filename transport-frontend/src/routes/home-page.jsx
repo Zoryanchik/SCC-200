@@ -19,6 +19,7 @@ import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, 
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
+import WeatherWidget from "../components/common/WeatherWidget";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
@@ -494,6 +495,34 @@ export default function HomePage() {
     <Skeleton variant="rounded" sx={{ width: "100%", height: { xs: 350, md: 450 } }} />
   );
 
+  // Build the suggested routes panel so it can be injected into the map side column
+  const suggestedRoutesPanel = (
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
+      <Stack spacing={2}>
+        <Typography variant="h6" fontWeight={700}>
+          Suggested routes
+        </Typography>
+        {isSearching ? (
+          <Stack spacing={2}>
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} height={120} variant="rounded" />
+            ))}
+          </Stack>
+        ) : routes.length > 0 ? (
+          <Stack spacing={2}>
+            {routes.map((route) => (
+              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
+            ))}
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            No routes found. Try adjusting your search.
+          </Typography>
+        )}
+      </Stack>
+    </Paper>
+  );
+
   return (
     <Stack spacing={{ xs: 1.5, md: 2 }}>
       <Paper
@@ -880,6 +909,10 @@ export default function HomePage() {
           >
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
           </Box>
+          {/* Compact weather aligned with the filter pills */}
+          <Box sx={{ display: { xs: 'none', sm: 'flex' }, ml: 1 }}>
+            <WeatherWidget variant="inline" />
+          </Box>
           <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
           {!userLocation && (
             <Button
@@ -926,6 +959,7 @@ export default function HomePage() {
             trainLoading={trainLoading}
             onMapReady={setMapInstance}
             onMoveEnd={handleMoveEnd}
+            sideContent={suggestedRoutesPanel}
           />
         </Suspense>
       </Paper>
@@ -1002,30 +1036,7 @@ export default function HomePage() {
         </Stack>
       </Paper>
 
-      <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
-        <Stack spacing={2}>
-          <Typography variant="h6" fontWeight={700}>
-            Suggested routes
-          </Typography>
-          {isSearching ? (
-            <Stack spacing={2}>
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} height={120} variant="rounded" />
-              ))}
-            </Stack>
-          ) : routes.length > 0 ? (
-            <Stack spacing={2}>
-              {routes.map((route) => (
-                <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
-              ))}
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No routes found. Try adjusting your search.
-            </Typography>
-          )}
-        </Stack>
-      </Paper>
+      {/* Bottom weather widget removed — now shown inline in the map filter row */}
     </Stack>
   );
 }

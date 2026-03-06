@@ -25,10 +25,11 @@ Updated: 2026-03-05
 - [ ] John: train integration!
 
 ## Medium Priority
+- [ ] Live map "Trains xx" and "Bus xx" button on click always shows "Trains 0", "Buses 0" and does not filter right
 - [ ] Refresh only map for live locations, not the whole page
 - [ ] Delay handling for bus
 - [ ] Delay handling for train
-- [ ] Make weather widget nicer
+- [x] Make weather widget nicer
 - [ ] Add number icon for tracked buses on the map page and make icons smaller
 - [x] Widen search bar — allow location text shown in one line
 - [ ] Implement `/rail/departures/{station}` endpoint *(not implemented)*
@@ -73,7 +74,7 @@ Updated: 2026-03-05
 - [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
 - [ ] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
 - [ ] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
-- [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
+- [ ] Road-following route lines via ?OSRM/should be from transport API(bus/times/XXXX) etc. (replace straight stop-to-stop with road geometry)
 - [ ] Verify button highlight color toggle works (dark blue + ✓ on click)
 - [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
 - [ ] Update/write backend tests for `/routes/line/{line}` endpoint
