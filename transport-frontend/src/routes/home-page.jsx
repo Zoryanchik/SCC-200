@@ -668,16 +668,59 @@ export default function HomePage() {
           borderColor: "divider",
         }}
       >
-        <Stack spacing={2}>
-          <Typography variant="h6" fontWeight={700}>
-            Quick journey search
-          </Typography>
+          <Stack spacing={2}>
+            <Stack direction="row" alignItems="center" spacing={2} justifyContent="space-between">
+              <Typography variant="h6" fontWeight={700}>
+                Quick journey search
+              </Typography>
 
-          <Stack
-            direction={{ xs: "column", md: "row" }}
-            spacing={2}
-            alignItems={{ md: "flex-start" }}
-          >
+              {/* Date/time/transfers: right-aligned in header */}
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <TextField
+                  label="Date"
+                  type="date"
+                  size="small"
+                  value={departureDate}
+                  onChange={(e) => setDepartureDate(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ minWidth: 140 }}
+                />
+                <TextField
+                  label="Time"
+                  type="time"
+                  size="small"
+                  value={departureClock}
+                  onChange={(e) => setDepartureClock(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ minWidth: 110 }}
+                />
+                <TextField
+                  label="Transfers"
+                  type="number"
+                  size="small"
+                  value={maxTransfers}
+                  onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                  InputProps={{ inputProps: { min: 0, max: 10 } }}
+                  sx={{ width: 110 }}
+                />
+              </Box>
+            </Stack>
+
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              spacing={2}
+              alignItems={{ md: "flex-start" }}
+            >
+                {/* Leftmost: quick 'use my location' for the From field */}
+                <IconButton
+                  aria-label="Use my location"
+                  onClick={handleUseMyLocation}
+                  size="large"
+                  sx={{ alignSelf: 'center' }}
+                >
+                  <NavIcon size={18} />
+                </IconButton>
+
                 <Autocomplete
                   fullWidth
                   freeSolo
@@ -749,13 +792,29 @@ export default function HomePage() {
                   )}
                 />
 
+                {/* Swap button: exchange From and To values */}
                 <IconButton
-                  aria-label="Use my location"
-                  onClick={handleUseMyLocation}
+                  aria-label="Swap start and destination"
+                  onClick={() => {
+                    // swap both the selected stop objects and the input strings
+                    setSelectedFromStop((prevFrom) => {
+                      // use functional updates to ensure sync
+                      const oldFrom = prevFrom;
+                      setSelectedToStop(oldFrom);
+                      return selectedToStop;
+                    });
+                    setSelectedToStop((prev) => prev); // no-op to satisfy eslint-like rules
+                    // swap input text values
+                    setFromLocation((prevFromLoc) => {
+                      const oldFromLoc = prevFromLoc;
+                      setToLocation(oldFromLoc);
+                      return toLocation;
+                    });
+                  }}
                   size="large"
                   sx={{ alignSelf: 'center' }}
                 >
-                  <NavIcon size={18} />
+                  <span style={{ fontSize: 18, lineHeight: 1 }}>⇄</span>
                 </IconButton>
 
                 <Autocomplete
@@ -844,38 +903,7 @@ export default function HomePage() {
             </Button>
           </Stack>
 
-          {/* Date / time / transfers controls on their own row */}
-          <Box sx={{ mt: 2 }}>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems="center">
-              <TextField
-                label="Date"
-                type="date"
-                size="small"
-                value={departureDate}
-                onChange={(e) => setDepartureDate(e.target.value)}
-                InputLabelProps={{ shrink: true }}
-                sx={{ minWidth: 140 }}
-              />
-              <TextField
-                label="Time"
-                type="time"
-                size="small"
-                value={departureClock}
-                onChange={(e) => setDepartureClock(e.target.value)}
-                InputLabelProps={{ shrink: true }}
-                sx={{ minWidth: 110 }}
-              />
-              <TextField
-                label="Transfers"
-                type="number"
-                size="small"
-                value={maxTransfers}
-                onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-                InputProps={{ inputProps: { min: 0, max: 10 } }}
-                sx={{ width: 110 }}
-              />
-            </Stack>
-          </Box>
+          {/* Date/time/transfers were moved into the header (right-aligned) above */}
 
           {geoError && (
             <Box sx={{ mt: 1 }}>

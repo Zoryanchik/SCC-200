@@ -419,29 +419,7 @@ export const useLiveUpdates = (subscriptionType = 'train') => {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState(null);
 
-  // If we're running unit tests, don't start real live-update connections.
-  // Tests run with Vite's mode set to 'test' so guard against side-effects
-  // that perform async updates during mount (which create act(...) warnings).
-  // Determine whether we're running under the test runner. Guard with a
-  // try/catch because `import.meta` may not be available in some runtimes.
-  const isTestEnv = (() => {
-    try {
-      return import.meta.env && import.meta.env.MODE === 'test';
-    } catch (e) {
-      return false;
-    }
-  })();
-
   useEffect(() => {
-    // In test mode, allow the effect to run only if tests have mocked the
-    // liveUpdatesManager.connect function. This lets unit tests that spy on
-    // the manager exercise connect/subscribe logic while preventing real
-    // network connections in unmocked test scenarios.
-    if (isTestEnv && !(liveUpdatesManager && typeof liveUpdatesManager.connect === 'function' && liveUpdatesManager.connect.mock)) {
-      // No-op in test environment when the manager isn't mocked.
-      return undefined;
-    }
-
     const connect = async () => {
       try {
         await liveUpdatesManager.connect();
@@ -478,7 +456,7 @@ export const useLiveUpdates = (subscriptionType = 'train') => {
       await liveUpdatesManager.disconnect();
       setIsConnected(false);
     };
-  }, [subscriptionType, isTestEnv]);
+  }, [subscriptionType]);
 
   return { data, isConnected, error };
 };
