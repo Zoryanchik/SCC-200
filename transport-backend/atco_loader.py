@@ -197,6 +197,27 @@ class AtcoLoader:
         conn.close()
         return result
 
+    def get_stop_towns_bulk(self, atco_codes) -> dict:
+        """Return ``{atco_code: town}`` for the given ATCO codes.
+
+        This mirrors ``get_stop_names_bulk`` but returns the stored
+        ``town`` value from the ``stop_coords`` table.  Missing or
+        empty towns are omitted from the result.
+        """
+        if not atco_codes:
+            return {}
+        conn = self._connect()
+        cur = conn.cursor()
+        codes = list(atco_codes)
+        ph = ",".join(["%s"] * len(codes))
+        cur.execute(
+            f"SELECT atco_code, town FROM stop_coords WHERE atco_code IN ({ph})",
+            codes,
+        )
+        result = {r[0]: r[1] for r in cur.fetchall() if r[1]}
+        conn.close()
+        return result
+
     def get_stop_type(self, atco_code: str) -> str:
         """Return ``'bus'``, ``'train'``, or ``'other'`` for a single code."""
         conn = self._connect()

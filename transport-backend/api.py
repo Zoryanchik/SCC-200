@@ -1144,8 +1144,32 @@ def format_route_text(route_result, merged):
         walk_min = start_walk / 60
         out.append(f"    - Walk {walk_min:.0f} min ({start_walk}s)")
 
+    # Resolve town names for stops (if an AtcoLoader is available)
+    try:
+        stop_codes = [s for s, _ in legs]
+        atco_codes = {merged.get_atco_code(s) for s in stop_codes if merged.get_atco_code(s)}
+    except Exception:
+        atco_codes = set()
+    town_map = {}
+    if getattr(merged, "atco", None) and atco_codes:
+        try:
+            town_map = merged.atco.get_stop_towns_bulk(atco_codes) or {}
+        except Exception:
+            town_map = {}
+
+    def _label_with_town(idx: int) -> str:
+        base = merged.stop_metadata[idx] if idx < len(merged.stop_metadata) else f"stop#{idx}"
+        try:
+            code = merged.get_atco_code(idx)
+            town = town_map.get(code)
+            if town and town.strip() and town not in base:
+                return f"{base}, {town}"
+        except Exception:
+            pass
+        return base
+
     for i, (stop_int, info) in enumerate(legs):
-        stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
+        stop_label = _label_with_town(stop_int)
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
         # Support both new 'mode' key and legacy 'type' key in route dicts
         transport = info.get("mode") or info.get("type") or "origin"
@@ -1288,6 +1312,32 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             return merged.stop_metadata[idx]
         return f"stop#{idx}"
 
+    # Try to resolve town names for stops using the MergedData's
+    # AtcoLoader (if available).  We'll use this to append ", Town"
+    # to displayed stop names when a town is present in the DB.
+    try:
+        ordered_stop_indices = [s for s, _ in ordered]
+        atco_codes_for_ordered = {merged.get_atco_code(s) for s in ordered_stop_indices if merged.get_atco_code(s)}
+    except Exception:
+        atco_codes_for_ordered = set()
+    town_map = {}
+    if getattr(merged, "atco", None) and atco_codes_for_ordered:
+        try:
+            town_map = merged.atco.get_stop_towns_bulk(atco_codes_for_ordered) or {}
+        except Exception:
+            town_map = {}
+
+    def _display_name(idx: int) -> str:
+        base = _stop_name(idx)
+        try:
+            code = merged.get_atco_code(idx)
+            town = town_map.get(code)
+            if town and town.strip() and town not in base:
+                return f"{base}, {town}"
+        except Exception:
+            pass
+        return base
+
     def _time_str(secs):
         if secs is None or secs == math.inf:
             return None
@@ -1308,7 +1358,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
         first_int = ordered[0][0]
         first_coord = stop_coords.get(first_int)
-        first_name = _stop_name(first_int)
+        first_name = _display_name(first_int)
         to_loc = {"name": first_name}
         if first_coord:
             to_loc["lat"] = first_coord[0]
@@ -1338,8 +1388,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
         transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
-        prev_name = _stop_name(prev_int)
-        curr_name = _stop_name(curr_int)
+        prev_name = _display_name(prev_int)
+        curr_name = _display_name(curr_int)
         prev_coord = stop_coords.get(prev_int)
         curr_coord = stop_coords.get(curr_int)
 
@@ -1414,7 +1464,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             and end_walk > 0 and ordered):
         last_int = ordered[-1][0]
         last_coord = stop_coords.get(last_int)
-        last_name = _stop_name(last_int)
+        last_name = _display_name(last_int)
         from_loc = {"name": last_name}
         if last_coord:
             from_loc["lat"] = last_coord[0]
