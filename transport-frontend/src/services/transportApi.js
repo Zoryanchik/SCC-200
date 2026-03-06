@@ -145,7 +145,7 @@ export const searchStops = async (query) => {
  * @param {string} departureTime - Departure time in ISO format
  * @returns {Promise<Array>} Array of journey options
  */
-export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
+export const getJourneyPlans = async (fromStop, toStop, departureTime, options = {}) => {
   try {
     const from = normalizeStopLocation(fromStop);
     const to = normalizeStopLocation(toStop);
@@ -153,6 +153,7 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
       throw new Error('fromStop and toStop must include lat/lon');
     }
     const { date, time } = normalizeDateTime(departureTime);
+    const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 5;
     const response = await fetch(
       `${API_BASE_URL}/journey/plan`,
       {
@@ -164,7 +165,8 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
           fromStop: from,
           toStop: to,
           departureTime: time,
-          date
+          date,
+          maxTransfers
         })
       }
     );

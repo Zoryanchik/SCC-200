@@ -109,6 +109,14 @@ export default function HomePage() {
   const [selectedFromStop, setSelectedFromStop] = useState(null);
   const [selectedToStop, setSelectedToStop] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
+  // Journey search controls: date, time, max transfers
+  const pad2 = (n) => (n < 10 ? `0${n}` : `${n}`);
+  const now = new Date();
+  const defaultDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  const defaultTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`; // HH:MM
+  const [departureDate, setDepartureDate] = useState(defaultDate);
+  const [departureClock, setDepartureClock] = useState(defaultTime);
+  const [maxTransfers, setMaxTransfers] = useState(3);
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 300);
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
@@ -379,7 +387,9 @@ export default function HomePage() {
     if (!fromCoords || !toCoords) return;
     setIsSearching(true);
     try {
-      const journey = await getJourneyPlans(fromCoords, toCoords, new Date().toISOString());
+      // Build ISO datetime from user-selected date + clock (local)
+      const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
+      const journey = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers });
       const card = journeyToRouteCard(journey);
       setRoutes(card ? [card] : []);
     } catch (error) {
@@ -738,6 +748,39 @@ export default function HomePage() {
               {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
             </Button>
           </Stack>
+
+          {/* Date / time / transfers controls on their own row */}
+          <Box sx={{ mt: 2 }}>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems="center">
+              <TextField
+                label="Date"
+                type="date"
+                size="small"
+                value={departureDate}
+                onChange={(e) => setDepartureDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 140 }}
+              />
+              <TextField
+                label="Time"
+                type="time"
+                size="small"
+                value={departureClock}
+                onChange={(e) => setDepartureClock(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 110 }}
+              />
+              <TextField
+                label="Transfers"
+                type="number"
+                size="small"
+                value={maxTransfers}
+                onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                InputProps={{ inputProps: { min: 0, max: 10 } }}
+                sx={{ width: 110 }}
+              />
+            </Stack>
+          </Box>
 
           {geoError && (
             <Box sx={{ mt: 1 }}>

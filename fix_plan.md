@@ -9,8 +9,8 @@ Updated: 2026-03-05
 ## High Priority
 - [x] Implement frontend for routing (journey results display)
 - [x] Auto input user location as start point
-- [ ] Allow arbitrary start date-time input in fronttend
-- [ ] Number of transfer limit button in frontend
+- [x] Allow arbitrary start date-time input in fronttend
+- [x] Number of transfer limit button in frontend
 - [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
 - [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
 - [ ] Add search to map page to avoid scrolling

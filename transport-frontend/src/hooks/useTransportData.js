@@ -247,7 +247,7 @@ export const useStopSearch = (query, debounceDelay = 500) => {
 /**
  * Hook for journey planning
  */
-export const useJourneyPlans = (fromStop, toStop, departureTime) => {
+export const useJourneyPlans = (fromStop, toStop, departureTime, maxTransfers = 5) => {
   const [routes, setRoutes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -261,7 +261,8 @@ export const useJourneyPlans = (fromStop, toStop, departureTime) => {
         () => getJourneyPlans(
           fromStop,
           toStop,
-          departureTime || new Date().toISOString()
+          departureTime || new Date().toISOString(),
+          { maxTransfers }
         ),
         { retries: 1, baseDelay: 600 }
       );
@@ -273,7 +274,7 @@ export const useJourneyPlans = (fromStop, toStop, departureTime) => {
     } finally {
       setLoading(false);
     }
-  }, [fromStop, toStop, departureTime]);
+  }, [fromStop, toStop, departureTime, maxTransfers]);
 
   return { routes, loading, error, fetchPlans };
 };
