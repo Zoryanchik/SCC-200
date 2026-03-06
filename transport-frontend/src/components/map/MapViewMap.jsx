@@ -251,13 +251,16 @@ export default function MapViewMap({
 						</Typography>
 					</Box>
 				)}
-				<MapContainer
-					center={[54.050556, -2.800556]}
-					zoom={10}
-					scrollWheelZoom
-					style={{ height: "100%", width: "100%" }}
-					className="leaflet-container-custom"
-				>
+					<MapContainer
+						center={[54.050556, -2.800556]}
+						zoom={10}
+						// Disable scroll-wheel / trackpad two-finger slide zoom but allow pinch-to-zoom on touch devices
+						// (scrollWheelZoom handles mouse wheel and trackpad two-finger scroll; touchZoom enables pinch)
+							scrollWheelZoom={false}
+							touchZoom={true}
+						style={{ height: "100%", width: "100%" }}
+						className="leaflet-container-custom"
+					>
 					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />
 					<TileLayer
 						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -379,7 +382,8 @@ export default function MapViewMap({
 						position: 'absolute',
 						top: 16,
 						right: 16,
-						zIndex: 1200,
+						// Keep the suggested routes under the AppBar header
+						zIndex: 1050,
 						display: { xs: 'none', md: 'block' },
 						minWidth: 320,
 					}}>

@@ -63,7 +63,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
     updateWeather();
   }, [location]);
 
-  const getWeatherIcon = (size = 32, colorOverride) => {
+  const getWeatherIcon = (size = 40, colorOverride) => {
     const color = colorOverride || (weather.icon === 'cloudRain' ? '#2196F3' : weather.icon === 'sun' ? '#FFC107' : '#9E9E9E');
     switch (weather.icon) {
       case 'cloudRain':
@@ -114,7 +114,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
             {getWeatherIcon(18, 'white')}
           </Box>
           <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
-            <Typography variant="body2" sx={{ fontWeight: 700, lineHeight: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1 }}>
               {weather.temp}°C — {weather.condition}
             </Typography>
           </Box>
@@ -144,7 +144,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
                 fontWeight: 600,
             })}
           >
-              <Stack spacing={0.5} sx={{ color: 'white' }}>
+              <Stack spacing={1.5} sx={{ color: 'white' }}>
                 <Typography variant="body2" fontWeight={600} sx={{ color: 'white' }}>
                   Humidity: {weather.humidity}%
                 </Typography>
@@ -183,7 +183,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
             {getWeatherIcon(28)}
           </Box>
           <Box sx={{ flex: 1 }}>
-            <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1 }}>
+            <Typography variant="h6" fontWeight={600} sx={{ lineHeight: 1 }}>
               {weather.temp}°C
             </Typography>
             <Typography variant="caption" sx={{ opacity: 0.95, display: 'block' }}>
@@ -199,7 +199,7 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
             sx={{ 
               color: 'white', 
               '&:hover': { backgroundColor: 'rgba(255,255,255,0.12)' },
-              ml: 0.5
+              ml: 2
             }}
           >
             <X size={16} />
@@ -229,10 +229,10 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
         flexDirection: 'column'
       }}
     >
-      <Stack spacing={2.5} sx={{ height: '100%' }}>
+      <Stack spacing={1.5} sx={{ height: '100%' }}>
         {/* Header with close button */}
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h6" fontWeight={700}>
+          <Typography variant="h6" fontWeight={600}>
             Weather
           </Typography>
           <IconButton
@@ -254,29 +254,29 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
             {getWeatherIcon()}
           </Box>
           <Box>
-            <Typography variant="h3" fontWeight={700} sx={{ lineHeight: 1 }}>
+            <Typography variant="h3" fontWeight={600} sx={{ lineHeight: 1 }}>
               {weather.temp}°C
             </Typography>
-            <Typography variant="body1" sx={{ opacity: 0.95, fontWeight: 500, mt: 0.5 }}>
+            <Typography variant="body1" sx={{ opacity: 0.95, fontWeight: 600, mt: 0.5 }}>
               {weather.condition}
             </Typography>
           </Box>
         </Box>
 
         {/* Weather details */}
-        <Stack spacing={1.5} sx={{ pt: 2, borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+        <Stack spacing={0.5} sx={{ pt: 2, borderTop: '1px solid rgba(255,255,255,0.2)' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Droplets size={20} />
-            <Typography variant="body2" fontWeight={500}>Humidity: {weather.humidity}%</Typography>
+            <Typography variant="body2" fontWeight={600}>Humidity: {weather.humidity}%</Typography>
           </Box>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Wind size={20} />
-            <Typography variant="body2" fontWeight={500}>Wind: {weather.windSpeed} km/h</Typography>
+            <Typography variant="body2" fontWeight={600}>Wind: {weather.windSpeed} km/h</Typography>
           </Box>
         </Stack>
 
         {/* Status info */}
-        <Typography variant="caption" sx={{ opacity: 0.85, textAlign: 'center', pt: 1.5, mt: 'auto', fontWeight: 500 }}>
+        <Typography variant="caption" sx={{ opacity: 0.85, textAlign: 'center', pt: 1.5, mt: 'auto', fontWeight: 600 }}>
           💧 Updates every minute
         </Typography>
       </Stack>

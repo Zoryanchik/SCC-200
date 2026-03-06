@@ -500,9 +500,9 @@ export default function HomePage() {
 
   // Build the suggested routes panel so it can be injected into the map side column
   const suggestedRoutesPanel = (
-    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative' }}>
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050 }}>
       <Stack spacing={2}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 1051 }}>
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
           </Typography>
@@ -632,17 +632,15 @@ export default function HomePage() {
               spacing={2}
               alignItems={{ md: "flex-start" }}
             >
-                {/* Leftmost: quick 'use my location' for the From field */}
-                {!userLocation && (
-                  <IconButton
-                    aria-label="Use my location"
-                    onClick={handleUseMyLocation}
-                    size="large"
-                    sx={{ alignSelf: 'center' }}
-                  >
-                    <NavIcon size={18} />
-                  </IconButton>
-                )}
+                {/* Leftmost: quick 'use my location' for the From field - always visible */}
+                <IconButton
+                  aria-label="Use my location"
+                  onClick={handleUseMyLocation}
+                  size="large"
+                  sx={{ alignSelf: 'center' }}
+                >
+                  <NavIcon size={18} />
+                </IconButton>
 
                 <Autocomplete
                   fullWidth
@@ -735,9 +733,20 @@ export default function HomePage() {
                     });
                   }}
                   size="large"
-                  sx={{ alignSelf: 'center' }}
+                  sx={{
+                    alignSelf: 'center',
+                    width: 56,
+                    height: 56,
+                    p: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: '12px',
+                    // Ensure keyboard focus is visible
+                    '&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
+                  }}
                 >
-                  <span style={{ fontSize: 18, lineHeight: 1 }}>⇄</span>
+                  <span style={{ fontSize: 22, lineHeight: 1 }}>⇄</span>
                 </IconButton>
 
                 <Autocomplete
