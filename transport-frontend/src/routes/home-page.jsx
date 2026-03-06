@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, lazy, Suspense } from
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
+import IconButton from "@mui/material/IconButton";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
@@ -124,11 +125,42 @@ export default function HomePage() {
   const [openPopupId, setOpenPopupId] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [geoError, setGeoError] = useState(null);
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
   const handleMoveEnd = useCallback(({ lat, lon }) => {
     setMapCenter({ lat, lon });
   }, []);
+
+  const handleUseMyLocation = useCallback(() => {
+    if (!navigator || !navigator.geolocation) {
+      setGeoError('Geolocation not supported by your browser');
+      setTimeout(() => setGeoError(null), 4000);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        const loc = {
+          name: 'My location',
+          display_name: 'My location',
+          lat,
+          lon,
+          type: 'location',
+        };
+        setSelectedFromStop(loc);
+        setFromLocation('My location');
+        setMapCenter({ lat, lon });
+        setGeoError(null);
+      },
+      (err) => {
+        setGeoError(err.message || 'Failed to get location');
+        setTimeout(() => setGeoError(null), 4000);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }, [setSelectedFromStop, setFromLocation, setMapCenter]);
 
   // Debounced live bus data tied to the current map center
   const {
@@ -612,6 +644,15 @@ export default function HomePage() {
                   )}
                 />
 
+                <IconButton
+                  aria-label="Use my location"
+                  onClick={handleUseMyLocation}
+                  size="large"
+                  sx={{ alignSelf: 'center' }}
+                >
+                  <NavIcon size={18} />
+                </IconButton>
+
                 <Autocomplete
                   fullWidth
                   freeSolo
@@ -697,6 +738,12 @@ export default function HomePage() {
               {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
             </Button>
           </Stack>
+
+          {geoError && (
+            <Box sx={{ mt: 1 }}>
+              <Alert severity="error">{geoError}</Alert>
+            </Box>
+          )}
 
           {favorites.length > 0 && (
             <Box>
