@@ -578,7 +578,7 @@ export default function HomePage() {
                   freeSolo
                   filterOptions={(x) => x}
                   options={allStops.from}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
                   value={selectedFromStop}
                   onChange={(e, value) => {
                     if (typeof value === "string") {
@@ -587,13 +587,13 @@ export default function HomePage() {
                       return;
                     }
                     setSelectedFromStop(value);
-                    if (value && typeof value === "object") setFromLocation(value.name || "");
+                    if (value && typeof value === "object") setFromLocation(value.display_name || value.name || "");
                   }}
                   inputValue={fromLocation}
                   onInputChange={(e, value) => setFromLocation(value)}
                   loading={fromLoading}
                   renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : option.name;
+                    const label = typeof option === "string" ? option : (option.display_name || option.name);
                     const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                     return (
                       <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -658,7 +658,7 @@ export default function HomePage() {
                   freeSolo
                   filterOptions={(x) => x}
                   options={allStops.to}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
                   value={selectedToStop}
                   onChange={(e, value) => {
                     if (typeof value === "string") {
@@ -667,13 +667,13 @@ export default function HomePage() {
                       return;
                     }
                     setSelectedToStop(value);
-                    if (value && typeof value === "object") setToLocation(value.name || "");
+                    if (value && typeof value === "object") setToLocation(value.display_name || value.name || "");
                   }}
                   inputValue={toLocation}
                   onInputChange={(e, value) => setToLocation(value)}
                   loading={toLoading}
                   renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : option.name;
+                    const label = typeof option === "string" ? option : (option.display_name || option.name);
                     const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                     return (
                       <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>

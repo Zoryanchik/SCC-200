@@ -47,11 +47,12 @@ class AtcoLoader:
                 lat        REAL NOT NULL,
                 lon        REAL NOT NULL,
                 name       TEXT,
-                stop_type  TEXT
+                stop_type  TEXT,
+                town       TEXT
             );
         """)
         # Migrate older schemas that lack the new columns
-        for col, coltype in [("name", "TEXT"), ("stop_type", "TEXT")]:
+        for col, coltype in [("name", "TEXT"), ("stop_type", "TEXT"), ("town", "TEXT")]:
             try:
                 cur.execute(
                     "SELECT column_name FROM information_schema.columns "
@@ -123,6 +124,16 @@ class AtcoLoader:
                 )
                 name = name_m.group(1).strip() if name_m else None
 
+                # Town / place name (NaPTAN often uses <Place><Town>...</Town>)
+                town = None
+                town_m = re.search(r"<Place>.*?<Town>\s*([^<]+?)\s*</Town>", block, flags=re.DOTALL)
+                if not town_m:
+                    town_m = re.search(r"<Place>.*?<TownName>\s*([^<]+?)\s*</TownName>", block, flags=re.DOTALL)
+                if not town_m:
+                    town_m = re.search(r"<LocalityName>\s*([^<]+?)\s*</LocalityName>", block, flags=re.DOTALL)
+                if town_m:
+                    town = town_m.group(1).strip()
+
                 # Stop type code  (e.g. BCT, BCS, TXR, PLT …)
                 type_m = re.search(
                     r"<StopClassification>.*?<StopType>\s*([^<\s]+)\s*</StopType>",
@@ -136,7 +147,7 @@ class AtcoLoader:
                 else:
                     stop_type = "other"
 
-                rows.append((atco, lat, lon, name, stop_type))
+                rows.append((atco, lat, lon, name, stop_type, town))
 
         except Exception as e:
             raise RuntimeError(f"Error parsing NaPTAN XML: {e}")
@@ -148,11 +159,11 @@ class AtcoLoader:
         conn = self._connect()
         cur = conn.cursor()
         cur.executemany(
-            "INSERT INTO stop_coords (atco_code, lat, lon, name, stop_type) "
-            "VALUES (%s, %s, %s, %s, %s) "
+            "INSERT INTO stop_coords (atco_code, lat, lon, name, stop_type, town) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (atco_code) DO UPDATE SET "
             "lat = EXCLUDED.lat, lon = EXCLUDED.lon, "
-            "name = EXCLUDED.name, stop_type = EXCLUDED.stop_type",
+            "name = EXCLUDED.name, stop_type = EXCLUDED.stop_type, town = EXCLUDED.town",
             rows,
         )
         conn.commit()

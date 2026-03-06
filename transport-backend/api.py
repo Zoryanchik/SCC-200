@@ -460,12 +460,45 @@ async def search_stops(
         location_results = []
         stop_results = []
         try:
-            # Loader may be missing in some test contexts — guard access
-            loader = _base_cache.get("loader") if _base_cache else None
-            if loader:
-                stop_results = loader.search_stops(q, limit)
-                for stop in stop_results:
-                    stop["type"] = "stop"
+            # Prefer ATCO/NaPTAN stop metadata (stop_coords table) when
+            # available — this ensures canonical stop names/types are used
+            # instead of the bus-specific stop names table.
+            atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+            if atco_loader:
+                try:
+                    # Use the atco_loader's DB to search stop_coords by name
+                    conn = atco_loader._connect()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                        "WHERE LOWER(name) LIKE LOWER(%s) LIMIT %s",
+                        (f"%{q}%", limit),
+                    )
+                    rows = cur.fetchall()
+                    conn.close()
+                    stop_results = []
+                    for i, (atco, name, town, lat, lon) in enumerate(rows):
+                        display = name or atco
+                        if town:
+                            display = f"{display}, {town}"
+                        stop_results.append({
+                            "id": i,
+                            "name": name or atco,
+                            "display_name": display,
+                            "atco_code": atco,
+                            "lat": lat,
+                            "lon": lon,
+                            "type": "stop",
+                        })
+                except Exception as exc:
+                    logger.warning("ATCO stop lookup failed: %s", exc)
+            else:
+                # Fallback to legacy loader when ATCO loader unavailable
+                loader = _base_cache.get("loader") if _base_cache else None
+                if loader:
+                    stop_results = loader.search_stops(q, limit)
+                    for stop in stop_results:
+                        stop["type"] = "stop"
         except Exception as exc:
             logger.warning("Stop DB lookup failed: %s", exc)
 
