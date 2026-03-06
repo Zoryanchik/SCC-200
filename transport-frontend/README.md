@@ -25,3 +25,9 @@ Then open a local server via:
 ```bash
 npm run dev
 ```
+
+By default the development server binds to port 5075 for this project. To open the app in a browser use:
+
+```bash
+http://localhost:5075
+```

@@ -340,7 +340,7 @@ Each item has:
 3. **`/search/stops` mixed types**: Backend returns both `type: "stop"` and `type: "location"` results. Frontend tests already handle this.
 4. **`/journey/plan` geometry format**: `routeGeometries[*].coords` uses `[lat, lon]` pairs (not GeoJSON `[lon, lat]`). Frontend polyline rendering must respect this order.
 5. **`POST /api/bus_live` removed**: The duplicate endpoint was removed. All consumers (including the mock HTML frontend) now use `GET /bus/live/{operator}`.
-6. **CORS**: Backend allows `localhost:3000` and `localhost:5173`. Vite dev server (default 5173) is covered.
+6. **CORS**: Backend allows `localhost:3000` and `localhost:5075`. Vite dev server (default 5075) is covered.
 7. **`/journey/plan` error shape**: On failure, returns `success: false` with `legs: null`, `meta: null`, `routeGeometries: null` — frontend hooks must gracefully handle null arrays.
 8. **`WS /ws/live` STOMP broker**: Frontend `liveUpdatesManager` must set `brokerURL` to `ws://localhost:5050/ws/live` for local dev (default points at external server).
 9. **Station classification**: `GET /stops/classify` computes classifications from today's network data. `GET /search/stops?classification=hub` filters search results by class. Classification is cached for the process lifetime.

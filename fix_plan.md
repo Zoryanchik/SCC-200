@@ -40,7 +40,7 @@ Updated: 2026-03-05
 - [ ] Implement frequently / recently used routes feature
 - [ ] UI refinement for desktop and mobile layouts
 - [ ] Implement accessibility features (contrast, scaling, map clarity)
-- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173) *(not implemented — still hardcoded in api.py)*
+- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5075) *(not implemented — still hardcoded in api.py)*
 - [ ] Implement `/alerts` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/arrivals/{stopCode}` endpoint *(not implemented)*
@@ -101,7 +101,7 @@ The frontend calls these endpoints, but `api.py` does not define them. They will
 
 ### P6 — No environment-based CORS configuration
 - **File:** `transport-backend/api.py`
-- **Problem:** `allow_origins` is hardcoded to `localhost:3000` and `localhost:5173`. Production or other dev ports will be blocked.
+- **Problem:** `allow_origins` is hardcoded to `localhost:3000` and `localhost:5075`. Production or other dev ports will be blocked.
 - **Fix:** Read origins from an env variable (e.g., `CORS_ORIGINS`).
 
 ### P7 — `POST /api/route` (legacy) returns raw RAPTOR dict

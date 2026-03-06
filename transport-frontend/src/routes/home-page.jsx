@@ -495,11 +495,11 @@ export default function HomePage() {
   );
 
   return (
-    <Stack spacing={{ xs: 2, md: 3 }}>
+    <Stack spacing={{ xs: 1.5, md: 2 }}>
       <Paper
         elevation={0}
         sx={{
-          p: { xs: 2.5, md: 3.5 },
+          p: { xs: 0.5, md: 0.7 },
           background: "linear-gradient(135deg, #6366F1 0%, #EC4899 100%)",
           color: "white",
           borderRadius: "16px",
@@ -507,163 +507,14 @@ export default function HomePage() {
       >
         <Stack direction="row" spacing={1.5} alignItems="center">
           <Bus size={24} />
-          <Typography variant="h5" fontWeight={700}>
+          <Typography variant="h5" fontWeight={550}>
             Dashboard
           </Typography>
           <Chip
             label="Live"
-            sx={{ fontWeight: 700, backgroundColor: "rgba(255,255,255,0.25)", color: "white" }}
+            sx={{ fontWeight: 550, backgroundColor: "rgba(255,255,255,0.25)", color: "white" }}
             size="small"
           />
-        </Stack>
-      </Paper>
-
-      {/* ---- Inline live transport map ---- */}
-      <Paper
-        elevation={0}
-        sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
-      >
-        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
-          <MapPin size={20} color="#6366F1" />
-          <Typography variant="subtitle1" fontWeight={700}>
-            Live Transport Map
-          </Typography>
-        </Stack>
-
-        <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
-          <Box
-            data-testid="filter-buses"
-            onClick={() => setFilters((f) => ({ ...f, showBuses: !f.showBuses }))}
-            sx={{
-              padding: "8px 16px",
-              border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              cursor: "pointer",
-              backgroundColor: filters.showBuses ? "#6366F1" : "transparent",
-              color: filters.showBuses ? "white" : "inherit",
-              fontWeight: 600,
-              transition: "all 0.3s ease",
-            }}
-          >
-            <Bus size={18} /> Buses {filteredMarkers.filter((m) => m.type === "bus").length}
-          </Box>
-          <Box
-            data-testid="filter-trains"
-            onClick={() => setFilters((f) => ({ ...f, showTrains: !f.showTrains }))}
-            sx={{
-              padding: "8px 16px",
-              border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              cursor: "pointer",
-              backgroundColor: filters.showTrains ? "#10B981" : "transparent",
-              color: filters.showTrains ? "white" : "inherit",
-              fontWeight: 600,
-              transition: "all 0.3s ease",
-            }}
-          >
-            <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
-          </Box>
-          <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
-          {!userLocation && (
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={requestLocation}
-              disabled={locationStatus === 'loading'}
-              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
-            >
-              {locationStatus === 'loading' ? (
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <CircularProgress size={16} />
-                  <Typography variant="caption">Locating</Typography>
-                </Stack>
-              ) : (
-                'Use my location'
-              )}
-            </Button>
-          )}
-          {userLocation && (
-            <Button
-              variant="contained"
-              size="small"
-              onClick={handleCenterOnUser}
-              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
-            >
-              Center on me
-            </Button>
-          )}
-        </Stack>
-
-        <Suspense fallback={<MapFallback />}>
-          <MapViewMap
-            filteredMarkers={filteredMarkers}
-            openPopupId={openPopupId}
-            onOpenPopup={setOpenPopupId}
-            onClosePopup={() => setOpenPopupId(null)}
-            userLocation={userLocation}
-            nearestStop={nearestStop}
-            busLoading={busLoading}
-            busRefreshing={busRefreshing}
-            busCountdown={busCountdown}
-            busRefreshInterval={busRefreshInterval}
-            trainLoading={trainLoading}
-            onMapReady={setMapInstance}
-            onMoveEnd={handleMoveEnd}
-          />
-        </Suspense>
-      </Paper>
-
-      {/* ---- Alerts ---- */}
-      <Paper
-        elevation={0}
-        sx={{
-          p: { xs: 2, md: 3 },
-          borderRadius: "16px",
-          border: "1px solid",
-          borderColor: "divider",
-          background: "transparent",
-        }}
-      >
-        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
-          <AlertCircle size={20} color="#EC4899" />
-          <Typography variant="subtitle1" fontWeight={700}>
-            Service alerts
-          </Typography>
-          {alertsConnected && <Chip label="Live" size="small" color="primary" variant="outlined" sx={{ ml: 1 }} />}
-        </Stack>
-        <Stack spacing={1.5}>
-          {alertsLoading ? (
-            <Stack spacing={1}>
-              {[1, 2].map((i) => (
-                <Skeleton key={i} height={44} variant="rounded" />
-              ))}
-            </Stack>
-          ) : alerts.length > 0 ? (
-            alerts.map((alert) => (
-              <Alert
-                key={alert.id}
-                severity={alert.severity === "warning" ? "warning" : "info"}
-                variant="outlined"
-                sx={{
-                  borderRadius: "8px",
-                  backgroundColor:
-                    alert.severity === "warning" ? "rgba(245, 158, 11, 0.05)" : "rgba(59, 130, 246, 0.05)",
-                }}
-              >
-                {alert.message}
-              </Alert>
-            ))
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No service alerts right now.
-            </Typography>
-          )}
         </Stack>
       </Paper>
 
@@ -975,6 +826,155 @@ export default function HomePage() {
                   </Stack>
                 </Box>
               )}
+        </Stack>
+      </Paper>
+
+      {/* ---- Inline live transport map ---- */}
+      <Paper
+        elevation={0}
+        sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
+      >
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
+          <MapPin size={20} color="#6366F1" />
+          <Typography variant="subtitle1" fontWeight={700}>
+            Live Transport Map
+          </Typography>
+        </Stack>
+
+        <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
+          <Box
+            data-testid="filter-buses"
+            onClick={() => setFilters((f) => ({ ...f, showBuses: !f.showBuses }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showBuses ? "#6366F1" : "transparent",
+              color: filters.showBuses ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Bus size={18} /> Buses {filteredMarkers.filter((m) => m.type === "bus").length}
+          </Box>
+          <Box
+            data-testid="filter-trains"
+            onClick={() => setFilters((f) => ({ ...f, showTrains: !f.showTrains }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showTrains ? "#10B981" : "transparent",
+              color: filters.showTrains ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
+          </Box>
+          <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
+          {!userLocation && (
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={requestLocation}
+              disabled={locationStatus === 'loading'}
+              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+            >
+              {locationStatus === 'loading' ? (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <CircularProgress size={16} />
+                  <Typography variant="caption">Locating</Typography>
+                </Stack>
+              ) : (
+                'Use my location'
+              )}
+            </Button>
+          )}
+          {userLocation && (
+            <Button
+              variant="contained"
+              size="small"
+              onClick={handleCenterOnUser}
+              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+            >
+              Center on me
+            </Button>
+          )}
+        </Stack>
+
+        <Suspense fallback={<MapFallback />}>
+          <MapViewMap
+            filteredMarkers={filteredMarkers}
+            openPopupId={openPopupId}
+            onOpenPopup={setOpenPopupId}
+            onClosePopup={() => setOpenPopupId(null)}
+            userLocation={userLocation}
+            nearestStop={nearestStop}
+            busLoading={busLoading}
+            busRefreshing={busRefreshing}
+            busCountdown={busCountdown}
+            busRefreshInterval={busRefreshInterval}
+            trainLoading={trainLoading}
+            onMapReady={setMapInstance}
+            onMoveEnd={handleMoveEnd}
+          />
+        </Suspense>
+      </Paper>
+
+      {/* ---- Alerts ---- */}
+      <Paper
+        elevation={0}
+        sx={{
+          p: { xs: 2, md: 3 },
+          borderRadius: "16px",
+          border: "1px solid",
+          borderColor: "divider",
+          background: "transparent",
+        }}
+      >
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
+          <AlertCircle size={20} color="#EC4899" />
+          <Typography variant="subtitle1" fontWeight={700}>
+            Service alerts
+          </Typography>
+          {alertsConnected && <Chip label="Live" size="small" color="primary" variant="outlined" sx={{ ml: 1 }} />}
+        </Stack>
+        <Stack spacing={1.5}>
+          {alertsLoading ? (
+            <Stack spacing={1}>
+              {[1, 2].map((i) => (
+                <Skeleton key={i} height={44} variant="rounded" />
+              ))}
+            </Stack>
+          ) : alerts.length > 0 ? (
+            alerts.map((alert) => (
+              <Alert
+                key={alert.id}
+                severity={alert.severity === "warning" ? "warning" : "info"}
+                variant="outlined"
+                sx={{
+                  borderRadius: "8px",
+                  backgroundColor:
+                    alert.severity === "warning" ? "rgba(245, 158, 11, 0.05)" : "rgba(59, 130, 246, 0.05)",
+                }}
+              >
+                {alert.message}
+              </Alert>
+            ))
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No service alerts right now.
+            </Typography>
+          )}
         </Stack>
       </Paper>
 
