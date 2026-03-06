@@ -144,18 +144,17 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
                 fontWeight: 600,
             })}
           >
-              <Box sx={{ display: 'flex', flexDirection: 'column', lineHeight: 1, color: 'white' }}>
+              <Stack spacing={0.5} sx={{ color: 'white' }}>
                 <Typography variant="body2" fontWeight={600} sx={{ color: 'white' }}>
                   Humidity: {weather.humidity}%
                 </Typography>
                 <Typography variant="body2" fontWeight={600} sx={{ color: 'white' }}>
                   Wind: {weather.windSpeed} km/h
                 </Typography>
-              </Box>
-              <Box sx={{ flex: 1 }} />
-              <Typography variant="caption" sx={{ opacity: 0.95, color: 'white' }}>
-                Updates every minute
-              </Typography>
+                <Typography variant="caption" sx={{ opacity: 0.95, color: 'white' }}>
+                  Updates every minute
+                </Typography>
+              </Stack>
           </Paper>
         )}
       </Box>
