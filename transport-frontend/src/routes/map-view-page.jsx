@@ -252,8 +252,7 @@ color: 'white',
 borderRadius: '16px'
 }}>
     <Stack direction="row" spacing={1.5} alignItems="center">
-    <MapPin size={26} />
-    {/* "Live Transport Map" title intentionally removed */}
+    {/* Map header - icon removed */}
     </Stack>
 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.95)', mt: 1.5, fontWeight: 500 }}>
 Real-time bus and train locations across Lancashire

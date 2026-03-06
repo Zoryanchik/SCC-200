@@ -879,8 +879,7 @@ export default function HomePage() {
         sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
       >
         <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
-          <MapPin size={20} color="#6366F1" />
-          {/* Live Transport Map title removed (visual decluttering) */}
+          {/* Map header - icon intentionally removed */}
         </Stack>
 
         <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
