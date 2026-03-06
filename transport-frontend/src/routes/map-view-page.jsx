@@ -251,12 +251,10 @@ background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
 color: 'white',
 borderRadius: '16px'
 }}>
-<Stack direction="row" spacing={1.5} alignItems="center">
-<MapPin size={26} />
-<Typography variant="h5" fontWeight={700}>
-Live Transport Map
-</Typography>
-</Stack>
+    <Stack direction="row" spacing={1.5} alignItems="center">
+    <MapPin size={26} />
+    {/* "Live Transport Map" title intentionally removed */}
+    </Stack>
 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.95)', mt: 1.5, fontWeight: 500 }}>
 Real-time bus and train locations across Lancashire
 </Typography>

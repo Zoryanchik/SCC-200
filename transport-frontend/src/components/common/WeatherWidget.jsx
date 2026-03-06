@@ -46,17 +46,17 @@ export function WeatherWidget({ compact = false, variant = 'full' }) {
   const updateWeather = async () => {
     const result = await fetchWeatherData(location.lat, location.lon);
 
-    //TODO: Better icons for the weather
-    const icon = result.weather[0].main.toLowerCase().includes("cloud") ? 'cloud' : 
-      result.weather[0].maintoLowerCase().includes("rain") ? 'cloudRain' : 'sun';
+    // Defensive parsing of API result (some tests/mocks may return minimal data)
+    const mainStr = result?.weather?.[0]?.main ? String(result.weather[0].main).toLowerCase() : '';
+    const icon = mainStr.includes('cloud') ? 'cloud' : mainStr.includes('rain') ? 'cloudRain' : 'sun';
 
-    setWeather({
-      temp: Math.round(result.main.temp),
-      humidity: result.main.humidity,
-      condition: result.weather[0].main,
-      windSpeed: result.wind.speed,
-      icon: icon,
-    });
+    setWeather((prev) => ({
+      temp: result?.main?.temp ? Math.round(result.main.temp) : prev.temp,
+      humidity: result?.main?.humidity ?? prev.humidity,
+      condition: result?.weather?.[0]?.main ?? prev.condition,
+      windSpeed: result?.wind?.speed ?? prev.windSpeed,
+      icon,
+    }));
   };
 
   useEffect(() => {

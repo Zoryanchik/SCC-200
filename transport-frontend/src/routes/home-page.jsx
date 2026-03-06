@@ -566,9 +566,7 @@ export default function HomePage() {
       >
           <Stack spacing={2}>
             <Stack direction="row" alignItems="center" spacing={2} justifyContent="space-between">
-              <Typography variant="h6" fontWeight={700}>
-                Quick journey search
-              </Typography>
+              {/* Quick journey search heading removed per UI update */}
 
               {/* Date/time/transfers: right-aligned in header */}
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -882,9 +880,7 @@ export default function HomePage() {
       >
         <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
           <MapPin size={20} color="#6366F1" />
-          <Typography variant="subtitle1" fontWeight={700}>
-            Live Transport Map
-          </Typography>
+          {/* Live Transport Map title removed (visual decluttering) */}
         </Stack>
 
         <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
