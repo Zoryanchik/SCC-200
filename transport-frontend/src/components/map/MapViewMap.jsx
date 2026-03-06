@@ -291,7 +291,7 @@ export default function MapViewMap({
 												fontWeight: '700',
 												mb: 1,
 											}}>
-												Route {String(marker.routeNumber)}
+												Line {String(marker.routeNumber)}
 											</Box>
 										)}
 										{(() => {
