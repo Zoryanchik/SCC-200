@@ -454,13 +454,46 @@ async def search_stops(
                     break
             return filtered
 
-        # Default: return only geocoded locations (Lancashire)
+        # Default: return a merged list of NaPTAN stops (from loader) and
+        # geocoded POIs so the frontend can prompt both types. We prefer
+        # stop DB results first, then append geocoded locations.
         location_results = []
+        stop_results = []
+        try:
+            # Loader may be missing in some test contexts — guard access
+            loader = _base_cache.get("loader") if _base_cache else None
+            if loader:
+                stop_results = loader.search_stops(q, limit)
+                for stop in stop_results:
+                    stop["type"] = "stop"
+        except Exception as exc:
+            logger.warning("Stop DB lookup failed: %s", exc)
+
         try:
             location_results = geocode_locations(q, limit)
         except Exception as exc:
             logger.warning("Geocoding lookup failed: %s", exc)
-        return location_results
+
+        # Basic de-duplication by lower-cased name to avoid duplicates
+        combined = []
+        seen = set()
+        for item in (stop_results or []):
+            name = (item.get("name") or "").strip().lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            combined.append(item)
+        for item in (location_results or []):
+            name = (item.get("name") or "").strip().lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            combined.append(item)
+
+        # Respect requested limit: return up to `limit` items. The
+        # frontend further slices stop-type suggestions to 3, so this
+        # keeps responses compact while ensuring both types are present.
+        return combined[:limit]
     except Exception as exc:
         return JSONResponse(
             status_code=500,

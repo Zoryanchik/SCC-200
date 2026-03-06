@@ -324,8 +324,22 @@ export default function HomePage() {
   }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
-    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : [];
-    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : [];
+    const buildOptions = (results) => {
+      if (!Array.isArray(results) || results.length === 0) return [];
+      const strings = [];
+      const stops = [];
+      const locations = [];
+      for (const r of results) {
+        if (typeof r === "string") strings.push(r);
+        else if (r && r.type === "location") locations.push(r);
+        else stops.push(r);
+      }
+      // Limit to 3 stops to keep the dropdown focused
+      return [...strings, ...stops.slice(0, 3), ...locations];
+    };
+
+    const fromResults = fromLoading ? [] : buildOptions(fromStopResults);
+    const toResults = toLoading ? [] : buildOptions(toStopResults);
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
