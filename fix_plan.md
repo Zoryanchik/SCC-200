@@ -143,7 +143,7 @@ Focus: Connecting the frontend to the backend, UI, docs, and hardening.
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| — | Implement frontend routing UI (journey results display) | **High** | ❌ open |
+| — | Implement frontend routing UI (journey results display) | **High** | !done |
 | — | Widen search bar — allow location text on one line | Medium | ✅ done |
 | P6 | Make CORS origins env-configurable (`CORS_ORIGINS` env var) | Medium | ❌ open |
 | 14 | Add developer docs and Docker compose | Medium | ❌ open (~done: READMEs exist; docker-compose missing) |
