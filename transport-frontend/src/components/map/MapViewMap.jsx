@@ -133,9 +133,10 @@ export default function MapViewMap({
 	busRefreshInterval = 30000,
 	/** true while a background re-fetch is in-flight */
 	busRefreshing = false,
-	onMapReady,
-	onMoveEnd,
-	sideContent,
+		onMapReady,
+ 		onMoveEnd,
+ 		sideContent,
+ 		showSideOverlay = true,
 }) {
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
@@ -143,9 +144,9 @@ export default function MapViewMap({
 	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
 
 	return (
-	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 600 } }}>
+	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
 			<Box sx={{
-				flex: 1,
+				flex: 2,
 				position: 'relative',
 				borderRadius: '12px',
 				overflow: 'hidden',
@@ -371,12 +372,28 @@ export default function MapViewMap({
 						</Marker>
 					)}
 				</MapContainer>
+
+				{/* Render sideContent as an overlay on top of the map on md+ screens */}
+				{showSideOverlay && sideContent && (
+					<Box sx={{
+						position: 'absolute',
+						top: 16,
+						right: 16,
+						zIndex: 1200,
+						display: { xs: 'none', md: 'block' },
+						minWidth: 320,
+					}}>
+						{sideContent}
+					</Box>
+				)}
 			</Box>
 
-			{/* Right column: render any sideContent provided by the parent (e.g. Suggested routes) */}
-			<Box sx={{ minWidth: { xs: '100%', md: 320 } }}>
-				{sideContent || null}
-			</Box>
+			{/* On small screens, render the sideContent below the map (full width) */}
+			{showSideOverlay && sideContent && (
+				<Box sx={{ display: { xs: 'block', md: 'none' }, width: '100%' }}>
+					{sideContent}
+				</Box>
+			)}
 		</Stack>
 	);
 }

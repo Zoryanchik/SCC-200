@@ -14,7 +14,7 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
-import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
+import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart, X } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
@@ -131,6 +131,7 @@ export default function HomePage() {
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState([]);
+  const [showSuggested, setShowSuggested] = useState(false);
 
   // ---- Map + live-bus state (merged from map-view-page) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
@@ -458,6 +459,8 @@ export default function HomePage() {
 
   const handleSearch = async () => {
     if (!fromCoords || !toCoords) return;
+    // show the suggested routes overlay when a search starts
+    setShowSuggested(true);
     setIsSearching(true);
     try {
       // Build ISO datetime from user-selected date + clock (local)
@@ -497,11 +500,16 @@ export default function HomePage() {
 
   // Build the suggested routes panel so it can be injected into the map side column
   const suggestedRoutesPanel = (
-    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative' }}>
       <Stack spacing={2}>
-        <Typography variant="h6" fontWeight={700}>
-          Suggested routes
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Typography variant="h6" fontWeight={700}>
+            Suggested routes
+          </Typography>
+          <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
+            <X size={14} />
+          </IconButton>
+        </Box>
         {isSearching ? (
           <Stack spacing={2}>
             {[1, 2, 3].map((i) => (
@@ -960,6 +968,7 @@ export default function HomePage() {
             onMapReady={setMapInstance}
             onMoveEnd={handleMoveEnd}
             sideContent={suggestedRoutesPanel}
+            showSideOverlay={showSuggested}
           />
         </Suspense>
       </Paper>
