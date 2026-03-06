@@ -248,6 +248,43 @@ def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
     return q
 
 
+def _looks_like_street(s: str) -> bool:
+    """Heuristic: return True if the suffix looks like a street/address.
+
+    Checks for house numbers, common street-type tokens (street, rd,
+    lane, avenue, drive, etc.) or short numeric/postcode-like tokens.
+    Used to decide whether the text after a comma should be treated as
+    a town/city filter (False) or as part of a street address (True).
+    """
+    if not s:
+        return False
+    s = s.strip().lower()
+    import re
+    # If it contains a number (house number, postcode fragment), treat as street/address
+    if re.search(r"\d", s):
+        return True
+
+    # Common street-type tokens
+    street_tokens = {
+        'street', 'st', 'road', 'rd', 'lane', 'ln', 'avenue', 'ave', 'drive', 'dr',
+        'way', 'court', 'ct', 'crescent', 'close', 'terrace', 'gardens', 'place',
+        'square', 'hill', 'park', 'boulevard', 'blvd', 'grove', 'row', 'alley', 'isle',
+        'mount', 'mountain', 'walk', 'end'
+    }
+    words = re.split(r"[\s,]+", s)
+    for w in words:
+        if w in street_tokens:
+            return True
+        if w.rstrip('.') in street_tokens:
+            return True
+
+    # Very short tails (1-3 chars) are more likely postcode fragments or abbreviations — treat as street-like
+    if 0 < len(s) <= 3:
+        return True
+
+    return False
+
+
 def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
     """Query Nominatim and return candidates filtered to Lancashire.
 
@@ -263,19 +300,43 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
     if not query or limit <= 0:
         return []
 
-    # Fuzzy-correct the query against known Lancashire places / POIs
-    corrected = _fuzzy_correct_query(query)
+    # Handle comma-suffix heuristics: if the user typed "Morrisons,Morecambe"
+    # we should treat the text after the comma as a town/city filter and
+    # bias Nominatim toward that place. If it looks like a street/address
+    # (contains numbers or a street token) we keep the whole query intact.
+    main_q = query
+    town_hint = None
+    if "," in query:
+        first, tail = query.split(",", 1)
+        first = first.strip()
+        tail = tail.strip()
+        if tail and not _looks_like_street(tail):
+            main_q = first
+            town_hint = tail
+
+    # Fuzzy-correct the main query and the town hint separately against
+    # the known Lancashire places / POIs so typos like 'Morrisions'
+    # or 'Lancster' are corrected before hitting Nominatim.
+    corrected = _fuzzy_correct_query(main_q)
+    if town_hint:
+        town_corrected = _fuzzy_correct_query(town_hint)
+    else:
+        town_corrected = None
 
     # When a county is provided, always append it to the query so
     # Nominatim returns geographically relevant results. This works
     # well for place names ("Lancaster Lancashire") and brands alike
     # ("Sainsbury Lancashire"). We ask Nominatim for extra results and
     # then do a lenient post-filter to trim any outliers.
+    # Build the effective Nominatim query. Prefer: "<corrected main> <town> <county>"
     effective_query = corrected
+    if town_corrected:
+        effective_query = f"{corrected} {town_corrected}"
     if county:
-        # Only append if the user hasn't already included the county
-        if county.lower() not in corrected.lower():
-            effective_query = f"{corrected} {county}"
+        # Only append if the user hasn't already included the county or town
+        lower_eff = effective_query.lower()
+        if county.lower() not in lower_eff and (not town_corrected or county.lower() not in town_corrected.lower()):
+            effective_query = f"{effective_query} {county}"
 
     nominatim_limit = limit * 3 if county else limit  # over-fetch for filtering
     params = {
