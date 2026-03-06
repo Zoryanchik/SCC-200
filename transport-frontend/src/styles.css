@@ -46,6 +46,32 @@
 	border-radius: 12px;
 }
 
+/* Make Leaflet zoom control buttons larger for better touch targets */
+.leaflet-control-zoom a,
+.leaflet-bar a,
+.leaflet-control-zoom .leaflet-control-zoom-in,
+.leaflet-control-zoom .leaflet-control-zoom-out {
+  width: 44px !important;
+  height: 44px !important;
+  min-width: 44px !important;
+  min-height: 44px !important;
+  line-height: 44px !important;
+  font-size: 20px !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 8px !important;
+}
+
+/* Ensure the inner icon/text centers correctly */
+.leaflet-control-zoom a span,
+.leaflet-bar a span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .leaflet-popup-content {
 	margin: 12px;
 	font-size: 14px;

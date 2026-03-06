@@ -219,21 +219,7 @@ export default function MapViewMap({
 								</Typography>
 							</Box>
 						</Box>
-						{/* Label pill below the ring */}
-						<Box sx={{
-							backgroundColor: 'rgba(255,255,255,0.92)',
-							borderRadius: '8px',
-							px: 0.8, py: 0.3,
-							boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
-						}}>
-							<Typography
-								variant="caption"
-								fontWeight={600}
-								sx={{ fontSize: '10px', color: busRefreshing ? '#6366F1' : '#374151', whiteSpace: 'nowrap' }}
-							>
-								{busRefreshing ? 'Updating…' : 'Next update'}
-							</Typography>
-						</Box>
+
 					</Box>
 				)}
 				{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
