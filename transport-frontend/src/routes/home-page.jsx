@@ -5,6 +5,7 @@ import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
+import MenuItem from '@mui/material/MenuItem';
 import Divider from "@mui/material/Divider";
 import InputAdornment from "@mui/material/InputAdornment";
 import Paper from "@mui/material/Paper";
@@ -116,7 +117,10 @@ export default function HomePage() {
   const defaultTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`; // HH:MM
   const [departureDate, setDepartureDate] = useState(defaultDate);
   const [departureClock, setDepartureClock] = useState(defaultTime);
-  const [maxTransfers, setMaxTransfers] = useState(3);
+  // default transfers changed to 0 per request
+  const [maxTransfers, setMaxTransfers] = useState(0);
+  // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
+  const [transportMode, setTransportMode] = useState('all');
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 300);
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
@@ -457,7 +461,9 @@ export default function HomePage() {
     try {
       // Build ISO datetime from user-selected date + clock (local)
       const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
-      const journey = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers });
+  // Map UI transportMode -> API mode: 'all' -> 'combined'
+  const apiMode = transportMode === 'all' ? 'combined' : transportMode;
+  const journey = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers, mode: apiMode });
       const card = journeyToRouteCard(journey);
       setRoutes(card ? [card] : []);
     } catch (error) {
@@ -564,22 +570,24 @@ export default function HomePage() {
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
           </Box>
           <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={requestLocation}
-            disabled={locationStatus === 'loading'}
-            sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
-          >
-            {locationStatus === 'loading' ? (
-              <Stack direction="row" spacing={1} alignItems="center">
-                <CircularProgress size={16} />
-                <Typography variant="caption">Locating</Typography>
-              </Stack>
-            ) : (
-              'Use my location'
-            )}
-          </Button>
+          {!userLocation && (
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={requestLocation}
+              disabled={locationStatus === 'loading'}
+              sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+            >
+              {locationStatus === 'loading' ? (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <CircularProgress size={16} />
+                  <Typography variant="caption">Locating</Typography>
+                </Stack>
+              ) : (
+                'Use my location'
+              )}
+            </Button>
+          )}
           {userLocation && (
             <Button
               variant="contained"
@@ -703,6 +711,31 @@ export default function HomePage() {
                   InputProps={{ inputProps: { min: 0, max: 10 } }}
                   sx={{ width: 110 }}
                 />
+                <TextField
+                  select
+                  size="small"
+                  value={transportMode}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val !== null) setTransportMode(val);
+                  }}
+                  sx={{
+                    ml: 1,
+                    minWidth: 120,
+                    maxWidth: 180,
+                  }}
+                  SelectProps={{
+                    renderValue: (selected) => {
+                      // only show the selected value
+                      if (!selected) return '';
+                      return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1);
+                    },
+                  }}
+                >
+                  <MenuItem value="all">All</MenuItem>
+                  <MenuItem value="bus">Bus</MenuItem>
+                  <MenuItem value="train">Train</MenuItem>
+                </TextField>
               </Box>
             </Stack>
 
@@ -712,14 +745,16 @@ export default function HomePage() {
               alignItems={{ md: "flex-start" }}
             >
                 {/* Leftmost: quick 'use my location' for the From field */}
-                <IconButton
-                  aria-label="Use my location"
-                  onClick={handleUseMyLocation}
-                  size="large"
-                  sx={{ alignSelf: 'center' }}
-                >
-                  <NavIcon size={18} />
-                </IconButton>
+                {!userLocation && (
+                  <IconButton
+                    aria-label="Use my location"
+                    onClick={handleUseMyLocation}
+                    size="large"
+                    sx={{ alignSelf: 'center' }}
+                  >
+                    <NavIcon size={18} />
+                  </IconButton>
+                )}
 
                 <Autocomplete
                   fullWidth

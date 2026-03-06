@@ -335,22 +335,24 @@ Trains {filteredMarkers.filter(m => m.type === 'train').length}
 </Box>
 
 <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
-<Button
-variant="outlined"
-size="small"
-onClick={requestLocation}
-disabled={locationStatus === 'loading'}
-sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
->
-{locationStatus === 'loading' ? (
-<Stack direction="row" spacing={1} alignItems="center">
-<CircularProgress size={16} />
-<Typography variant="caption">Locating</Typography>
-</Stack>
-) : (
-'Use my location'
+{!userLocation && (
+    <Button
+        variant="outlined"
+        size="small"
+        onClick={requestLocation}
+        disabled={locationStatus === 'loading'}
+        sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+    >
+        {locationStatus === 'loading' ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={16} />
+                <Typography variant="caption">Locating</Typography>
+            </Stack>
+        ) : (
+            'Use my location'
+        )}
+    </Button>
 )}
-</Button>
 {userLocation && (
 <Button
 variant="contained"
