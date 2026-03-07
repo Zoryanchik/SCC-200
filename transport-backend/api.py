@@ -948,15 +948,123 @@ async def _apple_touch_icon():
 
 def _bus_delay_status(delay_s: Optional[int]) -> str:
     """Convert delay_seconds to a human-readable bus status string."""
+    # Treat missing or small negative delays as 'On time'. Only sufficiently
+    # large positive delays should be labelled 'Delayed N min'. The project
+    # preference: if a vehicle is early, show it as 'On time' rather than
+    # explicitly marking it 'Early'. Keep delay value itself unchanged.
     if delay_s is None:
         return "On time"
     if delay_s >= 120:
         minutes = round(delay_s / 60)
         return f"Delayed {minutes} min"
-    if delay_s <= -60:
-        minutes = round(-delay_s / 60)
-        return f"Early {minutes} min"
+    # All negative delays are presented to callers as negative numeric
+    # minutes but the human-readable status will be 'On time'. This avoids
+    # showing 'Early' labels in the UI.
     return "On time"
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """Return distance in meters between two lat/lon points using haversine."""
+    import math
+    R = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
+    """Try to compute a delay (seconds) by matching a live vehicle to a timetable journey.
+
+    Heuristic:
+    - Find candidate journeys whose line_name matches line_ref (allow colon-prefixed ids).
+    - Optionally filter by destination substring.
+    - Pick the candidate with journey start time closest to now.
+    - Find the nearest scheduled stop on that journey (using walking.get_loc_coords).
+    - Compute delay = now_seconds - scheduled_time_at_stop (positive = late).
+    Returns int seconds or None when no confident match is found.
+    """
+    try:
+        from datetime import datetime
+        today = datetime.now().date().isoformat()
+        now = datetime.now()
+        now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        merged, router, walking = get_router_for_date(today, start_time=now_seconds)
+    except Exception:
+        return None
+
+    line_q = (line_ref or "").strip()
+    dest_q = (dest or "").strip().lower()
+
+    candidates = []  # (j_id, start_dep_time)
+    for j_id, jmeta in enumerate(merged.journey_metadata):
+        if not jmeta:
+            continue
+        line_name = (jmeta.get("line_name") or "")
+        simple_line = line_name.split(":")[-1] if line_name else ""
+        if line_q:
+            if simple_line and simple_line == line_q:
+                pass
+            elif line_q in line_name:
+                pass
+            else:
+                continue
+
+        dest_display = (jmeta.get("destination_display") or "").lower()
+        if dest_q and dest_q not in dest_display:
+            continue
+
+        try:
+            jt = merged.journey_times[j_id]
+            if not jt:
+                continue
+            start_dep = jt[0][2]
+        except Exception:
+            continue
+        candidates.append((j_id, start_dep))
+
+    if not candidates:
+        return None
+
+    best = None
+    best_score = None
+    for j_id, start_dep in candidates:
+        score = abs(now_seconds - start_dep)
+        if best is None or score < best_score:
+            best = (j_id, start_dep)
+            best_score = score
+
+    if best_score is None or best_score > 7200:
+        return None
+
+    best_jid = best[0]
+    try:
+        jt = merged.journey_times[best_jid]
+    except Exception:
+        return None
+
+    nearest_dist = None
+    nearest_sched_time = None
+    for pos, (sid, atime, dtime) in enumerate(jt):
+        try:
+            s_lat, s_lon = walking.get_loc_coords(sid)
+        except Exception:
+            continue
+        dist = _haversine_m(lat_v, lon_v, s_lat, s_lon)
+        if nearest_dist is None or dist < nearest_dist:
+            nearest_dist = dist
+            nearest_sched_time = atime if atime is not None else dtime
+
+    if nearest_dist is None or nearest_dist > 1000:
+        return None
+
+    if nearest_sched_time is None:
+        return None
+
+    delay = int(now_seconds - nearest_sched_time)
+    return delay
 
 
 @app.get("/bus/live/{operator}")
@@ -994,18 +1102,25 @@ async def bus_live_operator(
             content={"error": str(exc)},
         )
 
-    return [
-        {
+    out = []
+    for line_ref, dest, lat_v, lon_v, _operator, delay_s in results:
+        computed = None
+        if delay_s is None:
+            try:
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+            except Exception:
+                computed = None
+        final_delay = delay_s if delay_s is not None else computed
+        out.append({
             "line": line_ref,
             "destination": dest,
             "lat": lat_v,
             "lon": lon_v,
             "operator": _operator,
-            "delay_minutes": round(delay_s / 60, 1) if delay_s is not None else None,
-            "status": _bus_delay_status(delay_s),
-        }
-        for line_ref, dest, lat_v, lon_v, _operator, delay_s in results
-    ]
+            "delay_minutes": round(final_delay / 60, 1) if final_delay is not None else None,
+            "status": _bus_delay_status(final_delay),
+        })
+    return out
 
 # Global cache for (merged, router, walking) by (date, AM/PM bucket)
 _router_cache = {}

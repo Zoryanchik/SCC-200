@@ -301,21 +301,30 @@ export default function MapViewMap({
 											const bgColor = isOnTime ? '#e8f5e9' : isEarly ? '#f3e5f5' : (dm >= 10 ? '#ffebee' : '#fff3e0');
 											const txtColor = isOnTime ? '#2e7d32' : isEarly ? '#6a1b9a' : (dm >= 10 ? '#c62828' : '#e65100');
 											const icon = isOnTime ? '\u2713' : isEarly ? '\u23eb' : '\u26a0';
-											return (
-												<Box sx={{
-													display: 'inline-block',
-													padding: '4px 12px',
-													borderRadius: '12px',
-													backgroundColor: bgColor,
-													color: txtColor,
-													fontSize: '12px',
-													fontWeight: '600',
-													marginBottom: '8px'
-												}}>
-													{icon} {marker.status}
-												</Box>
-											);
+						// Avoid repeating numeric delay in the pill when
+						// we already display the precise value below.
+						let statusText = marker.status || '';
+						if (marker.delayMinutes != null && statusText) {
+						    // Strip trailing numeric minute text such as
+						    // 'Delayed 5 min' -> 'Delayed', 'Early 2 min' -> 'Early'
+						    statusText = statusText.replace(/\s*\d+(?:\.\d+)?\s*min?s?/i, '').trim();
+						}
+						return (
+							<Box sx={{
+								display: 'inline-block',
+								padding: '4px 12px',
+								borderRadius: '12px',
+								backgroundColor: bgColor,
+								color: txtColor,
+								fontSize: '12px',
+								fontWeight: '600',
+								marginBottom: '8px'
+							}}>
+								{icon} {statusText}
+							</Box>
+						);
 										})()}
+										{/* Numeric delay removed — status pill conveys categorical state */}
 										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
 										{marker.operator && (
 											// force a full-width break before operator so it is always on its own line

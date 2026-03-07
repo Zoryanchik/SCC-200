@@ -69,7 +69,15 @@ document.getElementById('busLiveForm').addEventListener('submit', async function
                     resultText += `${index + 1}. Line: ${bus.line}\n`;
                     resultText += `   Destination: ${bus.destination}\n`;
                     resultText += `   Operator: ${bus.operator}\n`;
-                    resultText += `   Location: ${bus.lat.toFixed(6)}, ${bus.lon.toFixed(6)}\n\n`;
+                    resultText += `   Location: ${bus.lat.toFixed(6)}, ${bus.lon.toFixed(6)}\n`;
+                    // Show delay/status when provided by the API
+                    if (bus.delay_minutes !== undefined && bus.delay_minutes !== null) {
+                        resultText += `   Delay: ${bus.delay_minutes} min (${bus.status})\n\n`;
+                    } else if (bus.status) {
+                        resultText += `   Status: ${bus.status}\n\n`;
+                    } else {
+                        resultText += `\n`;
+                    }
                 });
                 resultDiv.textContent = resultText;
             } else {

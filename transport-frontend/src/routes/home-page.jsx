@@ -280,9 +280,11 @@ export default function HomePage() {
           // Remove delay/status keys – shown in the popup header, not in meta
           ['delay_minutes', 'delayMinutes', 'status'].forEach((k) => delete meta[k]);
 
-          const displayName = (bus.line ? String(bus.line) : '')
-                              + (bus.destination ? (' → ' + bus.destination) : '')
-                              || (bus.name || `Bus ${bus.id || ''}`);
+          // Show destination as the primary label line (e.g. "To: Night Stop").
+          // Route/line number is shown separately in the popup pill.
+          const displayName = bus.destination
+                              ? `To: ${bus.destination}`
+                              : (bus.name || (bus.line ? String(bus.line) : `Bus ${bus.id || ''}`));
 
           const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 

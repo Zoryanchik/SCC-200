@@ -37,13 +37,14 @@ vi.mock("../services/liveUpdates", () => ({
 // Stub the lazy-loaded MapViewMap so we don't need leaflet in jsdom
 vi.mock("../components/map/MapViewMap", () => ({
   __esModule: true,
-  default: ({ onMoveEnd, filteredMarkers, busLoading, trainLoading }) => {
+  default: ({ onMoveEnd, filteredMarkers, busLoading, trainLoading, sideContent }) => {
     // Expose onMoveEnd so tests can simulate map pan
     if (typeof window !== "undefined") {
       window.__testOnMoveEnd = onMoveEnd;
     }
     return (
       <div data-testid="map-stub">
+        <div data-testid="side-content">{sideContent}</div>
         <span data-testid="marker-count">{filteredMarkers.length}</span>
         {busLoading && <span data-testid="bus-loading">loading</span>}
         {trainLoading && <span data-testid="train-loading">loading</span>}
@@ -402,8 +403,11 @@ describe("Bus route number display on markers", () => {
 
     await waitFor(() => {
       const names = screen.getAllByTestId("marker-name");
-      expect(names.some((el) => el.textContent.includes("100"))).toBe(true);
+      // Primary label now shows destination as 'To: <destination>'
       expect(names.some((el) => el.textContent.includes("Blackpool"))).toBe(true);
+      // Route number should still be present in the route-number element
+      const routeNumbers = screen.getAllByTestId("bus-route-number");
+      expect(routeNumbers.some((el) => el.textContent === "100")).toBe(true);
     });
   });
 
