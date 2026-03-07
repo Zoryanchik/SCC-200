@@ -793,6 +793,11 @@ async def routes_for_line(line: str):
         if rline == line_key:
             matching_routes.append(r_idx)
 
+    if not matching_routes:
+        result = {"line": line, "variants": []}
+        _route_line_cache[line_key] = result
+        return result
+
     # ── Build variants from *journey-level* stop sequences ───────
     # Using route_stops directly can produce interleaved inbound/outbound
     # lists (e.g. 98 stops zigzagging across the map).  Instead, for each
@@ -806,10 +811,11 @@ async def routes_for_line(line: str):
             route_journeys[r_idx].append(j_idx)
 
     def _journey_stops(j_idx: int) -> list[dict]:
-        """Extract ordered stop dicts from a single journey."""
+        """Extract ordered stop dicts (with arrival_time) from a single journey."""
         stops = []
         for entry in merged.journey_times[j_idx]:
             s_int = entry[0]
+            arr_time = entry[1]  # seconds since midnight
             atco_code = merged.get_atco_code(s_int)
             if not atco_code:
                 continue
@@ -823,22 +829,70 @@ async def routes_for_line(line: str):
                 "lat": lat,
                 "lon": lon,
                 "atco_code": atco_code,
+                "_arr": arr_time,
             })
         return stops
 
     import math
 
+    def _gap(a: dict, b: dict) -> float:
+        """Distance in metres between two stop dicts (cheap Euclidean)."""
+        cos_lat = math.cos(math.radians(a["lat"]))
+        dlat = (b["lat"] - a["lat"]) * 111_320
+        dlon = (b["lon"] - a["lon"]) * 111_320 * cos_lat
+        return math.sqrt(dlat * dlat + dlon * dlon)
+
     def _mean_gap(stops: list[dict]) -> float:
         """Mean consecutive distance in metres (cheap Euclidean approx)."""
         if len(stops) < 2:
             return 0.0
-        total = 0.0
-        cos_lat = math.cos(math.radians(stops[0]["lat"]))
-        for i in range(len(stops) - 1):
-            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
-            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
-            total += math.sqrt(dlat * dlat + dlon * dlon)
+        total = sum(_gap(stops[i], stops[i + 1]) for i in range(len(stops) - 1))
         return total / (len(stops) - 1)
+
+    def _split_at_turnaround(stops: list[dict]) -> list[dict]:
+        """Split a round-trip stop list at its turnaround and return the longer half.
+
+        Many TransXChange journeys contain the full out-and-back trip
+        as a single stop sequence.  The turnaround point shows up as:
+          1. A large *time* gap (layover ≥ 30 min between consecutive stops)
+          2. Failing that, a large *distance* gap (> 3× median gap)
+
+        We split there and keep the longer segment — giving a clean
+        single-direction polyline.
+        """
+        if len(stops) < 6:
+            return stops
+
+        # --- Strategy 1: split at the largest time gap if it's a layover ---
+        time_gaps = []
+        for i in range(len(stops) - 1):
+            a_arr = stops[i].get("_arr", 0)
+            b_arr = stops[i + 1].get("_arr", 0)
+            time_gaps.append(b_arr - a_arr)
+
+        if time_gaps:
+            max_tg = max(time_gaps)
+            # A ≥30-minute time gap between consecutive stops is a layover
+            if max_tg >= 1800:
+                split_idx = time_gaps.index(max_tg) + 1
+                first_half = stops[:split_idx]
+                second_half = stops[split_idx:]
+                chosen = first_half if len(first_half) >= len(second_half) else second_half
+                # Recursively split in case there are multiple layovers
+                return _split_at_turnaround(chosen)
+
+        # --- Strategy 2: split at the largest distance gap if anomalous ---
+        gaps = [_gap(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
+        max_gap_val = max(gaps)
+        sorted_gaps = sorted(gaps)
+        median_gap = sorted_gaps[len(sorted_gaps) // 2]
+        # Only split if the largest gap is significantly bigger than typical
+        if median_gap > 0 and max_gap_val > median_gap * 3:
+            split_idx = gaps.index(max_gap_val) + 1
+            first_half = stops[:split_idx]
+            second_half = stops[split_idx:]
+            return first_half if len(first_half) >= len(second_half) else second_half
+        return stops
 
     variants = []
     for r_idx in matching_routes:
@@ -861,6 +915,9 @@ async def routes_for_line(line: str):
         best_gap = float("inf")
         for j in candidates:
             s = _journey_stops(j)
+            # Many TXC journeys are round-trips (out+back in one sequence).
+            # Split at the turnaround to get a clean single-direction list.
+            s = _split_at_turnaround(s)
             if len(s) < 10:
                 continue
             gap = _mean_gap(s)
@@ -869,9 +926,11 @@ async def routes_for_line(line: str):
                 best_stops = s
 
         if best_stops and len(best_stops) >= 2:
+            # Strip internal _arr field before adding to output
+            clean = [{k: v for k, v in s.items() if k != "_arr"} for s in best_stops]
             meta = merged.route_metadata[r_idx] or {}
             route_id = meta.get("route_id", f"route_{r_idx}")
-            variants.append({"route_id": route_id, "stops": best_stops})
+            variants.append({"route_id": route_id, "stops": clean})
 
     # De-duplicate: keep only the most-distinct variants (by ATCO signature).
     seen_sigs: set[tuple] = set()
@@ -882,14 +941,8 @@ async def routes_for_line(line: str):
             seen_sigs.add(sig)
             unique.append(v)
 
-    # Sort by number of stops descending (longest single-direction routes
-    # first), take top 3 to avoid visual clutter.
-    unique.sort(key=lambda v: len(v["stops"]), reverse=True)
-    unique = unique[:3]
-
-    # Drop variants whose mean gap is much worse than the best,
-    # or that contain any single gap > 2 km — these are typically
-    # messy journey patterns that zigzag across the map.
+    # Drop variants with any single gap > 2.5 km (messy/circular patterns),
+    # then sort by quality (lowest mean gap → tightest route tracing).
     if unique:
         def _max_gap(stops):
             cos_lat = math.cos(math.radians(stops[0]["lat"]))
@@ -900,12 +953,23 @@ async def routes_for_line(line: str):
                 mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
             return mx
 
-        mean_gaps = [_mean_gap(v["stops"]) for v in unique]
-        best = min(mean_gaps)
-        unique = [
-            v for v, mg in zip(unique, mean_gaps)
-            if mg <= best * 1.8 and _max_gap(v["stops"]) < 2500
-        ]
+        # First pass: hard-reject variants with huge single gaps
+        unique = [v for v in unique if _max_gap(v["stops"]) < 2500]
+
+        # Second pass: among survivors, drop those with mean gap much
+        # worse than the best to keep only clean route traces.
+        if unique:
+            mean_gaps = [_mean_gap(v["stops"]) for v in unique]
+            best = min(mean_gaps)
+            unique = [
+                v for v, mg in zip(unique, mean_gaps)
+                if mg <= best * 2.0
+            ]
+
+        # Sort by stop count descending (longest clean routes first),
+        # take top 3 to avoid visual clutter.
+        unique.sort(key=lambda v: len(v["stops"]), reverse=True)
+        unique = unique[:3]
 
     result = {"line": line, "variants": unique}
     _route_line_cache[line_key] = result
