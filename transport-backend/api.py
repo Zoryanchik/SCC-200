@@ -1278,7 +1278,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         candidates.append((j_id, start_dep, end_arr, r_int))
 
     if not candidates:
-        return None
+        # No candidates -> return explicit triple of Nones for caller unpacking
+        return (None, None, None)
 
     # ── 2. score each candidate using track matching ──
     best_delay = None
@@ -1383,8 +1384,24 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         if best_score is None or score < best_score:
             best_score = score
             best_delay = delay
+            # record the external route_id and journey_id for the best match
+            try:
+                meta = merged.route_metadata[r_int] if r_int < len(merged.route_metadata) else None
+                best_matched_route_id = meta.get("route_id") if meta else None
+            except Exception:
+                best_matched_route_id = None
+            try:
+                jmeta = merged.journey_metadata[j_id] if j_id < len(merged.journey_metadata) else None
+                best_matched_journey_id = jmeta.get("journey_id") if jmeta else None
+            except Exception:
+                best_matched_journey_id = None
 
-    return best_delay
+    # Return a tuple: (delay_seconds | None, matched_route_id | None, matched_journey_id | None)
+    try:
+        return (best_delay, best_matched_route_id, best_matched_journey_id)
+    except NameError:
+        # If no best was ever set, ensure a consistent return type
+        return (best_delay, None, None)
 
 
 # ── Live delay cache for journey planning ────────────────────────
@@ -1443,9 +1460,9 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
             delays.append(delay_s)
         else:
             try:
-                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
-                if computed is not None:
-                    delays.append(computed)
+                computed_delay, _matched_route, _matched_j = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                if computed_delay is not None:
+                    delays.append(computed_delay)
             except Exception:
                 pass
     if not delays:
@@ -1499,13 +1516,15 @@ async def bus_live_operator(
         lon_v = bus["lon"]
         _operator = bus["operator"]
         delay_s = bus["delay_seconds"]
-        computed = None
+        computed_delay = None
+        matched_route_id = None
+        matched_journey_id = None
         if delay_s is None:
             try:
-                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                computed_delay, matched_route_id, matched_journey_id = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
             except Exception:
-                computed = None
-        final_delay = delay_s if delay_s is not None else computed
+                computed_delay = None
+        final_delay = delay_s if delay_s is not None else computed_delay
         out.append({
             "line": line_ref,
             "destination": dest,
@@ -1527,6 +1546,9 @@ async def bus_live_operator(
             # Include canonical SIRI operator code when available so the
             # frontend can use it to disambiguate timetable lookups.
             "operator_ref": bus.get("operator_ref") if bus.get("operator_ref") is not None else None,
+            # Include server-side matched route/journey identifiers (when available)
+            "matched_route_id": matched_route_id if matched_route_id is not None else None,
+            "matched_journey_id": matched_journey_id if matched_journey_id is not None else None,
         })
     return out
 

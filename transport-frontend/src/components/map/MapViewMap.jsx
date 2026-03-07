@@ -302,12 +302,17 @@ export default function MapViewMap({
 
 											const preferredDest = preferredAtco || preferredName || null;
 
-											// Await toggleRoute so we can auto-zoom to the returned route bounds.
-											// Pass the preferred destination (ATCO preferred) so the
-											// hook can prefer matching variants by ATCO code.
+											// If the backend included a server-side matched
+											// route identifier, prefer it — passing it into
+											// toggleRoute causes the hook to request the
+											// exact variant (backend treats full ids as
+											// exact lookups).  We still pass preferredLastStop
+											// for additional filtering when useful.
+											const matchedRouteId = marker.meta?.matched_route_id || marker.matched_route_id || null;
+
 											let routeData = null;
 											try {
-												routeData = await toggleRoute(String(marker.routeNumber), usedOp, { preferredLastStop: preferredDest });
+												routeData = await toggleRoute(String(marker.routeNumber), usedOp, { preferredLastStop: preferredDest, matchedRouteId });
 											} catch (e) {
 												// swallow - toggleRoute already logs failures
 											}

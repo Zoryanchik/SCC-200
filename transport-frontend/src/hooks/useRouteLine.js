@@ -40,26 +40,54 @@ export function useRouteLine() {
      * @param {string|null} operator
      * @param {{ preferredLastStop?: string }} [opts]
      */
-    async (line, operator = null, opts = {}) => {
+  async (line, operator = null, opts = {}) => {
       // Use a composite cache key so operator-scoped lookups don't
       // collide with earlier no-operator (or different-operator) fetches.
       const opKey = operator ? String(operator) : '';
       const cacheKey = `${line}||${opKey}`;
 
+      // If an exact composite key is active, toggle it off. Otherwise
+      // allow a loose toggle-off: if any active composite key matches
+      // the requested short line, remove that entry. This ensures
+      // toggleRoute can turn off lines that were turned on using a
+      // server-provided matched_route_id (which would change the
+      // cacheKey to the full route id).
       if (activeRef.current.has(cacheKey)) {
-        // Turn OFF — remove the composite key
         activeRef.current.delete(cacheKey);
         bump();
         return null;
       }
+      // Loose-match toggle-off: remove any active key whose short
+      // line equals the requested `line` (split on '||').
+      for (const k of Array.from(activeRef.current.keys())) {
+        const short = String(k).split('||')[0];
+        if (short === String(line)) {
+          activeRef.current.delete(k);
+          bump();
+          return null;
+        }
+      }
 
-      // Turn ON — use cache or fetch for this (line,operator) pair
-      let fullData = cacheRef.current.get(cacheKey);
+      // Turn ON — determine which backend "line" to request. If the
+      // caller provided a server-side matched route id prefer that
+      // exact identifier so the backend can return the precise variant.
+      const fetchLine = (opts && typeof opts.matchedRouteId === 'string' && opts.matchedRouteId.trim())
+        ? String(opts.matchedRouteId).trim()
+        : String(line);
+
+      // Use cache keyed by the fetchLine so operator-scoped lookups
+      // and full-route-id lookups don't collide.
+      const fetchOpKey = operator ? String(operator) : '';
+      const fetchCacheKey = `${fetchLine}||${fetchOpKey}`;
+
+      let fullData = cacheRef.current.get(fetchCacheKey);
       if (!fullData) {
         try {
-          fullData = await fetchRouteLine(line, operator);
-          // Cache the full unfiltered response for future use
-          cacheRef.current.set(cacheKey, fullData);
+          // Request using the chosen fetchLine (may be a full route id)
+          fullData = await fetchRouteLine(fetchLine, operator);
+          // Cache the full unfiltered response for future use under
+          // the fetchCacheKey.
+          cacheRef.current.set(fetchCacheKey, fullData);
         } catch (err) {
           console.error(`[useRouteLine] Failed to fetch line "${line}" (operator=${operator}):`, err);
           return null;
@@ -74,7 +102,7 @@ export function useRouteLine() {
         ? String(opts.preferredLastStop).trim()
         : null;
 
-      let activeData = fullData;
+  let activeData = fullData;
       if (preferred && Array.isArray(fullData?.variants) && fullData.variants.length > 0) {
         // Normalise input for comparisons. For ATCO codes we compare a
         // compact lowercased form (remove spaces), for names we create a
@@ -113,7 +141,9 @@ export function useRouteLine() {
         }
       }
 
-      activeRef.current.set(cacheKey, activeData);
+      // Store the activeData under the fetchCacheKey so subsequent
+      // toggles that reference the same exact identifier will find it.
+      activeRef.current.set(fetchCacheKey, activeData);
       bump();
       return activeData;
     },
