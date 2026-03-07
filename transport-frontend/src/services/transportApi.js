@@ -209,6 +209,19 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
         copy.arrival_time_with_offset = makeWithOffset(copy.arrival_time, copy.arrival_day_offset);
         copy.departure_time_with_offset = makeWithOffset(copy.departure_time, copy.departure_day_offset);
 
+        // Real-time fields: if the backend provides realtime_departure_time /
+        // realtime_arrival_time (bus legs with live delay), expose them with
+        // day-offset variants too.  These are separate from the scheduled
+        // (planned) times.
+        if (copy.realtime_departure_time) {
+          copy.realtime_departure_time_with_offset = makeWithOffset(
+            copy.realtime_departure_time, copy.departure_day_offset);
+        }
+        if (copy.realtime_arrival_time) {
+          copy.realtime_arrival_time_with_offset = makeWithOffset(
+            copy.realtime_arrival_time, copy.arrival_day_offset);
+        }
+
         // Optional: also expose ISO datetimes computed from the requested date.
         // Only add when both date and time exist. These are in UTC-ish ISO format
         // and may need timezone-adjustment depending on app needs.

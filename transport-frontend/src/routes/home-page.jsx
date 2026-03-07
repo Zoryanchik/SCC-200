@@ -55,6 +55,13 @@ function journeyToRouteCard(journey) {
       // keep original times for the time display row in RouteCard
       departure_time_with_offset: leg.departure_time_with_offset ?? null,
       arrival_time_with_offset: leg.arrival_time_with_offset ?? null,
+      // Real-time delay info for bus/train legs
+      scheduled_departure_time: leg.scheduled_departure_time ?? null,
+      scheduled_arrival_time: leg.scheduled_arrival_time ?? null,
+      realtime_departure_time_with_offset: leg.realtime_departure_time_with_offset ?? null,
+      realtime_arrival_time_with_offset: leg.realtime_arrival_time_with_offset ?? null,
+      delay_seconds: leg.delay_seconds ?? null,
+      status: leg.status ?? null,
     };
   });
 

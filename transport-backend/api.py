@@ -1209,6 +1209,70 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
     return best_delay
 
 
+# ── Live delay cache for journey planning ────────────────────────
+# Fetches all live bus positions once, caches for a short window, and
+# looks up delays by line name.  Used by build_journey_plan_response()
+# to annotate bus legs with real-time information.
+_live_delay_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
+_LIVE_DELAY_TTL = 30  # seconds
+
+
+def _fetch_all_live_buses() -> list:
+    """Return all live bus records from all operators (cached)."""
+    import time as _time
+    now = _time.time()
+    if now - _live_delay_cache["ts"] < _LIVE_DELAY_TTL and _live_delay_cache["data"]:
+        return _live_delay_cache["data"]
+    try:
+        from bus_live import BusLive
+        bl = BusLive(timeout=10)
+        # Fetch with a very wide bounding box to get everything
+        results = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
+        _live_delay_cache["data"] = results
+        _live_delay_cache["ts"] = now
+        return results
+    except Exception:
+        return _live_delay_cache["data"]  # stale is better than nothing
+
+
+def _get_live_delay_for_line(line_name: str) -> Optional[int]:
+    """Look up the current delay (seconds) for a bus line from live feeds.
+
+    Queries the cached live-bus positions, filters by exact short line name,
+    and computes delay.  For vehicles that have a feed-supplied delay, we
+    use that directly.  For vehicles without feed delay, we call the
+    timetable-matching algorithm.
+
+    Returns the median delay (seconds) across all matching live vehicles,
+    or None if no live vehicle is found for the line.
+    """
+    if not line_name:
+        return None
+    line_q = line_name.strip()
+    buses = _fetch_all_live_buses()
+    delays: list[int] = []
+    for line_ref, dest, lat_v, lon_v, _op, delay_s in buses:
+        # Exact short line name match
+        short = (line_ref or "").split(":")[-1].strip()
+        if short != line_q:
+            continue
+        if delay_s is not None:
+            delays.append(delay_s)
+        else:
+            try:
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                if computed is not None:
+                    delays.append(computed)
+            except Exception:
+                pass
+    if not delays:
+        return None
+    # Use median to avoid outlier skew
+    delays.sort()
+    mid = len(delays) // 2
+    return delays[mid]
+
+
 @app.get("/bus/live/{operator}")
 async def bus_live_operator(
     operator: str,
@@ -1457,8 +1521,22 @@ def format_route_text(route_result, merged):
                     desc_parts.append(f"{j_origin} -> {j_dest}")
                 if board_dep is not None:
                     desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
+
+                # Look up live delay for bus legs and show both times
+                delay_tag = ""
+                if transport == "bus" and line_name:
+                    delay_s = _get_live_delay_for_line(line_name)
+                    if delay_s is not None and delay_s >= 120:
+                        mins = round(delay_s / 60)
+                        delay_tag = f" [Delayed {mins} min]"
+                        if board_dep is not None:
+                            rt_dep = seconds_to_time(int(board_dep + delay_s))
+                            desc_parts.append(f"expected {rt_dep}")
+                    elif delay_s is not None:
+                        delay_tag = " [On time]"
+
                 desc = " - ".join(desc_parts) if desc_parts else transport
-                out.append(f"    - {desc}")
+                out.append(f"    - {desc}{delay_tag}")
 
             out.append(f"  - {stop_label}")
             out.append(f"    Arrive at {arrival}")
@@ -1692,6 +1770,40 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             else:
                 leg["duration_seconds"] = None
 
+            # ── Real-time delay annotation for bus legs ──────────
+            # Scheduled times are what the timetable says (already in
+            # departure_time / arrival_time).  We look up live delay
+            # and compute adjusted real-time estimates.
+            if transport == "bus" and line_name:
+                delay_s = _get_live_delay_for_line(line_name)
+            else:
+                delay_s = None
+
+            # Store scheduled times explicitly
+            leg["scheduled_departure_time"] = leg["departure_time"]
+            leg["scheduled_arrival_time"] = leg["arrival_time"]
+
+            if delay_s is not None and delay_s != 0:
+                leg["delay_seconds"] = delay_s
+                leg["status"] = _bus_delay_status(delay_s)
+                # Compute real-time adjusted times
+                if board_dep is not None:
+                    leg["realtime_departure_time"] = _time_str(
+                        int(board_dep + delay_s))
+                else:
+                    leg["realtime_departure_time"] = leg["departure_time"]
+                arr_secs = curr_info["arrival_time"]
+                if arr_secs < math.inf:
+                    leg["realtime_arrival_time"] = _time_str(
+                        int(arr_secs + delay_s))
+                else:
+                    leg["realtime_arrival_time"] = leg["arrival_time"]
+            else:
+                leg["delay_seconds"] = 0 if delay_s == 0 else None
+                leg["status"] = "On time" if delay_s is not None else None
+                leg["realtime_departure_time"] = leg["departure_time"]
+                leg["realtime_arrival_time"] = leg["arrival_time"]
+
         legs.append(leg)
 
         # -- geometry for this leg --
@@ -1748,6 +1860,19 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "color": "#888888",
         })
 
+    # Compute the total real-time delay from all bus legs
+    total_delay_s = 0
+    has_any_delay = False
+    for leg in legs:
+        ds = leg.get("delay_seconds")
+        if ds is not None and ds != 0:
+            total_delay_s += ds
+            has_any_delay = True
+
+    rt_total_arrival = None
+    if total_arrival is not None and has_any_delay:
+        rt_total_arrival = _time_str(int(total_arrival + total_delay_s))
+
     return {
         "success": True,
         "legs": legs,
@@ -1755,6 +1880,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "start_walk_seconds": start_walk,
             "end_walk_seconds": end_walk,
             "total_arrival": _time_str(total_arrival),
+            "realtime_total_arrival": rt_total_arrival,
+            "total_delay_seconds": total_delay_s if has_any_delay else None,
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
