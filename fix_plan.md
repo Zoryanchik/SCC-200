@@ -20,7 +20,7 @@ Updated: 2026-03-05
 - [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173) *(not implemented — still hardcoded in api.py)*
 - [ ] Implement `/alerts` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
-- [ ] Implement `GET /bus/arrivals/{stopCode}` endpoint *(not implemented)*
+- [x] Implement `GET /bus/arrivals/{stopCode}` endpoint *(implemented)*
 
 ## Bus Stops on Map
 - [x] Create `busStopsApi.js` service with mock fallback (12 Lancaster-area stops)
@@ -35,8 +35,8 @@ Updated: 2026-03-05
 - [x] Strip internal line IDs → human-readable route names (1, 1A, 100, etc.)
 - [x] Replace CircleMarker with SVG bus-stop sign icon (circle on post, scales with zoom)
 - [x] Raise minZoom to 14 — stops only appear at street-level to avoid map clutter
-- [ ] Pass viewport bbox from `BusStopLayer` → hook → API to reduce data transfer (currently fetches all, filters client-side)
-- [ ] Show real-time arrival data in stop popup (requires `GET /bus/arrivals/{stopCode}` backend endpoint)
+- [x] Pass viewport bbox from `BusStopLayer` → hook → API to reduce data transfer (currently fetches all, filters client-side)
+- [x] Show real-time arrival data in stop popup (requires `GET /bus/arrivals/{stopCode}` backend endpoint)
 
 ## Bus Route Lines on Map
 - [x] Add backend `GET /routes/line/{line}` endpoint — returns ordered stop sequences with coords
@@ -48,8 +48,8 @@ Updated: 2026-03-05
 - [x] Create `RouteLineLayer` component — coloured polylines + circle markers at stops
 - [x] Wire popup route buttons to toggle route lines via capture-phase pointerdown listener
 - [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
-- [ ] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
-- [ ] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
+- [x] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
+- [x] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
 - [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
 - [ ] Verify button highlight color toggle works (dark blue + ✓ on click)
 - [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
@@ -74,7 +74,7 @@ The frontend calls these endpoints, but `api.py` does not define them. They will
 | `fetchServiceAlerts()`   | `GET /alerts`                    | ❌ 404 | John  |
 | `fetchPricing()`         | `GET /pricing?from=&to=`         | ❌ 404 | John  |
 | `fetchBusTimes()`        | `GET /bus/times/{stopCode}`      | ❌ 404 | John  |
-| `fetchBusArrivals()`     | `GET /bus/arrivals/{stopCode}`   | ❌ 404 | John  |
+| `fetchBusArrivals()`     | `GET /bus/arrivals/{stopCode}`   | ✅ done | John  |
 
 ### P6 — No environment-based CORS configuration
 - **File:** `transport-backend/api.py`
@@ -97,7 +97,7 @@ Focus: Building out the remaining REST endpoints and data layer.
 |---|------|----------|--------|
 | P2 | `GET /alerts` endpoint | **High** | ❌ open |
 | P2 | `GET /bus/times/{stopCode}` endpoint | **High** | ❌ open |
-| P2 | `GET /bus/arrivals/{stopCode}` endpoint | **High** | ❌ open |
+| P2 | `GET /bus/arrivals/{stopCode}` endpoint | **High** | ✅ done |
 | — | Delay handling for train (timetable comparison) | **Medium** | ❌ open |
 | 5 | `GET /rail/departures/{station}` endpoint | Medium | ❌ open |
 | 6 | `GET /pricing?from=&to=` endpoint (distance-based stub) | Medium | ❌ open |

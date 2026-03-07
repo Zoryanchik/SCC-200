@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { useBusStops } from '../../hooks/useBusStops';
+import { fetchBusArrivals } from '../../services/busStopsApi';
 
 /**
  * Colour palette for stop classifications.
@@ -27,18 +28,28 @@ const getMarkerSize = (zoom) => {
   return { circle: 12, post: 14, stroke: 2.5, total: 28 };
 };
 
-const makeBusStopIcon = (color, zoom) => {
+const makeBusStopIcon = (color, zoom, selected = false) => {
   const s = getMarkerSize(zoom);
   const w = s.circle + s.stroke * 2;
   const h = s.total;
   const cx = w / 2;
   const r = s.circle / 2;
   const postTop = s.circle + s.stroke;
+  const cy = r + s.stroke / 2;
+
+  // When the popup is open, draw two concentric halo rings behind the
+  // main circle so the selected stop stands out clearly on the map.
+  const halo = selected
+    ? `<circle cx="${cx}" cy="${cy}" r="${r + 5}" fill="${color}" fill-opacity="0.28" stroke="${color}" stroke-width="1.5" stroke-opacity="0.55"/>
+       <circle cx="${cx}" cy="${cy}" r="${r + 10}" fill="none" stroke="${color}" stroke-width="1" stroke-opacity="0.2"/>`
+    : '';
+  const circleStroke = selected ? s.stroke + 1.5 : s.stroke;
 
   const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" overflow="visible">
+      ${halo}
       <line x1="${cx}" y1="${postTop}" x2="${cx}" y2="${h}" stroke="${color}" stroke-width="${s.stroke}" stroke-linecap="round"/>
-      <circle cx="${cx}" cy="${r + s.stroke / 2}" r="${r}" fill="${color}" stroke="#fff" stroke-width="${s.stroke}"/>
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="#fff" stroke-width="${circleStroke}"/>
     </svg>`;
 
   return L.divIcon({
@@ -102,12 +113,85 @@ function buildPopupHtml(stop) {
 }
 
 /**
+ * Shows upcoming arrivals for a stop, fetching from the API on mount.
+ * Renders a loading/error/empty/list state inside the popup.
+ */
+export function ArrivalsPanel({ atcoCode }) {
+  const [arrivals, setArrivals] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+
+  React.useEffect(() => {
+    setLoading(true);
+    setError(null);
+    fetchBusArrivals(atcoCode)
+      .then((data) => { setArrivals(data); setLoading(false); })
+      .catch((err) => { setError(err.message || 'Error'); setLoading(false); });
+  }, [atcoCode]);
+
+  const baseStyle = {
+    fontSize: 11,
+    padding: '4px 0',
+    borderTop: '1px solid #eee',
+    marginTop: 6,
+  };
+
+  if (loading) {
+    return (
+      <div data-testid="arrivals-loading" style={{ ...baseStyle, color: '#888' }}>
+        Loading arrivals…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div data-testid="arrivals-error" style={{ ...baseStyle, color: '#c00' }}>
+        Could not load arrivals
+      </div>
+    );
+  }
+  if (!arrivals || arrivals.length === 0) {
+    return (
+      <div data-testid="arrivals-empty" style={{ ...baseStyle, color: '#888' }}>
+        No upcoming arrivals
+      </div>
+    );
+  }
+
+  return (
+    <div data-testid="arrivals-panel" style={{ borderTop: '1px solid #eee', marginTop: 6, paddingTop: 6 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Upcoming arrivals</div>
+      {arrivals.map((a, i) => (
+        <div
+          key={i}
+          data-testid={`arrival-row-${i}`}
+          style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 0' }}
+        >
+          <span data-testid="arrival-line" style={{ fontWeight: 700, minWidth: 28 }}>{a.line}</span>
+          <span
+            data-testid="arrival-destination"
+            style={{ flex: 1, color: '#444', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >{a.destination}</span>
+          <span data-testid="arrival-time" style={{ color: '#1976d2', fontWeight: 600, marginLeft: 4 }}>
+            {a.scheduledTime}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Renders a single bus-stop marker.
- * Popup content is plain HTML with inline onclick handlers.
+ * Popup content is plain HTML (for route buttons) + a React ArrivalsPanel.
+ * Arrivals are only fetched when the popup is opened.
  */
 function BusStopMarker({ stop, zoom = 16 }) {
   const color = CLASS_COLORS[stop.classification] || CLASS_COLORS.local;
-  const icon = useMemo(() => makeBusStopIcon(color, zoom), [color, zoom]);
+  const [popupOpen, setPopupOpen] = React.useState(false);
+  // Re-derive the icon whenever zoom, colour, or popup-open state changes so
+  // the marker enlarges / gains a halo ring while its popup is visible.
+  const icon = useMemo(() => makeBusStopIcon(color, zoom, popupOpen), [color, zoom, popupOpen]);
   const popupHtml = useMemo(() => buildPopupHtml(stop), [stop]);
 
   return (
@@ -116,18 +200,34 @@ function BusStopMarker({ stop, zoom = 16 }) {
       icon={icon}
       data-testid={`bus-stop-marker-${stop.id}`}
     >
-      <Popup closeOnClick={false}>
+      <Popup
+        closeOnClick={false}
+        eventHandlers={{
+          add: () => setPopupOpen(true),
+          remove: () => setPopupOpen(false),
+        }}
+      >
         <div dangerouslySetInnerHTML={{ __html: popupHtml }} />
+        {popupOpen && stop.atco_code && <ArrivalsPanel atcoCode={stop.atco_code} />}
       </Popup>
     </Marker>
   );
 }
+
+/** Compute a bbox string "south,west,north,east" from current map bounds. */
+const getBboxString = (map) => {
+  const b = map.getBounds();
+  return `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+};
 
 /**
  * Map layer that renders all bus stops as small bus-stop sign icons.
  *
  * Registers window.__busRouteToggle so inline onclick handlers
  * in Leaflet popups can trigger route line toggling.
+ *
+ * The current viewport bbox is passed to the hook so the API only
+ * returns stops in the visible area, reducing data transfer.
  */
 export default function BusStopLayer({
   classification,
@@ -137,7 +237,12 @@ export default function BusStopLayer({
   isRouteActive,
 }) {
   const map = useMap();
-  const { stops, loading } = useBusStops({ classification, enabled });
+  const [zoom, setZoom] = React.useState(map.getZoom());
+  const [bbox, setBbox] = React.useState(
+    map.getZoom() >= minZoom ? getBboxString(map) : null,
+  );
+
+  const { stops, loading } = useBusStops({ classification, enabled, bbox });
 
   // Register global function for popup button clicks
   const toggleRef = React.useRef(onToggleRoute);
@@ -150,13 +255,21 @@ export default function BusStopLayer({
     return () => { delete window.__busRouteToggle; };
   }, []);
 
-  const [zoom, setZoom] = React.useState(map.getZoom());
-
+  // Update zoom + bbox on both zoomend and moveend so the API receives
+  // the current viewport whenever the user is panning or zooming.
   React.useEffect(() => {
-    const onZoom = () => setZoom(map.getZoom());
-    map.on('zoomend', onZoom);
-    return () => { map.off('zoomend', onZoom); };
-  }, [map]);
+    const update = () => {
+      const z = map.getZoom();
+      setZoom(z);
+      setBbox(z >= minZoom ? getBboxString(map) : null);
+    };
+    map.on('zoomend', update);
+    map.on('moveend', update);
+    return () => {
+      map.off('zoomend', update);
+      map.off('moveend', update);
+    };
+  }, [map, minZoom]);
 
   const visibleStops = useMemo(() => {
     if (zoom < minZoom) return [];

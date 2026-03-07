@@ -1,9 +1,11 @@
 /**
- * Tests for BusStopLayer and BusStopMarker components
+ * Tests for BusStopLayer, BusStopMarker, and ArrivalsPanel components
  *
  * Validates:
  *  - BusStopMarker renders a Marker with correct position & SVG icon
  *  - BusStopMarker popup shows stop name, classification, lines
+ *  - BusStopMarker renders ArrivalsPanel when popup is opened
+ *  - ArrivalsPanel fetches and displays arrivals, loading, error, empty states
  *  - BusStopLayer renders nothing when zoom < minZoom
  *  - BusStopLayer renders markers when zoom ≥ minZoom
  *  - BusStopLayer only renders stops within map bounds
@@ -15,7 +17,7 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 
 // ── Mock leaflet ────────────────────────────────────────────────────
 // Capture the icon config passed to L.divIcon so we can assert on it.
@@ -34,12 +36,18 @@ const mockBounds = {
   getWest: () => -3.5,
   getEast: () => -2.0,
 };
+
+// Captures registered Leaflet event handlers so tests can fire them.
+const mapHandlers = {};
 const mockMapInstance = {
   getZoom: () => mockZoom,
   getBounds: () => mockBounds,
-  on: vi.fn(),
-  off: vi.fn(),
+  on: vi.fn((event, handler) => { mapHandlers[event] = handler; }),
+  off: vi.fn((event) => { delete mapHandlers[event]; }),
 };
+
+// Captures Popup eventHandlers so tests can simulate popup open/close.
+let capturedPopupHandlers = {};
 
 vi.mock('react-leaflet', () => ({
   Marker: ({ children, position, icon, ...rest }) => (
@@ -52,9 +60,24 @@ vi.mock('react-leaflet', () => ({
       {children}
     </div>
   ),
-  Popup: ({ children }) => <div data-testid="popup">{children}</div>,
+  Popup: ({ children, eventHandlers }) => {
+    if (eventHandlers) capturedPopupHandlers = eventHandlers;
+    return <div data-testid="popup">{children}</div>;
+  },
   useMap: () => mockMapInstance,
 }));
+
+// ── Mock fetchBusArrivals ───────────────────────────────────────────────
+vi.mock('../../../services/busStopsApi', () => ({
+  fetchBusArrivals: vi.fn(),
+}));
+
+import { fetchBusArrivals } from '../../../services/busStopsApi';
+
+const FAKE_ARRIVALS = [
+  { line: '1', destination: 'Lancaster Bus Station', scheduledTime: '12:00:00', status: 'On time' },
+  { line: '100', destination: 'Lancaster University', scheduledTime: '12:15:00', status: 'On time' },
+];
 
 // ── Mock useBusStops hook ───────────────────────────────────────────
 const mockStops = [
@@ -95,12 +118,17 @@ vi.mock('../../../hooks/useBusStops', () => ({
   },
 }));
 
-import BusStopLayer, { BusStopMarker } from '../BusStopLayer';
+import BusStopLayer, { BusStopMarker, ArrivalsPanel } from '../BusStopLayer';
 
 beforeEach(() => {
   mockZoom = 14;
   hookArgs = {};
+  capturedPopupHandlers = {};
+  // Clear captured handlers so each test starts clean.
+  Object.keys(mapHandlers).forEach((k) => delete mapHandlers[k]);
   vi.clearAllMocks();
+  // Default: arrivals API returns fake data
+  fetchBusArrivals.mockResolvedValue(FAKE_ARRIVALS);
 });
 
 afterEach(() => {
@@ -250,5 +278,174 @@ describe('BusStopLayer', () => {
     render(<BusStopLayer enabled={false} />);
 
     expect(hookArgs.enabled).toBe(false);
+  });
+
+  it('passes bbox string to hook when zoom \u2265 minZoom', () => {
+    mockZoom = 14;
+    render(<BusStopLayer />);
+
+    // south,west,north,east from mockBounds
+    expect(hookArgs.bbox).toBe('53,-3.5,55,-2');
+  });
+
+  it('passes null bbox to hook when zoom < minZoom', () => {
+    mockZoom = 8;
+    render(<BusStopLayer />);
+
+    expect(hookArgs.bbox).toBeNull();
+  });
+
+  it('updates bbox when moveend fires', async () => {
+    mockZoom = 14;
+    render(<BusStopLayer />);
+
+    expect(hookArgs.bbox).toBe('53,-3.5,55,-2');
+
+    await act(async () => {
+      mapHandlers['moveend']?.();
+    });
+
+    // Still computes from current (unchanged) mockBounds
+    expect(hookArgs.bbox).toBe('53,-3.5,55,-2');
+  });
+
+  it('sets bbox to null on zoomend when below minZoom', async () => {
+    mockZoom = 14;
+    render(<BusStopLayer />);
+    expect(hookArgs.bbox).toBeTruthy();
+
+    // Simulate zoom out below threshold
+    mockZoom = 8;
+    await act(async () => {
+      mapHandlers['zoomend']?.();
+    });
+
+    expect(hookArgs.bbox).toBeNull();
+  });
+
+  it('registers both zoomend and moveend listeners', () => {
+    render(<BusStopLayer />);
+
+    const events = mockMapInstance.on.mock.calls.map(([e]) => e);
+    expect(events).toContain('zoomend');
+    expect(events).toContain('moveend');
+  });
+});
+
+// ── BusStopMarker — popup + arrivals ────────────────────────────────
+
+describe('BusStopMarker — arrivals on popup open', () => {
+  const stop = mockStops[0]; // Lancaster Bus Station (hub)
+
+  it('does not render ArrivalsPanel before popup is opened', () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+    // arrivals-loading should NOT be present because popup is closed
+    expect(screen.queryByTestId('arrivals-loading')).toBeNull();
+  });
+
+  it('renders ArrivalsPanel (loading state) when popup opens', async () => {
+    // Make fetchBusArrivals never resolve so we stay in loading state
+    fetchBusArrivals.mockImplementation(() => new Promise(() => {}));
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    await act(async () => {
+      capturedPopupHandlers.add?.();
+    });
+
+    expect(screen.getByTestId('arrivals-loading')).toBeTruthy();
+  });
+
+  it('renders arrivals list after fetch resolves', async () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    await act(async () => {
+      capturedPopupHandlers.add?.();
+    });
+
+    await waitFor(() => expect(screen.getByTestId('arrivals-panel')).toBeTruthy());
+    const rows = screen.getAllByTestId(/^arrival-row-/);
+    expect(rows).toHaveLength(2);
+  });
+
+  it('calls fetchBusArrivals with the stop atco_code', async () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    await act(async () => {
+      capturedPopupHandlers.add?.();
+    });
+
+    await waitFor(() => expect(fetchBusArrivals).toHaveBeenCalledWith(stop.atco_code));
+  });
+
+  it('hides arrivals panel after popup closes', async () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    await act(async () => { capturedPopupHandlers.add?.(); });
+    await waitFor(() => screen.getByTestId('arrivals-panel'));
+
+    await act(async () => { capturedPopupHandlers.remove?.(); });
+
+    expect(screen.queryByTestId('arrivals-panel')).toBeNull();
+    expect(screen.queryByTestId('arrivals-loading')).toBeNull();
+  });
+});
+
+// ── ArrivalsPanel unit tests ────────────────────────────────────────
+
+describe('ArrivalsPanel', () => {
+  it('shows loading state initially', () => {
+    fetchBusArrivals.mockImplementation(() => new Promise(() => {}));
+    render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+
+    expect(screen.getByTestId('arrivals-loading')).toBeTruthy();
+  });
+
+  it('renders arrivals list after successful fetch', async () => {
+    render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+
+    await waitFor(() => expect(screen.getByTestId('arrivals-panel')).toBeTruthy());
+    const rows = screen.getAllByTestId(/^arrival-row-/);
+    expect(rows).toHaveLength(FAKE_ARRIVALS.length);
+  });
+
+  it('renders line, destination and time for each arrival', async () => {
+    render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+
+    await waitFor(() => screen.getByTestId('arrivals-panel'));
+    const lines = screen.getAllByTestId('arrival-line');
+    expect(lines[0].textContent).toBe('1');
+    const destinations = screen.getAllByTestId('arrival-destination');
+    expect(destinations[0].textContent).toBe('Lancaster Bus Station');
+    const times = screen.getAllByTestId('arrival-time');
+    expect(times[0].textContent).toBe('12:00:00');
+  });
+
+  it('shows empty state when API returns zero arrivals', async () => {
+    fetchBusArrivals.mockResolvedValue([]);
+    render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+
+    await waitFor(() => expect(screen.getByTestId('arrivals-empty')).toBeTruthy());
+  });
+
+  it('shows error state when fetch throws', async () => {
+    fetchBusArrivals.mockRejectedValue(new Error('API down'));
+    render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+
+    await waitFor(() => expect(screen.getByTestId('arrivals-error')).toBeTruthy());
+  });
+
+  it('calls fetchBusArrivals with the provided ATCO code', async () => {
+    render(<ArrivalsPanel atcoCode="2500TEST001" />);
+
+    await waitFor(() => expect(fetchBusArrivals).toHaveBeenCalledWith('2500TEST001'));
+  });
+
+  it('re-fetches when atcoCode changes', async () => {
+    const { rerender } = render(<ArrivalsPanel atcoCode="2500LAA12000" />);
+    await waitFor(() => expect(fetchBusArrivals).toHaveBeenCalledTimes(1));
+
+    rerender(<ArrivalsPanel atcoCode="2500B0615" />);
+    await waitFor(() => expect(fetchBusArrivals).toHaveBeenCalledTimes(2));
+    expect(fetchBusArrivals).toHaveBeenLastCalledWith('2500B0615');
   });
 });
