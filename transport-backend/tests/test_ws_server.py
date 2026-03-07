@@ -409,7 +409,14 @@ class TestStompBroker:
         b = StompBroker()
         mock_bl = MagicMock()
         mock_bl.get_bus_live.return_value = [
-            ("1", "Lancaster", 54.046, -2.798, "SCCU"),
+            {
+                "line_ref": "1", "destination": "Lancaster",
+                "lat": 54.046, "lon": -2.798, "operator": "SCCU",
+                "delay_seconds": None, "vehicle_ref": None,
+                "bearing": None, "direction": None, "origin_ref": None,
+                "origin_name": None, "destination_ref": None,
+                "journey_ref": None, "aimed_departure_time": None,
+            },
         ]
         b.configure(bus_live_factory=lambda: mock_bl, poll_interval=1)
 

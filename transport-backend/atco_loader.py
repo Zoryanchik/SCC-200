@@ -1,10 +1,13 @@
 """ATCO stop data loader.
 
 Owns the ``stop_coords`` table (with name and stop_type columns).
-Parses NaPTAN XML for coordinates, common names
-(``<Descriptor><CommonName>``) and stop types
+
+**Coordinates** are primarily populated by ``bus_loader`` from TXC
+RouteLink waypoints.  NaPTAN XML is used only for **metadata**:
+common names (``<Descriptor><CommonName>``), stop types
 (``<StopClassification><StopType>`` — codes starting with ``B`` → bus,
-``T`` → train, else ``other``).
+``T`` → train, else ``other``), and town names.  NaPTAN-only stops
+(e.g. train stations not in TXC data) also get coordinates inserted.
 
 The ``walking_transfers`` table is owned by ``WalkingLoader`` — see
 ``walking_loader.py`` for precompute, cache, and lookup functions.
@@ -158,17 +161,24 @@ class AtcoLoader:
 
         conn = self._connect()
         cur = conn.cursor()
+        # NaPTAN is used for METADATA only (name, stop_type, town).
+        # Stop coordinates are primarily derived from TXC RouteLink
+        # waypoints (populated by bus_loader).
+        #
+        # For rows that already exist (from TXC), update only the
+        # metadata columns — do NOT overwrite lat/lon.
+        # For rows that don't exist (e.g. train stations only in
+        # NaPTAN), insert the full record including coords.
         cur.executemany(
             "INSERT INTO stop_coords (atco_code, lat, lon, name, stop_type, town) "
             "VALUES (%s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (atco_code) DO UPDATE SET "
-            "lat = EXCLUDED.lat, lon = EXCLUDED.lon, "
             "name = EXCLUDED.name, stop_type = EXCLUDED.stop_type, town = EXCLUDED.town",
             rows,
         )
         conn.commit()
         conn.close()
-        print(f"  ✓ Coordinates loaded for {len(rows)} stops")
+        print(f"  ✓ NaPTAN metadata loaded for {len(rows)} stops")
 
     # ── Lookups ───────────────────────────────────────────────────
 

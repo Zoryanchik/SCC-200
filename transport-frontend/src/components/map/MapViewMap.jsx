@@ -263,12 +263,34 @@ export default function MapViewMap({
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
-								click: () => onOpenPopup(marker.id)
+								click: () => {
+									// Toggle route display when clicking a bus marker
+									if (marker.type === 'bus' && marker.routeNumber != null) {
+										try {
+											toggleRoute(String(marker.routeNumber), marker.operator || null);
+										} catch (e) {
+											// ignore
+										}
+									}
+									onOpenPopup(marker.id);
+								}
 							}}
 						>
 							{openPopupId === marker.id && (
 								<Popup
-									onClose={onClosePopup}
+									onClose={() => {
+										// Close popup as before
+										onClosePopup();
+										// When closing a bus popup, hide the route if it's active
+										if (marker.type === 'bus' && marker.routeNumber != null) {
+											try {
+												// Only toggle off if currently active
+												if (isActive(String(marker.routeNumber))) toggleRoute(String(marker.routeNumber), marker.operator || null);
+											} catch (e) {
+												// ignore
+											}
+										}
+									}}
 									autoClose={false}
 								>
 									<Box sx={{ minWidth: '200px', pb: 1 }}>

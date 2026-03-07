@@ -697,6 +697,22 @@ async def stops_geo(
             if not coords:
                 continue
             lat, lon = coords
+            # Build line objects with both the full internal ID (for
+            # API lookups) and the short display name (for the UI).
+            # De-duplicate by full ID to keep one entry per operator
+            # route even when the short name collides (e.g. multiple
+            # operators running a "1").
+            seen_ids: set = set()
+            line_objs: list = []
+            for ln in sorted(stop["lines"]):
+                if not ln or ln in seen_ids:
+                    continue
+                seen_ids.add(ln)
+                short = ln.split(":")[-1] if ":" in ln else ln
+                line_objs.append({"id": ln, "name": short})
+            # Sort by short display name for the UI
+            line_objs.sort(key=lambda o: o["name"])
+
             enriched.append({
                 "id": atco_code,
                 "name": stop["name"],
@@ -704,10 +720,7 @@ async def stops_geo(
                 "lon": lon,
                 "atco_code": atco_code,
                 "classification": stop["classification"],
-                "lines": sorted({
-                    ln.split(":")[-1] for ln in stop["lines"]
-                    if ln
-                }),
+                "lines": line_objs,
                 "degree": stop["degree"],
                 "frequency": stop["frequency"],
             })
@@ -735,9 +748,28 @@ async def stops_geo(
 _route_line_cache: Dict[str, Any] = {}
 
 
+# ── SIRI operator code → timetable operator prefix mapping ────────
+# Each SIRI live-feed code (e.g. "SCCU") maps to the TransXChange
+# ServiceCode prefix(es) used by routes from that operator's
+# timetable dataset.  Derived from the actual dataset downloads.
+_SIRI_TO_TIMETABLE_PREFIXES: Dict[str, list] = {
+    "SCCU": ["PC0002407"],                # Stagecoach Cumbria & North Lancashire
+    "SCMY": ["PC1033334"],                # Stagecoach Merseyside & South Lancashire
+    "BLAC": ["PC0001061", "UZ000BLAC"],   # Blackpool Transport (bus + tram)
+    "KLCO": ["PC1016989", "UZ000KLCO"],   # Kirkby Lonsdale Coach Hire
+    "ARCT": ["PC1117070"],                # Archway Travel
+    "NUTT": ["PC1072820"],                # Transpora North West
+}
+
+
 @app.get("/routes/line/{line}")
-async def routes_for_line(line: str):
+async def routes_for_line(line: str, operator: Optional[str] = None):
     """Return route variants for a bus line, each with ordered stops + coords.
+
+    Optional query param ``operator`` (SIRI operator code, e.g. "SCCU")
+    filters variants to only those from the matching timetable operator,
+    preventing cross-operator line-name collisions (e.g. two different
+    operators both running a "line 51").
 
     Response::
 
@@ -756,12 +788,16 @@ async def routes_for_line(line: str):
         }
     """
     from fastapi.responses import JSONResponse
+    import traceback as _tb
 
     # Normalise the line name for cache lookup (case-insensitive)
     line_key = line.strip().upper()
+    # Include operator in cache key so ?operator=SCCU and no-operator are cached separately
+    op_key = (operator or "").strip().upper()
+    cache_key = f"{line_key}||{op_key}" if op_key else line_key
 
-    if line_key in _route_line_cache:
-        return _route_line_cache[line_key]
+    if cache_key in _route_line_cache:
+        return _route_line_cache[cache_key]
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -772,7 +808,22 @@ async def routes_for_line(line: str):
             content={"error": "Backend not initialized"},
         )
 
-    # NaPTAN coordinate lookup
+    try:
+        result = _build_route_variants(line, line_key, merged, op_key)
+        _route_line_cache[cache_key] = result
+        return result
+    except Exception as exc:
+        print(f"[routes/line/{line}] ERROR: {exc}")
+        _tb.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal error building route variants: {exc}"},
+        )
+
+
+def _build_route_variants(line: str, line_key: str, merged, operator_key: str = ""):
+    """Heavy lifting for routes_for_line, extracted so the endpoint can
+    wrap it in a single try/except."""
     atco = _base_cache.get("atco_loader") if _base_cache else None
     coord_map: Dict[str, tuple] = {}
     if atco:
@@ -781,21 +832,38 @@ async def routes_for_line(line: str):
         except Exception:
             pass
 
+    # Resolve which timetable operator prefixes to keep (empty = all)
+    allowed_prefixes: set = set()
+    if operator_key and _SIRI_TO_TIMETABLE_PREFIXES:
+        allowed_prefixes = set(_SIRI_TO_TIMETABLE_PREFIXES.get(operator_key, []))
+
     # ── Collect route indices whose line_name matches ──────────────
-    # line_name may be prefixed like "PC0002407:425:100" — match the
-    # part after the last colon, which is what the frontend shows.
+    # The frontend sends the full internal line ID (e.g.
+    # "PC0002407:417:1") for an exact match.  If the query contains
+    # colons it's treated as a full ID; otherwise it's a short display
+    # name and we fall back to suffix matching.
+    is_full_id = ":" in line_key
     matching_routes: list[int] = []
     for r_idx, meta in enumerate(merged.route_metadata):
         if meta is None:
             continue
         raw_line = (meta.get("line_name") or "").strip()
-        rline = raw_line.split(":")[-1].upper()
-        if rline == line_key:
-            matching_routes.append(r_idx)
+        if is_full_id:
+            if raw_line.upper() == line_key:
+                matching_routes.append(r_idx)
+        else:
+            rline = raw_line.split(":")[-1].upper()
+            if rline == line_key:
+                # When operator filter is active, only keep routes whose
+                # timetable prefix belongs to the requested operator.
+                if allowed_prefixes:
+                    route_prefix = raw_line.split(":")[0]
+                    if route_prefix not in allowed_prefixes:
+                        continue
+                matching_routes.append(r_idx)
 
     if not matching_routes:
         result = {"line": line, "variants": []}
-        _route_line_cache[line_key] = result
         return result
 
     # ── Build variants from *journey-level* stop sequences ───────
@@ -882,16 +950,24 @@ async def routes_for_line(line: str):
                 return _split_at_turnaround(chosen)
 
         # --- Strategy 2: split at the largest distance gap if anomalous ---
+        # Only applies when the journey is genuinely a round-trip — i.e. the
+        # first and last stops are geographically close (< 3 km apart) AND
+        # the distance anomaly is extreme (> 8× median gap).
+        # Previous 3× threshold falsely split one-way routes like line 40
+        # where there are simply longer rural segments.
         gaps = [_gap(stops[i], stops[i + 1]) for i in range(len(stops) - 1)]
         max_gap_val = max(gaps)
         sorted_gaps = sorted(gaps)
         median_gap = sorted_gaps[len(sorted_gaps) // 2]
-        # Only split if the largest gap is significantly bigger than typical
-        if median_gap > 0 and max_gap_val > median_gap * 3:
-            split_idx = gaps.index(max_gap_val) + 1
-            first_half = stops[:split_idx]
-            second_half = stops[split_idx:]
-            return first_half if len(first_half) >= len(second_half) else second_half
+        if median_gap > 0 and max_gap_val > median_gap * 8:
+            # Extra safety: only split if first↔last stop distance hints at
+            # a round trip (start and end near each other, < 3 km).
+            d_start_end = _gap(stops[0], stops[-1])
+            if d_start_end < 3000:
+                split_idx = gaps.index(max_gap_val) + 1
+                first_half = stops[:split_idx]
+                second_half = stops[split_idx:]
+                return first_half if len(first_half) >= len(second_half) else second_half
         return stops
 
     variants = []
@@ -930,7 +1006,16 @@ async def routes_for_line(line: str):
             clean = [{k: v for k, v in s.items() if k != "_arr"} for s in best_stops]
             meta = merged.route_metadata[r_idx] or {}
             route_id = meta.get("route_id", f"route_{r_idx}")
-            variants.append({"route_id": route_id, "stops": clean})
+            # If the merged data contains a route track (mapping/<track>), include
+            # it as `geometry` so the frontend can draw the precise track.
+            geom = None
+            if hasattr(merged, 'route_tracks') and r_idx < len(merged.route_tracks):
+                rt = merged.route_tracks[r_idx]
+                if rt and len(rt) > 1:
+                    # Ensure it's a list of [lat, lon] pairs (JSON-friendly)
+                    geom = [[float(lat), float(lon)] for (lat, lon) in rt]
+
+            variants.append({"route_id": route_id, "stops": clean, "geometry": geom})
 
     # De-duplicate: keep only the most-distinct variants (by ATCO signature).
     seen_sigs: set[tuple] = set()
@@ -953,8 +1038,10 @@ async def routes_for_line(line: str):
                 mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
             return mx
 
-        # First pass: hard-reject variants with huge single gaps
-        unique = [v for v in unique if _max_gap(v["stops"]) < 2500]
+        # First pass: hard-reject variants with huge single gaps.
+        # Use 5 km to accommodate express routes with legitimate
+        # non-stop segments (e.g. 2X Morecambe→Lancaster = 4.8 km).
+        unique = [v for v in unique if _max_gap(v["stops"]) < 5000]
 
         # Second pass: among survivors, drop those with mean gap much
         # worse than the best to keep only clean route traces.
@@ -972,7 +1059,6 @@ async def routes_for_line(line: str):
         unique = unique[:3]
 
     result = {"line": line, "variants": unique}
-    _route_line_cache[line_key] = result
     return result
 
 
@@ -1315,7 +1401,12 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
     line_q = line_name.strip()
     buses = _fetch_all_live_buses()
     delays: list[int] = []
-    for line_ref, dest, lat_v, lon_v, _op, delay_s in buses:
+    for bus in buses:
+        line_ref = bus["line_ref"]
+        dest = bus["destination"]
+        lat_v = bus["lat"]
+        lon_v = bus["lon"]
+        delay_s = bus["delay_seconds"]
         # Exact short line name match
         short = (line_ref or "").split(":")[-1].strip()
         if short != line_q:
@@ -1373,7 +1464,13 @@ async def bus_live_operator(
         )
 
     out = []
-    for line_ref, dest, lat_v, lon_v, _operator, delay_s in results:
+    for bus in results:
+        line_ref = bus["line_ref"]
+        dest = bus["destination"]
+        lat_v = bus["lat"]
+        lon_v = bus["lon"]
+        _operator = bus["operator"]
+        delay_s = bus["delay_seconds"]
         computed = None
         if delay_s is None:
             try:
@@ -1388,7 +1485,17 @@ async def bus_live_operator(
             "lon": lon_v,
             "operator": _operator,
             "delay_minutes": round(final_delay / 60, 1) if final_delay is not None else None,
+            "delay_seconds": final_delay,
             "status": _bus_delay_status(final_delay),
+            # --- rich SIRI fields for route display ---
+            "vehicle_ref": bus.get("vehicle_ref"),
+            "bearing": bus.get("bearing"),
+            "direction": bus.get("direction"),
+            "origin_ref": bus.get("origin_ref"),
+            "origin_name": bus.get("origin_name"),
+            "destination_ref": bus.get("destination_ref"),
+            "journey_ref": bus.get("journey_ref"),
+            "aimed_departure_time": bus.get("aimed_departure_time"),
         })
     return out
 

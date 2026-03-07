@@ -272,14 +272,21 @@ class StompBroker:
             )
             vehicles = [
                 {
-                    "line": line_ref,
-                    "destination": dest,
-                    "lat": lat,
-                    "lon": lon,
-                    "operator": operator,
+                    "line": bus["line_ref"],
+                    "destination": bus["destination"],
+                    "lat": bus["lat"],
+                    "lon": bus["lon"],
+                    "operator": bus["operator"],
+                    "bearing": bus.get("bearing"),
+                    "direction": bus.get("direction"),
+                    "vehicle_ref": bus.get("vehicle_ref"),
+                    "journey_ref": bus.get("journey_ref"),
+                    "origin_name": bus.get("origin_name"),
+                    "aimed_departure_time": bus.get("aimed_departure_time"),
+                    "delay_seconds": bus.get("delay_seconds"),
                     "timestamp": time.time(),
                 }
-                for line_ref, dest, lat, lon, operator in results
+                for bus in results
             ]
             await self.broadcast(
                 "/topic/BUS_MVT_ALL",

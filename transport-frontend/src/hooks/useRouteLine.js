@@ -25,9 +25,12 @@ export function useRouteLine() {
   /**
    * Toggle a route line on or off.  If turning ON and the data
    * isn't cached yet, fetch it from the backend first.
+   *
+   * @param {string} line      – line name, e.g. "51"
+   * @param {string} [operator] – optional SIRI operator code, e.g. "SCCU"
    */
   const toggleRoute = useCallback(
-    async (line) => {
+    async (line, operator = null) => {
       if (activeRef.current.has(line)) {
         // Turn OFF — just remove from the active map
         activeRef.current.delete(line);
@@ -39,7 +42,7 @@ export function useRouteLine() {
       let data = cacheRef.current.get(line);
       if (!data) {
         try {
-          data = await fetchRouteLine(line);
+          data = await fetchRouteLine(line, operator);
           cacheRef.current.set(line, data);
         } catch (err) {
           console.error(`[useRouteLine] Failed to fetch line "${line}":`, err);

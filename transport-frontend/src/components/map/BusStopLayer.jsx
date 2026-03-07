@@ -84,14 +84,18 @@ function buildPopupHtml(stop) {
     html += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
 
     for (const line of stop.lines) {
-      const safe = line.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-      html += '<button onclick="window.__busRouteToggle(\'' + safe + '\')" '
-        + 'data-testid="route-chip-' + line + '" '
+      // lines may be objects {id, name} (full ID for API, short name for display)
+      // or plain strings (legacy / tests).
+      const lineId = typeof line === 'object' ? line.id : line;
+      const lineName = typeof line === 'object' ? line.name : line;
+      const safeId = lineId.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += '<button onclick="window.__busRouteToggle(\'' + safeId + '\')" '
+        + 'data-testid="route-chip-' + lineName + '" '
         + 'style="display:inline-block;padding:4px 10px;border-radius:8px;'
         + 'background:#E3F2FD;color:#1565C0;font-size:12px;font-weight:700;'
         + 'cursor:pointer;border:2px solid #90CAF9;margin:0;line-height:1.2;'
         + 'min-height:0;min-width:0">'
-        + line + '</button>';
+        + lineName + '</button>';
     }
 
     html += '</div></div>';

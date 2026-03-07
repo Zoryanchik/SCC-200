@@ -127,44 +127,42 @@ def initialize_base():
         print("  [bus] ✓ Ready")
         return loader, bus_changed
 
-    # ── Task 2: Walking — download NaPTAN coords + precompute ────
-    # Entirely independent of bus data: runs fully in parallel.
-    # Returns (atco_loader, walking_loader, raw_coords)
+    # ── Task 2: Walking — NaPTAN metadata + precompute transfers ───
+    # DEPENDS on bus data: bus_loader populates stop_coords with
+    # TXC-derived lat/lon from RouteLink waypoints.  NaPTAN only adds
+    # metadata (name, stop_type, town) to existing stop_coords rows.
+    # This task is called AFTER _bus_task completes.
 
-    def _walking_task():
+    def _walking_task(bus_changed):
         al = AtcoLoader(WALK_DB_PATH)
         al.create_schema()
 
-        # Detect whether stop_coords is empty before the download so we
-        # know whether NaPTAN data itself changed.
+        # Check how many TXC-derived coords the bus loader inserted.
         conn_pre = al._connect()
         cur_pre = conn_pre.cursor()
         cur_pre.execute("SELECT COUNT(*) FROM stop_coords")
-        coords_before = cur_pre.fetchone()[0]
+        coords_from_txc = cur_pre.fetchone()[0]
         conn_pre.close()
+        print(f"  [walking] ✓ {coords_from_txc} stop coords from TXC data")
 
-        al.download_stop_coords()   # upserts into stop_coords
+        # Download NaPTAN for metadata only (name, stop_type, town).
+        al.download_stop_coords()
 
         conn_post = al._connect()
         cur_post = conn_post.cursor()
         cur_post.execute("SELECT COUNT(*) FROM stop_coords")
         coords_after = cur_post.fetchone()[0]
         conn_post.close()
+        print(f"  [walking] ✓ {coords_after} total stop coords (TXC + NaPTAN metadata)")
 
-        coords_changed = coords_after != coords_before or coords_before == 0
-        if coords_changed:
-            print(f"  [walking] ✓ Stop coords updated ({coords_after} stops)")
-        else:
-            print(f"  [walking] ✓ Stop coords unchanged ({coords_after} stops)")
+        coords_changed = bus_changed or coords_from_txc == 0
 
         wl = WalkingLoader(WALK_DB_PATH)
         wl.create_schema()
 
         raw_coords = al.get_all_stop_coords()
 
-        # ── Precompute walking transfers in parallel with bus ─────
-        # Walking is independent of bus timetable data — only NaPTAN
-        # stop coordinates are needed, which are already loaded above.
+        # ── Precompute walking transfers using TXC-derived coords ─
         conn_tx = wl._connect()
         cur_tx  = conn_tx.cursor()
         cur_tx.execute("SELECT COUNT(*) FROM walking_transfers")
@@ -226,16 +224,17 @@ def initialize_base():
         print("  [train] ✓ Ready")
         return tl
 
-    # ── Run all three concurrently ────────────────────────────────
+    # ── Run tasks: bus+train concurrently, then walking ─────────
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         bus_fut   = ex.submit(_bus_task)
-        walk_fut  = ex.submit(_walking_task)
         train_fut = ex.submit(_train_task)
 
-        loader, bus_changed                    = bus_fut.result()
-        atco_loader, walking_loader, raw_coords = walk_fut.result()
-        train_loader                            = train_fut.result()
+        loader, bus_changed = bus_fut.result()
+        train_loader        = train_fut.result()
+
+    # Walking depends on bus-derived stop_coords, so runs after bus.
+    atco_loader, walking_loader, raw_coords = _walking_task(bus_changed)
 
     raw_transfers = walking_loader.get_walking_transfers()
     print(f"  [walking] ✓ Ready  ({len(raw_transfers)} stops with transfers, "

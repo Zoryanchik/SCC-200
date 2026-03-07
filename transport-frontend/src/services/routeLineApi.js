@@ -10,11 +10,16 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
 /**
  * Fetch all route variants for a given bus line name.
  *
- * @param {string} line  – the line name, e.g. "100" or "1A"
+ * @param {string} line      – the line name, e.g. "100" or "1A"
+ * @param {string} [operator] – optional SIRI operator code, e.g. "SCCU"
  * @returns {Promise<{ line: string, variants: Array<{ route_id: string, stops: Array }> }>}
  */
-export async function fetchRouteLine(line) {
-  const res = await fetch(`${API_BASE}/routes/line/${encodeURIComponent(line)}`);
+export async function fetchRouteLine(line, operator = null) {
+  let url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
+  if (operator) {
+    url += `?operator=${encodeURIComponent(operator)}`;
+  }
+  const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch route line "${line}": ${res.status}`);
   }

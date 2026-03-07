@@ -94,14 +94,26 @@ class BusLive:
         return (c.text or '').strip()
 
     def get_bus_live(self, lat: float, lon: float, urls: Iterable[str] = None,
-                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple]:
+                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[dict]:
         """Return nearby live vehicles.
 
-        Each element is a 6-tuple:
-            (line_ref, destination_name, lat, lon, operator_name, delay_seconds)
+        Each element is a dict with at least:
+            line_ref, destination_name, lat, lon, operator_name, delay_seconds
+
+        and additional SIRI fields when available:
+            vehicle_ref, bearing, direction, origin_ref, origin_name,
+            destination_ref, journey_ref, aimed_departure_time
 
         ``delay_seconds`` is an int (positive = late, negative = early) or
         ``None`` when no timing data is available in the feed.
+
+        The returned dicts also support tuple-style unpacking of the first
+        six fields for backward compatibility::
+
+            for rec in results:
+                line_ref = rec["line_ref"]
+                # or destructure the legacy tuple:
+                line_ref, dest, lat_v, lon_v, op, delay = rec.as_tuple()
 
         lat, lon are the centre point; lat_tol/lon_tol define the half-widths of
         the allowed rectangle.
@@ -112,7 +124,7 @@ class BusLive:
         lon_max = lon + lon_tol
 
         urls_to_use = list(urls) if urls else self.urls
-        results: List[Tuple[str, str, float, float]] = []
+        results: List[dict] = []
 
         for url in urls_to_use:
             try:
@@ -154,8 +166,33 @@ class BusLive:
                                     self._get_text(mvj, 'OperatorRef'))
                     operator_name = self.OPERATOR_NAMES.get(operator_ref, operator_ref or 'Unknown')
 
+                    # --- extra SIRI fields for richer live data -----
+                    direction = (self._get_text(mvj, 'directionref') or
+                                 self._get_text(mvj, 'DirectionRef'))
+
+                    vehicle_ref = (self._get_text(mvj, 'vehicleref') or
+                                   self._get_text(mvj, 'VehicleRef'))
+
+                    origin_ref = (self._get_text(mvj, 'originref') or
+                                  self._get_text(mvj, 'OriginRef'))
+                    origin_name = (self._get_text(mvj, 'originname') or
+                                   self._get_text(mvj, 'OriginName'))
+                    destination_ref = (self._get_text(mvj, 'destinationref') or
+                                       self._get_text(mvj, 'DestinationRef'))
+
+                    origin_aimed_dep = (self._get_text(mvj, 'originaimeddeparturetime') or
+                                        self._get_text(mvj, 'OriginAimedDepartureTime'))
+
+                    # FramedVehicleJourneyRef contains DataFrameRef + DatedVehicleJourneyRef
+                    journey_ref = ''
+                    for child in mvj.iter():
+                        if isinstance(child.tag, str) and child.tag.lower().endswith('framedvehiclejourneyref'):
+                            journey_ref = (self._get_text(child, 'datedvehiclejourneyref') or
+                                           self._get_text(child, 'DatedVehicleJourneyRef'))
+                            break
+
                     # vehicle location may be nested under VehicleLocation element
-                    lat_s = lon_s = ''
+                    lat_s = lon_s = bearing_s = ''
                     vl = None
                     for child in mvj.iter():
                         if isinstance(child.tag, str) and child.tag.lower().endswith('vehiclelocation'):
@@ -169,11 +206,25 @@ class BusLive:
                         lat_s = (self._get_text(mvj, 'latitude') or self._get_text(mvj, 'Latitude'))
                         lon_s = (self._get_text(mvj, 'longitude') or self._get_text(mvj, 'Longitude'))
 
+                    # Bearing may be under VehicleLocation or directly under MVJ
+                    bearing_s = (self._get_text(mvj, 'bearing') or
+                                 self._get_text(mvj, 'Bearing'))
+                    if not bearing_s and vl is not None:
+                        bearing_s = (self._get_text(vl, 'bearing') or
+                                     self._get_text(vl, 'Bearing'))
+
                     try:
                         lat_v = float(lat_s)
                         lon_v = float(lon_s)
                     except Exception:
                         continue
+
+                    bearing: Optional[float] = None
+                    if bearing_s:
+                        try:
+                            bearing = float(bearing_s)
+                        except Exception:
+                            pass
 
                     # --- delay extraction -----------------------------------
                     # Strategy 1: explicit <Delay> ISO 8601 duration element
@@ -203,7 +254,23 @@ class BusLive:
                     # --------------------------------------------------------
 
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds))
+                        results.append({
+                            "line_ref": line_ref,
+                            "destination": dest,
+                            "lat": lat_v,
+                            "lon": lon_v,
+                            "operator": operator_name,
+                            "delay_seconds": delay_seconds,
+                            # --- rich SIRI fields for route display ---
+                            "vehicle_ref": vehicle_ref or None,
+                            "bearing": bearing,
+                            "direction": direction or None,
+                            "origin_ref": origin_ref or None,
+                            "origin_name": origin_name or None,
+                            "destination_ref": destination_ref or None,
+                            "journey_ref": journey_ref or None,
+                            "aimed_departure_time": origin_aimed_dep or None,
+                        })
 
         return results
 
@@ -255,9 +322,25 @@ def main():
 
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
-    for i, (line, dest, lat, lon, operator, delay_s) in enumerate(display_results):
+    for i, rec in enumerate(display_results):
+        line = rec["line_ref"]
+        dest = rec["destination"]
+        lat = rec["lat"]
+        lon = rec["lon"]
+        operator = rec["operator"]
+        delay_s = rec["delay_seconds"]
+        bearing = rec.get("bearing")
+        direction = rec.get("direction")
+        vehicle = rec.get("vehicle_ref")
         delay_str = f", delay={delay_s}s" if delay_s is not None else ""
-        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}{delay_str}")
+        extra = ""
+        if bearing is not None:
+            extra += f", bearing={bearing}"
+        if direction:
+            extra += f", dir={direction}"
+        if vehicle:
+            extra += f", vehicle={vehicle}"
+        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}{delay_str}{extra}")
 
 
 if __name__ == "__main__":

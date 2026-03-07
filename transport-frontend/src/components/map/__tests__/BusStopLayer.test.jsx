@@ -65,7 +65,11 @@ const mockStops = [
     lon: -2.80117,
     atco_code: '2500LAA12000',
     classification: 'hub',
-    lines: ['1', '2', '40'],
+    lines: [
+      { id: 'PC0002407:417:1', name: '1' },
+      { id: 'PC0002407:13:2', name: '2' },
+      { id: 'PC0002407:97:40', name: '40' },
+    ],
   },
   {
     id: 'stop-2',
@@ -74,7 +78,10 @@ const mockStops = [
     lon: -2.7852,
     atco_code: '2500B0615',
     classification: 'interchange',
-    lines: ['1', '4'],
+    lines: [
+      { id: 'PC0002407:417:1', name: '1' },
+      { id: 'PC0002407:416:4', name: '4' },
+    ],
   },
   {
     id: 'stop-3',
@@ -83,7 +90,7 @@ const mockStops = [
     lon: -2.5,
     atco_code: '9900OOB001',
     classification: 'local',
-    lines: ['99'],
+    lines: [{ id: 'PC9999:1:99', name: '99' }],
   },
 ];
 
@@ -168,7 +175,9 @@ describe('BusStopMarker', () => {
     const linesContainer = screen.getByTestId('bus-stop-lines');
     expect(linesContainer).toBeTruthy();
     for (const line of stop.lines) {
-      expect(linesContainer.textContent).toContain(line);
+      // lines are {id, name} objects — display name should appear in text
+      const displayName = typeof line === 'object' ? line.name : line;
+      expect(linesContainer.textContent).toContain(displayName);
     }
   });
 

@@ -80,12 +80,21 @@ let id = 1;
 if (Array.isArray(busLocations) && busLocations.length > 0) {
 busLocations.forEach(bus => {
 newMarkers.push({
-id: id++,
+id: bus.vehicle_ref || id++,
 position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
-name: bus.name || `Bus ${bus.id}`,
+name: bus.name || `Bus ${bus.line || bus.id || ''}`.trim(),
 type: 'bus',
 status: bus.status || 'On time',
-routeNumber: bus.routeNumber || bus.route
+routeNumber: bus.line || bus.routeNumber || bus.route,
+destination: bus.destination,
+operator: bus.operator,
+delayMinutes: bus.delay_minutes,
+bearing: bus.bearing,
+direction: bus.direction,
+originName: bus.origin_name,
+journeyRef: bus.journey_ref,
+aimedDepartureTime: bus.aimed_departure_time,
+vehicleRef: bus.vehicle_ref,
 });
 });
 }
@@ -165,14 +174,22 @@ const lat = item?.latitude ?? item?.lat;
 const lon = item?.longitude ?? item?.lon;
 if (typeof lat !== 'number' || typeof lon !== 'number') return null;
 return {
-id: item?.vehicleId || item?.id || `${type}-${lat}-${lon}`,
+id: item?.vehicle_ref || item?.vehicleId || item?.id || `${type}-${lat}-${lon}`,
 position: [lat, lon],
-name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
+name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.line || item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
 type,
 status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins` : 'On time'),
-routeNumber: item?.routeNumber || item?.route,
+routeNumber: item?.line || item?.routeNumber || item?.route,
 destination: item?.destination,
-departureTime: item?.departureTime || item?.scheduledTime
+departureTime: item?.departureTime || item?.scheduledTime,
+operator: item?.operator,
+delayMinutes: item?.delay_minutes ?? item?.delayMinutes,
+bearing: item?.bearing,
+direction: item?.direction,
+originName: item?.origin_name ?? item?.originName,
+journeyRef: item?.journey_ref ?? item?.journeyRef,
+aimedDepartureTime: item?.aimed_departure_time ?? item?.aimedDepartureTime,
+vehicleRef: item?.vehicle_ref ?? item?.vehicleRef,
 };
 };
 

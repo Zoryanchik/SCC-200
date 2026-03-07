@@ -250,10 +250,10 @@ class BusLoader:
     def _parse_file(self, file_path):
         """Parse a TransXChange XML file and return row-lists without touching the DB.
 
-        Returns an 8-tuple:
+        Returns a 9-tuple:
             (route_stops_rows, journey_routes_rows, journey_times_rows,
              stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-             route_track_rows)
+             route_track_rows, stop_coord_rows)
         """
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -277,6 +277,10 @@ class BusLoader:
                 service_code = (op_el.text or '').strip()
 
         stop_names_rows = []
+        # Also capture coords from AnnotatedStopPointRef if present.
+        # Some TXC files include <Location><Latitude>/<Longitude> inside
+        # the stop-point annotation — this is a direct coord source.
+        annotated_stop_coords = {}  # atco -> (lat, lon)
         for sp in root.findall(f'{ns}StopPoints/{ns}AnnotatedStopPointRef'):
             atco   = sp.findtext(f'{ns}StopPointRef')
             cname  = sp.findtext(f'{ns}CommonName')
@@ -284,6 +288,16 @@ class BusLoader:
             locality  = sp.findtext(f'{ns}LocalityName', '')
             if atco and cname:
                 stop_names_rows.append((atco, cname, indicator, locality))
+            # Check for inline coords
+            loc_el = sp.find(f'{ns}Location')
+            if loc_el is not None and atco:
+                lat_s = loc_el.findtext(f'{ns}Latitude', '')
+                lon_s = loc_el.findtext(f'{ns}Longitude', '')
+                if lat_s and lon_s:
+                    try:
+                        annotated_stop_coords[atco] = (float(lat_s), float(lon_s))
+                    except ValueError:
+                        pass
 
         jps_data = {}
         for jps in root.findall(f'{ns}JourneyPatternSections/{ns}JourneyPatternSection'):
@@ -299,24 +313,54 @@ class BusLoader:
             jps_data[sid] = links
 
         # --- Parse <RouteSections> track waypoints (lat/lon from <Mapping>) ---
+        # Also extract stop coordinates: first waypoint → From stop,
+        # last waypoint → To stop.  These are stored in stop_coords as
+        # the primary coordinate source (replaces NaPTAN).
         route_section_tracks = {}  # section_id -> list of (lat, lon)
+        stop_coord_map = {}  # atco_code -> (lat, lon)  (first-seen wins)
         for rs in root.findall(f'{ns}RouteSections/{ns}RouteSection'):
             rs_id = rs.attrib.get('id', '')
             waypoints = []
             for rl in rs.findall(f'{ns}RouteLink'):
+                from_ref = rl.findtext(f'{ns}From/{ns}StopPointRef', '').strip()
+                to_ref   = rl.findtext(f'{ns}To/{ns}StopPointRef', '').strip()
                 mapping = rl.find(f'{ns}Track/{ns}Mapping')
                 if mapping is None:
                     continue
+                link_pts = []
                 for loc in mapping.findall(f'{ns}Location'):
+                    # TXC uses two formats for coordinates:
+                    #   1. <Translation><Latitude>...</Latitude></Translation>
+                    #   2. <Latitude>...</Latitude> directly under <Location>
                     lat_s = loc.findtext(f'{ns}Translation/{ns}Latitude', '')
                     lon_s = loc.findtext(f'{ns}Translation/{ns}Longitude', '')
+                    if not lat_s or not lon_s:
+                        # Fallback: direct children of <Location>
+                        lat_s = loc.findtext(f'{ns}Latitude', '')
+                        lon_s = loc.findtext(f'{ns}Longitude', '')
                     if lat_s and lon_s:
                         try:
-                            waypoints.append((float(lat_s), float(lon_s)))
+                            link_pts.append((float(lat_s), float(lon_s)))
                         except ValueError:
                             pass
+                if link_pts:
+                    waypoints.extend(link_pts)
+                    # First waypoint ≈ from-stop location
+                    if from_ref and from_ref not in stop_coord_map:
+                        stop_coord_map[from_ref] = link_pts[0]
+                    # Last waypoint ≈ to-stop location
+                    if to_ref and to_ref not in stop_coord_map:
+                        stop_coord_map[to_ref] = link_pts[-1]
             if waypoints:
                 route_section_tracks[rs_id] = waypoints
+
+        # Merge annotated stop coords as fallback (RouteLink coords take priority)
+        for atco, coord in annotated_stop_coords.items():
+            if atco not in stop_coord_map:
+                stop_coord_map[atco] = coord
+
+        # Build stop_coord_rows: (atco, lat, lon)
+        stop_coord_rows = [(atco, lat, lon) for atco, (lat, lon) in stop_coord_map.items()]
 
         # --- Parse <Routes> and assemble full track polylines per Route ---
         route_tracks_raw = {}  # route_id (XML-level) -> [(lat, lon), ...]
@@ -484,7 +528,7 @@ class BusLoader:
 
         return (route_stops_rows, journey_routes_rows, journey_times_rows,
                 stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-                route_track_rows)
+                route_track_rows, stop_coord_rows)
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
@@ -517,6 +561,7 @@ class BusLoader:
         all_serviced_orgs  = []
         all_journey_ops    = []
         all_route_tracks   = []
+        all_stop_coords    = []
 
         for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
@@ -531,6 +576,7 @@ class BusLoader:
                     all_serviced_orgs  .extend(r[5])
                     all_journey_ops    .extend(r[6])
                     all_route_tracks   .extend(r[7])
+                    all_stop_coords    .extend(r[8])
                 # Only print every 10th file or the last one to reduce log noise
                 if (idx + 1) % 10 == 0 or idx == total - 1:
                     print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
@@ -541,7 +587,7 @@ class BusLoader:
         self.populate(
             all_route_stops, all_journey_routes, all_journey_times,
             all_stop_names, all_service_ops, all_serviced_orgs, all_journey_ops,
-            all_route_tracks,
+            all_route_tracks, all_stop_coords,
         )
         print(f'  [bus] {prefix}Done. {total} files, '
               f'{len(all_journey_routes)} journeys, '
@@ -570,7 +616,7 @@ class BusLoader:
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None,
-                  route_tracks=None ):
+                  route_tracks=None, stop_coords=None ):
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
@@ -581,6 +627,7 @@ class BusLoader:
             serviced_orgs:  list of (service_code, start_date, end_date)
             journey_ops:    list of (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working)
             route_tracks:   list of (route_id, seq, lat, lon)
+            stop_coords:    list of (atco_code, lat, lon) — TXC-derived stop coordinates
         """
         conn = self._connect(self.db_path)
         cursor = conn.cursor()
@@ -701,6 +748,43 @@ class BusLoader:
             )
         conn.commit()
         conn.close()
+
+        # ── Upsert TXC-derived stop coordinates into stop_coords ──
+        # stop_coords lives in the walking DB (which may be the same DSN).
+        # Use DO NOTHING so the first-seen coordinate for each ATCO code
+        # is kept (later files won't overwrite).
+        if stop_coords:
+            walk_db = self.walking_db_path or self.db_path
+            wconn = self._connect(walk_db)
+            wcur = wconn.cursor()
+            # Ensure stop_coords table exists (AtcoLoader normally creates it,
+            # but bus loading may run first).
+            wcur.execute("""
+                CREATE TABLE IF NOT EXISTS stop_coords (
+                    atco_code  TEXT PRIMARY KEY,
+                    lat        REAL NOT NULL,
+                    lon        REAL NOT NULL,
+                    name       TEXT,
+                    stop_type  TEXT,
+                    town       TEXT
+                )
+            """)
+            # Bulk upsert: only insert if atco_code not already present
+            # (first-seen coordinate wins; NaPTAN metadata can update
+            # name/stop_type/town later without overwriting lat/lon).
+            temp_table = "_tmp_stop_coords_bus"
+            wcur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            wcur.execute(f"CREATE TEMP TABLE {temp_table} (atco_code TEXT, lat REAL, lon REAL) ON COMMIT DROP")
+            with wcur.copy(f"COPY {temp_table} (atco_code, lat, lon) FROM STDIN") as copy:
+                for r in stop_coords:
+                    copy.write_row(r)
+            wcur.execute(f"""
+                INSERT INTO stop_coords (atco_code, lat, lon)
+                SELECT DISTINCT ON (atco_code) atco_code, lat, lon FROM {temp_table}
+                ON CONFLICT (atco_code) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon
+            """)
+            wconn.commit()
+            wconn.close()
 
     def load_busdata( self ):
         """Query the SQLite DB and build a BusData object."""
