@@ -92,6 +92,43 @@ describe('useBusStops', () => {
     });
   });
 
+  it('forwards bbox to the API', async () => {
+    const bbox = '53.0,-3.5,55.0,-2.0';
+    const { result } = renderHook(() => useBusStops({ bbox }));
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(getBusStopsWithFallback).toHaveBeenCalledWith({ bbox });
+  });
+
+  it('forwards both classification and bbox to the API', async () => {
+    const bbox = '53.0,-3.5,55.0,-2.0';
+    const { result } = renderHook(() =>
+      useBusStops({ classification: 'hub', bbox }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(getBusStopsWithFallback).toHaveBeenCalledWith({
+      classification: 'hub',
+      bbox,
+    });
+  });
+
+  it('does not include bbox in API call when bbox is null', async () => {
+    const { result } = renderHook(() => useBusStops({ bbox: null }));
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(getBusStopsWithFallback).toHaveBeenCalledWith({});
+  });
+
   it('refetch triggers a new API call', async () => {
     const { result } = renderHook(() => useBusStops());
 
@@ -138,5 +175,27 @@ describe('useBusStops', () => {
     expect(getBusStopsWithFallback).toHaveBeenLastCalledWith({
       classification: 'interchange',
     });
+  });
+
+  it('re-fetches when bbox changes', async () => {
+    const { result, rerender } = renderHook(
+      ({ bbox }) => useBusStops({ bbox }),
+      { initialProps: { bbox: undefined } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(getBusStopsWithFallback).toHaveBeenCalledTimes(1);
+
+    const newBbox = '53.0,-3.5,55.0,-2.0';
+    rerender({ bbox: newBbox });
+
+    await waitFor(() => {
+      expect(getBusStopsWithFallback).toHaveBeenCalledTimes(2);
+    });
+
+    expect(getBusStopsWithFallback).toHaveBeenLastCalledWith({ bbox: newBbox });
   });
 });

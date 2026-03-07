@@ -12,10 +12,11 @@ import { getBusStopsWithFallback } from '../services/busStopsApi';
  *
  * @param {Object}  [options]
  * @param {string}  [options.classification] - Optional classification filter
+ * @param {string}  [options.bbox]           - Viewport "south,west,north,east"
  * @param {boolean} [options.enabled=true]   - Set false to disable fetching
  * @returns {{ stops: Array, loading: boolean, error: string|null, refetch: Function }}
  */
-export function useBusStops({ classification, enabled = true } = {}) {
+export function useBusStops({ classification, bbox, enabled = true } = {}) {
   const [stops, setStops] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -28,7 +29,9 @@ export function useBusStops({ classification, enabled = true } = {}) {
     setError(null);
 
     try {
-      const data = await getBusStopsWithFallback({ classification });
+      const opts = { classification };
+      if (bbox != null) opts.bbox = bbox;
+      const data = await getBusStopsWithFallback(opts);
       // Deduplicate by stop id (ATCO code) — the API can return duplicates
       const seen = new Set();
       const unique = data.filter((s) => {
@@ -43,7 +46,7 @@ export function useBusStops({ classification, enabled = true } = {}) {
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [classification]);
+  }, [classification, bbox]);
 
   useEffect(() => {
     if (enabled) {
