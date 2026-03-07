@@ -880,6 +880,106 @@ async def bus_live_operator(
         for line_ref, dest, lat_v, lon_v, _operator, delay_s in results
     ]
 
+# ── Upcoming timetabled departures from a bus stop ──────────────────
+
+
+@app.get("/bus/arrivals/{stop_code}")
+async def bus_arrivals(stop_code: str, limit: int = 5):
+    """Return upcoming timetabled departures from a bus stop.
+
+    Path param:
+        stop_code: ATCO code of the stop (e.g. ``2500LAA12000``)
+
+    Query param:
+        limit: max results to return (default 5)
+
+    Response: JSON list of
+        ``{line, destination, scheduledTime, status}``
+    where ``status`` is always ``"On time"`` (real-time delay data is
+    delivered via the WebSocket live-updates channel, not this endpoint).
+    """
+    from fastapi.responses import JSONResponse
+    from time_utils import seconds_to_time
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    now_secs = now.hour * 3600 + now.minute * 60 + now.second
+
+    try:
+        merged, _router, _walking = get_router_for_date(date_str, start_time=now_secs)
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Build ATCO code → merged stop index reverse map
+    atco_to_idx: Dict[str, int] = {}
+    for i in range(len(merged.stop_to_routes)):
+        code = merged.get_atco_code(i)
+        if code:
+            atco_to_idx[code] = i
+
+    stop_index = atco_to_idx.get(stop_code)
+    if stop_index is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Stop not found: {stop_code}"},
+        )
+
+    # Window: now → now + 90 minutes
+    window_end = now_secs + 5400
+    departures: List[Dict[str, Any]] = []
+    seen_journeys: set = set()
+
+    for route_idx in merged.stop_to_routes[stop_index]:
+        if route_idx >= len(merged.route_journeys):
+            continue
+        meta = (
+            (merged.route_metadata[route_idx] or {})
+            if route_idx < len(merged.route_metadata)
+            else {}
+        )
+        raw_line = (meta.get("line_name") or "").strip()
+        line = raw_line.split(":")[-1] if raw_line else "?"
+
+        for j_idx in merged.route_journeys[route_idx]:
+            if j_idx in seen_journeys:
+                continue
+            seen_journeys.add(j_idx)
+
+            jsi = (
+                merged.journey_stop_index[j_idx]
+                if j_idx < len(merged.journey_stop_index)
+                else {}
+            )
+            if stop_index not in jsi:
+                continue
+            pos = jsi[stop_index]
+            jt = merged.journey_times[j_idx]
+            if pos >= len(jt):
+                continue
+
+            dep_time = jt[pos][2]  # (stop_int, arr_time, dep_time)
+            if dep_time < now_secs or dep_time > window_end:
+                continue
+
+            # Destination = name of the last stop in this journey
+            dest_stop_int = jt[-1][0]
+            destination = (
+                merged.stop_metadata[dest_stop_int]
+                if dest_stop_int < len(merged.stop_metadata)
+                else ""
+            ) or "Unknown"
+
+            departures.append({
+                "line": line,
+                "destination": destination,
+                "scheduledTime": seconds_to_time(int(dep_time)),
+                "status": "On time",
+            })
+
+    departures.sort(key=lambda d: d["scheduledTime"])
+    return departures[:limit]
+
+
 # Global cache for (merged, router, walking) by (date, AM/PM bucket)
 _router_cache = {}
 _router_cache_lock = threading.Lock()

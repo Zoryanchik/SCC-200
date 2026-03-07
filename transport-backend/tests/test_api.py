@@ -557,4 +557,136 @@ class TestFormatRouteText:
         assert "Route found" in result
 
 
+# ── /bus/arrivals/{stop_code} ────────────────────────────────────────
+
+from datetime import datetime as _real_datetime  # noqa: E402
+
+
+class TestBusArrivalsEndpoint:
+    """`GET /bus/arrivals/{stop_code}` — timetabled upcoming departures."""
+
+    @staticmethod
+    def _make_merged(stop_code="2500LAA12000", stop_idx=0,
+                     dep_time=43800, line="1", dest="Morecambe"):
+        """Minimal MergedData mock with one route/journey serving *stop_code*."""
+        merged = MagicMock()
+        # map stop index → ATCO code (only stop_idx returns stop_code)
+        merged.get_atco_code.side_effect = lambda i: stop_code if i == stop_idx else None
+        merged.stop_to_routes = [[0]]           # stop 0 → route 0
+        merged.route_journeys = [[0]]           # route 0 → journey 0
+        merged.route_metadata = [{"line_name": f"PREFIX:{line}"}]
+        # journey 0: stop at pos 0, then terminal at pos 1
+        merged.journey_times = [
+            [(stop_idx, dep_time, dep_time), (1, dep_time + 300, dep_time + 300)],
+        ]
+        merged.journey_stop_index = [{stop_idx: 0}]  # stop_idx at position 0
+        merged.stop_metadata = [stop_code, dest]
+        return merged
+
+    def _patch(self, merged, fixed_now=_real_datetime(2026, 3, 7, 12, 0, 0)):
+        """Return a context-manager stack that freezes datetime and merged."""
+        from contextlib import ExitStack
+        import api as _api
+
+        stack = ExitStack()
+        mock_dt = stack.enter_context(patch("api.datetime"))
+        mock_dt.now.return_value = fixed_now
+        stack.enter_context(
+            patch.object(_api, "get_router_for_date",
+                         return_value=(merged, MagicMock(), MagicMock()))
+        )
+        return stack
+
+    # now_secs = 12*3600 = 43200; window_end = 43200+5400 = 48600
+    def test_returns_upcoming_arrivals(self, client: TestClient):
+        merged = self._make_merged(dep_time=43800)  # 12:10:00 — in window
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["line"] == "1"
+        assert data[0]["scheduledTime"] == "12:10:00"
+        assert data[0]["destination"] == "Morecambe"
+
+    def test_response_has_required_fields(self, client: TestClient):
+        merged = self._make_merged(dep_time=43800)
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 200
+        arrival = resp.json()[0]
+        assert "line" in arrival
+        assert "destination" in arrival
+        assert "scheduledTime" in arrival
+        assert "status" in arrival
+        assert arrival["status"] == "On time"
+
+    def test_404_for_unknown_stop(self, client: TestClient):
+        merged = self._make_merged()
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/NONEXISTENT_STOP")
+        assert resp.status_code == 404
+        assert "error" in resp.json()
+
+    def test_503_when_backend_unavailable(self, client: TestClient):
+        with patch.object(api_module, "get_router_for_date",
+                          side_effect=Exception("no data")):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 503
+
+    def test_excludes_past_departures(self, client: TestClient):
+        merged = self._make_merged(dep_time=36000)  # 10:00:00 — before now(12:00)
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_excludes_far_future_departures(self, client: TestClient):
+        merged = self._make_merged(dep_time=50000)  # ~13:53 — after window end(13:30)
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_respects_limit_param(self, client: TestClient):
+        merged = MagicMock()
+        merged.get_atco_code.side_effect = lambda i: "2500LAA12000" if i == 0 else None
+        merged.stop_to_routes = [[0]]
+        merged.route_journeys = [[0, 1, 2]]
+        merged.route_metadata = [{"line_name": "1"}]
+        merged.journey_times = [
+            [(0, 43800, 43800), (1, 44100, 44100)],
+            [(0, 44400, 44400), (1, 44700, 44700)],
+            [(0, 45000, 45000), (1, 45300, 45300)],
+        ]
+        merged.journey_stop_index = [{0: 0}, {0: 0}, {0: 0}]
+        merged.stop_metadata = ["Stop A", "Morecambe"]
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000?limit=2")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2
+
+    def test_results_sorted_by_time(self, client: TestClient):
+        merged = MagicMock()
+        merged.get_atco_code.side_effect = lambda i: "2500LAA12000" if i == 0 else None
+        merged.stop_to_routes = [[0]]
+        merged.route_journeys = [[0, 1]]
+        merged.route_metadata = [{"line_name": "1"}]
+        # journey 1 departs before journey 0
+        merged.journey_times = [
+            [(0, 45000, 45000), (1, 45300, 45300)],
+            [(0, 43800, 43800), (1, 44100, 44100)],
+        ]
+        merged.journey_stop_index = [{0: 0}, {0: 0}]
+        merged.stop_metadata = ["Stop A", "Dest"]
+        with self._patch(merged):
+            resp = client.get("/bus/arrivals/2500LAA12000")
+        assert resp.status_code == 200
+        times = [a["scheduledTime"] for a in resp.json()]
+        assert times == sorted(times)
+
+    def test_endpoint_in_openapi_schema(self, client: TestClient):
+        schema = client.get("/openapi.json").json()
+        assert "/bus/arrivals/{stop_code}" in schema["paths"]
 
