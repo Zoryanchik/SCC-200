@@ -68,12 +68,21 @@ export function useRouteLine() {
         }
       }
 
-      // Turn ON — determine which backend "line" to request. If the
-      // caller provided a server-side matched route id prefer that
-      // exact identifier so the backend can return the precise variant.
+      // Turn ON — determine which backend "line" to request. There
+      // are three possibilities:
+      // 1. The caller provided a matchedJourneyId — in which case we
+      //    request the journey-ordered endpoint.
+      // 2. The caller provided a matchedRouteId (full route id) —
+      //    request the by-id endpoint.
+      // 3. Otherwise request by short line name.
       const fetchLine = (opts && typeof opts.matchedRouteId === 'string' && opts.matchedRouteId.trim())
         ? String(opts.matchedRouteId).trim()
         : String(line);
+      const fetchOpts = {};
+      if (opts && typeof opts.matchedJourneyId === 'string' && opts.matchedJourneyId.trim()) {
+        // Ask the service for a journey-ordered geometry
+        fetchOpts.journeyId = String(opts.matchedJourneyId).trim();
+      }
 
       // Use cache keyed by the fetchLine so operator-scoped lookups
       // and full-route-id lookups don't collide.
@@ -83,8 +92,9 @@ export function useRouteLine() {
       let fullData = cacheRef.current.get(fetchCacheKey);
       if (!fullData) {
         try {
-          // Request using the chosen fetchLine (may be a full route id)
-          fullData = await fetchRouteLine(fetchLine, operator);
+          // Request using the chosen fetchLine (may be a full route id or
+          // a journey id when fetchOpts.journeyId is present).
+          fullData = await fetchRouteLine(fetchLine, operator, fetchOpts);
           // Cache the full unfiltered response for future use under
           // the fetchCacheKey.
           cacheRef.current.set(fetchCacheKey, fullData);

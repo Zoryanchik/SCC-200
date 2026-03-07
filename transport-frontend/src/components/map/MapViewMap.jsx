@@ -308,14 +308,24 @@ export default function MapViewMap({
 											// exact variant (backend treats full ids as
 											// exact lookups).  We still pass preferredLastStop
 											// for additional filtering when useful.
-											const matchedRouteId = marker.meta?.matched_route_id || marker.matched_route_id || null;
+												const matchedRouteId = marker.meta?.matched_route_id || marker.matched_route_id || null;
+												const matchedJourneyId = marker.meta?.matched_journey_id || marker.matched_journey_id || null;
 
-											let routeData = null;
-											try {
-												routeData = await toggleRoute(String(marker.routeNumber), usedOp, { preferredLastStop: preferredDest, matchedRouteId });
-											} catch (e) {
-												// swallow - toggleRoute already logs failures
-											}
+												let routeData = null;
+												try {
+													// Pass matchedJourneyId when present so the hook
+													// requests a journey-ordered geometry from the
+													// backend.  If not present we fall back to
+													// matchedRouteId (full route id) or the short
+													// line name.
+													routeData = await toggleRoute(String(marker.routeNumber), usedOp, {
+														preferredLastStop: preferredDest,
+														matchedRouteId,
+														matchedJourneyId,
+													});
+												} catch (e) {
+													// swallow - toggleRoute already logs failures
+												}
 
 											// If we received route data (i.e. toggled ON), compute bounds and fit map
 											if (routeData && mapRef.current) {

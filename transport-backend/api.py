@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
         )
     # Configure and start the WebSocket/STOMP live-updates broker
     try:
-        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10))
+        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=30))
         await ws_broker.start_polling()
     except Exception as exc:  # pragma: no cover
         logger.warning("WebSocket broker startup failed: %s", exc)
@@ -1010,7 +1010,41 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
         )[:8]
 
         best_stops = None
-        best_gap = float("inf")
+        best_score = float("inf")
+
+        def _path_metrics(stops):
+            """Return (mean_gap, total_len, straight_len, reversals).
+
+            reversals counts adjacent-segment direction flips (cosine<0)
+            to penalise zig-zagging stop sequences.
+            """
+            if len(stops) < 2:
+                return (float('inf'), 0.0, 0.0, 0)
+            total = 0.0
+            maxgap = 0.0
+            pts = [(s["lat"], s["lon"]) for s in stops if s.get("lat") is not None and s.get("lon") is not None]
+            for a, b in zip(pts, pts[1:]):
+                d = _gap({"lat": a[0], "lon": a[1]}, {"lat": b[0], "lon": b[1]})
+                total += d
+                if d > maxgap:
+                    maxgap = d
+            straight = _gap({"lat": pts[0][0], "lon": pts[0][1]}, {"lat": pts[-1][0], "lon": pts[-1][1]})
+            # reversals: count sign flips in cosine of angle between successive segments
+            reversals = 0
+            import math as _math
+            vecs = []
+            for a, b in zip(pts, pts[1:]):
+                vecs.append((b[0] - a[0], b[1] - a[1]))
+            for v1, v2 in zip(vecs, vecs[1:]):
+                m1 = _math.hypot(v1[0], v1[1])
+                m2 = _math.hypot(v2[0], v2[1])
+                if m1 > 0 and m2 > 0:
+                    dp = (v1[0] * v2[0] + v1[1] * v2[1]) / (m1 * m2)
+                    if dp < 0.0:
+                        reversals += 1
+            mean_gap = _mean_gap(stops)
+            return (mean_gap, total, straight, reversals)
+
         for j in candidates:
             s = _journey_stops(j)
             # Many TXC journeys are round-trips (out+back in one sequence).
@@ -1018,9 +1052,17 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
             s = _split_at_turnaround(s)
             if len(s) < 10:
                 continue
-            gap = _mean_gap(s)
-            if gap < best_gap:
-                best_gap = gap
+            mean_gap, total, straight, reversals = _path_metrics(s)
+            # Composite score: base on mean gap, penalise reversals and
+            # high path/straight ratios (zig-zag / branchiness).
+            ratio_pen = 0.0
+            if straight > 0:
+                ratio = total / straight
+                if ratio > 1.0:
+                    ratio_pen = (ratio - 1.0)
+            score = mean_gap + reversals * 100.0 + ratio_pen * 1000.0
+            if score < best_score:
+                best_score = score
                 best_stops = s
 
         if best_stops and len(best_stops) >= 2:
@@ -1028,14 +1070,294 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
             clean = [{k: v for k, v in s.items() if k != "_arr"} for s in best_stops]
             meta = merged.route_metadata[r_idx] or {}
             route_id = meta.get("route_id", f"route_{r_idx}")
-            # If the merged data contains a route track (mapping/<track>), include
-            # it as `geometry` so the frontend can draw the precise track.
+
+            # Build geometry from the cleaned single-direction stop list so
+            # the returned polyline follows consecutive stops only. This
+            # avoids visual zig-zags caused by round-trip / out-and-back
+            # journeys whose raw route_tracks or route_stops include both
+            # halves interleaved.
             geom = None
-            if hasattr(merged, 'route_tracks') and r_idx < len(merged.route_tracks):
-                rt = merged.route_tracks[r_idx]
-                if rt and len(rt) > 1:
-                    # Ensure it's a list of [lat, lon] pairs (JSON-friendly)
-                    geom = [[float(lat), float(lon)] for (lat, lon) in rt]
+            stops_geom = None
+            try:
+                if isinstance(clean, list) and len(clean) > 0:
+                    stops_geom = [[float(s["lat"]), float(s["lon"])] for s in clean if s.get("lat") is not None and s.get("lon") is not None]
+                    if len(stops_geom) < 2:
+                        stops_geom = None
+            except Exception:
+                stops_geom = None
+
+            # If a route_track exists, compare quality metrics between the
+            # stops-based polyline and the stored route track. Prefer the
+            # geometry with fewer reversals / lower path->straight ratio.
+            def _score_coords(coords):
+                # coords: [[lat, lon], ...]
+                try:
+                    if not coords or len(coords) < 2:
+                        return float('inf')
+                    # total path length and straight distance
+                    total = 0.0
+                    import math as _math
+                    for a, b in zip(coords, coords[1:]):
+                        dlat = (b[0] - a[0]) * 111_320
+                        dlon = (b[1] - a[1]) * 111_320 * _math.cos(_math.radians(a[0]))
+                        total += _math.hypot(dlat, dlon)
+                    a0 = coords[0]; a1 = coords[-1]
+                    dlat = (a1[0] - a0[0]) * 111_320
+                    dlon = (a1[1] - a0[1]) * 111_320 * _math.cos(_math.radians(a0[0]))
+                    straight = _math.hypot(dlat, dlon)
+                    ratio = total / straight if straight > 0 else float('inf')
+                    # reversals count
+                    reversals = 0
+                    vecs = []
+                    for a, b in zip(coords, coords[1:]):
+                        vecs.append((b[0] - a[0], b[1] - a[1]))
+                    for v1, v2 in zip(vecs, vecs[1:]):
+                        m1 = _math.hypot(v1[0], v1[1])
+                        m2 = _math.hypot(v2[0], v2[1])
+                        if m1 > 0 and m2 > 0:
+                            dp = (v1[0] * v2[0] + v1[1] * v2[1]) / (m1 * m2)
+                            if dp < 0.0:
+                                reversals += 1
+                    # composite score (lower is better)
+                    return ratio * 1000.0 + reversals * 100.0
+                except Exception:
+                    return float('inf')
+
+            chosen_geom = None
+            stops_score = _score_coords(stops_geom) if stops_geom else float('inf')
+            track_score = float('inf')
+            try:
+                if hasattr(merged, 'route_tracks') and r_idx < len(merged.route_tracks):
+                    rt = merged.route_tracks[r_idx]
+                    if rt and len(rt) > 1:
+                        track_coords = [[float(lat), float(lon)] for (lat, lon) in rt]
+                        track_score = _score_coords(track_coords)
+                        # pick the geometry with the lower score
+                        if stops_score <= track_score:
+                            chosen_geom = stops_geom
+                        else:
+                            chosen_geom = track_coords
+            except Exception:
+                chosen_geom = stops_geom if stops_geom else None
+
+            geom = chosen_geom
+            # If the chosen geometry is the stops-derived polyline but
+            # still exhibits many reversals or a high path/straight
+            # ratio, apply a conservative simplification that removes
+            # tiny back-and-forth points. This helps reduce Z-shaped
+            # visual artifacts caused by stoplists which interleave
+            # overlapping halves.
+            def _compute_ratio_reversals(coords):
+                import math as _math
+                if not coords or len(coords) < 2:
+                    return (float('inf'), 0)
+                total = 0.0
+                for a, b in zip(coords, coords[1:]):
+                    dlat = (b[0] - a[0]) * 111_320
+                    dlon = (b[1] - a[1]) * 111_320 * _math.cos(_math.radians(a[0]))
+                    total += _math.hypot(dlat, dlon)
+                a0 = coords[0]; a1 = coords[-1]
+                dlat = (a1[0] - a0[0]) * 111_320
+                dlon = (a1[1] - a0[1]) * 111_320 * _math.cos(_math.radians(a0[0]))
+                straight = _math.hypot(dlat, dlon)
+                ratio = total / straight if straight > 0 else float('inf')
+                reversals = 0
+                vecs = []
+                for a, b in zip(coords, coords[1:]):
+                    vecs.append((b[0] - a[0], b[1] - a[1]))
+                for v1, v2 in zip(vecs, vecs[1:]):
+                    m1 = _math.hypot(v1[0], v1[1])
+                    m2 = _math.hypot(v2[0], v2[1])
+                    if m1 > 0 and m2 > 0:
+                        dp = (v1[0] * v2[0] + v1[1] * v2[1]) / (m1 * m2)
+                        if dp < 0.0:
+                            reversals += 1
+                return (ratio, reversals)
+
+            def _simplify_small_reversals(coords, seg_threshold_m=150.0):
+                """Remove interior points that create tiny reversals where
+                both adjacent segments are shorter than seg_threshold_m.
+                Returns a new coords list.
+                """
+                import math as _math
+                if not coords or len(coords) < 3:
+                    return coords
+                out = [coords[0]]
+                for i in range(1, len(coords) - 1):
+                    a = coords[i - 1]
+                    b = coords[i]
+                    c = coords[i + 1]
+                    # vectors
+                    v1 = ((b[0] - a[0]) * 111_320, (b[1] - a[1]) * 111_320 * _math.cos(_math.radians(a[0])))
+                    v2 = ((c[0] - b[0]) * 111_320, (c[1] - b[1]) * 111_320 * _math.cos(_math.radians(b[0])))
+                    m1 = _math.hypot(v1[0], v1[1])
+                    m2 = _math.hypot(v2[0], v2[1])
+                    dp = None
+                    if m1 > 0 and m2 > 0:
+                        dp = (v1[0] * v2[0] + v1[1] * v2[1]) / (m1 * m2)
+                    # if this is a reversal and both segments are small,
+                    # drop the middle point
+                    if dp is not None and dp < 0.0 and m1 < seg_threshold_m and m2 < seg_threshold_m:
+                        # skip b (do not append)
+                        continue
+                    out.append(b)
+                out.append(coords[-1])
+                return out
+
+            def _rdp_simplify(coords, eps_m=100.0):
+                """Ramer–Douglas–Peucker simplification operating in metres.
+                coords: [[lat, lon], ...]
+                eps_m: tolerance in metres
+                Returns simplified coords preserving endpoints.
+                """
+                import math as _math
+                if not coords or len(coords) < 3:
+                    return coords
+
+                # helper: distance from point p to segment ab (in metres)
+                def _pt_seg_dist(p, a, b):
+                    # convert to metres using lat-based scaling
+                    ax, ay = a[0], a[1]
+                    bx, by = b[0], b[1]
+                    px, py = p[0], p[1]
+                    # project to flat metres (approx)
+                    cos_lat = _math.cos(_math.radians((ax + bx) / 2.0))
+                    ax_m = ax * 111320.0
+                    ay_m = ay * 111320.0 * cos_lat
+                    bx_m = bx * 111320.0
+                    by_m = by * 111320.0 * cos_lat
+                    px_m = px * 111320.0
+                    py_m = py * 111320.0 * cos_lat
+                    # segment ab vector
+                    vx = bx_m - ax_m
+                    vy = by_m - ay_m
+                    if vx == 0 and vy == 0:
+                        return _math.hypot(px_m - ax_m, py_m - ay_m)
+                    t = ((px_m - ax_m) * vx + (py_m - ay_m) * vy) / (vx * vx + vy * vy)
+                    t = max(0.0, min(1.0, t))
+                    proj_x = ax_m + t * vx
+                    proj_y = ay_m + t * vy
+                    return _math.hypot(px_m - proj_x, py_m - proj_y)
+
+                # recursive RDP
+                def _rdp(points):
+                    if len(points) < 3:
+                        return points
+                    a = points[0]
+                    b = points[-1]
+                    best_idx = -1
+                    best_dist = -1.0
+                    for i in range(1, len(points) - 1):
+                        d = _pt_seg_dist(points[i], a, b)
+                        if d > best_dist:
+                            best_dist = d; best_idx = i
+                    if best_dist > eps_m:
+                        left = _rdp(points[: best_idx + 1])
+                        right = _rdp(points[best_idx:])
+                        return left[:-1] + right
+                    else:
+                        return [a, b]
+
+                return _rdp(coords)
+
+            # Only attempt simplification when the stops-derived geometry
+            # was used and it looks noisy.
+            try:
+                if geom and stops_geom is not None:
+                    ratio, reversals = _compute_ratio_reversals(geom)
+                    if reversals >= 8 or (ratio != float('inf') and ratio > 1.12):
+                        simplified = _simplify_small_reversals(geom, seg_threshold_m=150.0)
+                        # accept simplified geometry only if it reduces reversals
+                        r2, rev2 = _compute_ratio_reversals(simplified)
+                        if rev2 < reversals:
+                            geom = simplified
+            except Exception:
+                pass
+
+            # Gap-filling: where consecutive stop pairs are far apart, try
+            # to replace the straight jump with the corresponding subsegment
+            # from merged.route_tracks (when available). This reduces long
+            # straight-line jumps between stops.
+            try:
+                if geom and stops_geom is not None and hasattr(merged, 'route_tracks') and r_idx < len(merged.route_tracks):
+                    rt = merged.route_tracks[r_idx]
+                    if rt and len(rt) > 1:
+                        rt_coords = [[float(lat), float(lon)] for (lat, lon) in rt]
+                        def _dist_m(a, b):
+                            import math as _math
+                            dlat = (b[0]-a[0]) * 111_320
+                            dlon = (b[1]-a[1]) * 111_320 * _math.cos(_math.radians(a[0]))
+                            return _math.hypot(dlat, dlon)
+
+                        gap_threshold_m = 1000.0
+                        new_geom = []
+                        for i in range(len(stops_geom)-1):
+                            a = stops_geom[i]
+                            b = stops_geom[i+1]
+                            d = _dist_m(a, b)
+                            if d > gap_threshold_m:
+                                # find nearest indices on the route_track for a and b
+                                def _nearest_idx(pt):
+                                    best = 0; bestd = float('inf')
+                                    for j, rc in enumerate(rt_coords):
+                                        dd = _dist_m(pt, rc)
+                                        if dd < bestd:
+                                            bestd = dd; best = j
+                                    return best, bestd
+                                ia, da = _nearest_idx(a)
+                                ib, db = _nearest_idx(b)
+                                # require the track endpoints to be reasonably close
+                                if da < 3000 and db < 3000:
+                                    if ia <= ib:
+                                        seg = rt_coords[ia:ib+1]
+                                    else:
+                                        seg = list(reversed(rt_coords[ib:ia+1]))
+                                    if seg:
+                                        if not new_geom:
+                                            new_geom.extend(seg)
+                                        else:
+                                            # avoid duplicate point when appending
+                                            new_geom.extend(seg[1:])
+                                        continue
+                            # fallback: append the stop coordinate
+                            if not new_geom or new_geom[-1] != a:
+                                new_geom.append(a)
+                        # append final stop
+                        if stops_geom:
+                            if not new_geom or new_geom[-1] != stops_geom[-1]:
+                                new_geom.append(stops_geom[-1])
+                        if len(new_geom) > 1:
+                            geom = new_geom
+            except Exception:
+                pass
+
+            # If the chosen geometry is still very winding (large path/straight
+            # ratio or many reversals) we attempt an additional conservative
+            # RDP simplification in metres. Accept it only if it reduces the
+            # reversal count or substantially lowers the path/straight ratio.
+            try:
+                if geom:
+                    r_ratio, r_revs = _compute_ratio_reversals(geom)
+                    if (r_ratio != float('inf') and r_ratio > 2.0) or (r_revs is not None and r_revs >= 10):
+                        # Try a couple of epsilons (m) from 60→120 to find a good
+                        # trade-off that reduces zig-zags but keeps route shape.
+                        best_geom = geom
+                        best_score = r_ratio * 1000.0 + r_revs * 100.0
+                        for eps in (60.0, 100.0, 140.0):
+                            try:
+                                cand = _rdp_simplify(geom, eps_m=eps)
+                                cr, crev = _compute_ratio_reversals(cand)
+                                score = (cr if cr != float('inf') else 1e9) * 1000.0 + crev * 100.0
+                                if score < best_score:
+                                    best_score = score
+                                    best_geom = cand
+                            except Exception:
+                                continue
+                        # adopt best candidate if it's different
+                        if best_geom is not geom:
+                            geom = best_geom
+            except Exception:
+                pass
 
             variants.append({"route_id": route_id, "stops": clean, "geometry": geom})
 
@@ -1075,6 +1397,23 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
                 if mg <= best * 2.0
             ]
 
+        # Deduplicate by route_id to avoid returning the same route twice
+        # (can occur when multiple candidate journeys produce identical
+        # stop signatures). Keep the first occurrence.
+        seen_route_ids = set()
+        deduped = []
+        for v in unique:
+            try:
+                rid = v.get("route_id")
+            except Exception:
+                rid = None
+            if rid and rid in seen_route_ids:
+                continue
+            if rid:
+                seen_route_ids.add(rid)
+            deduped.append(v)
+        unique = deduped
+
         # Sort by stop count descending (longest clean routes first),
         # take top 3 to avoid visual clutter.
         unique.sort(key=lambda v: len(v["stops"]), reverse=True)
@@ -1088,6 +1427,131 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
     except Exception:
         pass
     return result
+
+
+@app.get("/routes/by-id/{route_id}")
+async def route_by_id(route_id: str):
+    """Return a single route variant by its authoritative route_id.
+
+    Response mirrors the `/routes/line/{line}` shape so the frontend can
+    reuse the same code paths: { "line": route_id, "variants": [ {..} ] }
+    """
+    from fastapi.responses import JSONResponse
+
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        merged, _router, walking = get_router_for_date(today)
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Find the matching route index by exact route_id
+    found_idx = None
+    for r_idx, meta in enumerate(merged.route_metadata):
+        if not meta:
+            continue
+        if meta.get("route_id") == route_id:
+            found_idx = r_idx
+            break
+
+    if found_idx is None:
+        return {"line": route_id, "variants": []}
+
+    # Build stops from merged.route_stops (canonical route-level stop list).
+    stops = []
+    try:
+        route_stop_ids = merged.route_stops[found_idx] if found_idx < len(merged.route_stops) else []
+        for sid in route_stop_ids:
+            try:
+                atco = merged.get_atco_code(sid)
+                coords = walking.get_loc_coords(sid)
+                if not atco or not coords:
+                    continue
+                name = merged.stop_metadata[sid] if sid < len(merged.stop_metadata) else atco
+                stops.append({"name": name or atco, "lat": float(coords[0]), "lon": float(coords[1]), "atco_code": atco})
+            except Exception:
+                continue
+    except Exception:
+        stops = []
+
+    # Geometry: prefer merged.route_tracks when present
+    geom = None
+    try:
+        if hasattr(merged, 'route_tracks') and found_idx < len(merged.route_tracks):
+            rt = merged.route_tracks[found_idx]
+            if rt and len(rt) > 1:
+                geom = [[float(lat), float(lon)] for (lat, lon) in rt]
+    except Exception:
+        geom = None
+
+    variant = {"route_id": route_id, "stops": stops, "geometry": geom}
+    return {"line": route_id, "variants": [variant]}
+
+
+@app.get("/routes/by-journey/{journey_id}")
+async def route_by_journey(journey_id: str):
+    """Return a single route variant by journey_id using the journey's
+    stop order. This is intended for live-vehicle displays where the
+    matched_journey_id is available and the frontend wants the exact
+    journey-ordered geometry.
+
+    Response mirrors the `/routes/line/{line}` shape so the frontend can
+    reuse the same code paths: { "line": journey_id, "variants": [ {..} ] }
+    """
+    from fastapi.responses import JSONResponse
+
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        merged, _router, walking = get_router_for_date(today)
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Find the matching journey index by exact journey_id
+    found_idx = None
+    for j_idx, jmeta in enumerate(merged.journey_metadata):
+        if not jmeta:
+            continue
+        if jmeta.get("journey_id") == journey_id:
+            found_idx = j_idx
+            break
+
+    if found_idx is None:
+        return {"line": journey_id, "variants": []}
+
+    # Build stops from the journey_times (ordered sequence)
+    stops = []
+    try:
+        jt = merged.journey_times[found_idx] if found_idx < len(merged.journey_times) else []
+        for sid, atime, dtime in jt:
+            try:
+                atco = merged.get_atco_code(sid)
+                coords = None
+                try:
+                    coords = walking.get_loc_coords(sid)
+                except Exception:
+                    coords = None
+                if not atco or not coords:
+                    # still include name/atco where possible, but skip coords
+                    name = merged.stop_metadata[sid] if sid < len(merged.stop_metadata) else atco
+                    stops.append({"name": name or atco, "lat": None, "lon": None, "atco_code": atco})
+                    continue
+                name = merged.stop_metadata[sid] if sid < len(merged.stop_metadata) else atco
+                stops.append({"name": name or atco, "lat": float(coords[0]), "lon": float(coords[1]), "atco_code": atco, "sched_arr": atime, "sched_dep": dtime})
+            except Exception:
+                continue
+    except Exception:
+        stops = []
+
+    # Geometry: build from journey-ordered stops
+    geom = None
+    try:
+        geom = [[s["lat"], s["lon"]] for s in stops if s.get("lat") is not None and s.get("lon") is not None]
+        if len(geom) < 2:
+            geom = None
+    except Exception:
+        geom = None
+
+    variant = {"route_id": journey_id, "stops": stops, "geometry": geom}
+    return {"line": journey_id, "variants": [variant]}
 
 
 # — Static files & frontend ————————————————————————————————
@@ -1259,9 +1723,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
             # Exact match on the short line name to avoid e.g. '1' matching 'N1' or '1A'
             if simple_line != line_q:
                 continue
-        dest_display = (jmeta.get("destination_display") or "").lower()
-        if dest_q and dest_q not in dest_display:
-            continue
+        # Do not filter candidates by destination text — UI/UX prefers
+        # permissive matching based on route geometry and distance only.
+        # (Previously we filtered by dest_display; removed per request.)
         try:
             jt = merged.journey_times[j_id]
             if not jt:
@@ -1317,32 +1781,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         dist_m, progress = _project_onto_track(lat_v, lon_v, track, cum)
 
         # Skip if vehicle is too far from this route's track (> 800m)
+        # We keep the geometry-distance check (route mismatch), but remove
+        # time- and destination-based filters so the algorithm is more
+        # permissive and relies on geometry & progress interpolation.
         if dist_m > 800:
-            continue
-
-        # Skip if journey hasn't started yet: bus near start but before departure
-        if progress < 0.05 and now_seconds < start_dep - 300:
-            continue
-
-        # Skip if journey is finished: bus near end and well past last arrival
-        if progress > 0.95 and now_seconds > end_arr + 300:
-            continue
-
-        # Skip if the journey is over and bus is NOT near the end — it can't
-        # be this journey (e.g. bus is at a terminus that happens to be near
-        # the start of a different, already-completed journey).
-        if now_seconds > end_arr + 300 and progress < 0.85:
-            continue
-
-        # Skip if journey is too far in time (> 2 hours from current window)
-        if now_seconds < start_dep - 7200 or now_seconds > end_arr + 7200:
-            continue
-
-        # Skip if the journey duration has fully elapsed and bus isn't
-        # near the final stop — avoids matching short-distance routes
-        # whose terminus is near the bus's current position.
-        journey_dur = end_arr - start_dep
-        if journey_dur > 0 and now_seconds > end_arr + max(600, journey_dur * 0.5):
             continue
 
         # ── 3. Interpolate expected scheduled time from progress ──
@@ -1420,7 +1862,7 @@ def _fetch_all_live_buses() -> list:
         return _live_delay_cache["data"]
     try:
         from bus_live import BusLive
-        bl = BusLive(timeout=10)
+        bl = BusLive(timeout=30)
         # Fetch with a very wide bounding box to get everything
         results = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
         _live_delay_cache["data"] = results

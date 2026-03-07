@@ -20,7 +20,7 @@ Integration
     from ws_server import broker as ws_broker, websocket_endpoint
 
     app.add_api_websocket_route("/ws/live", websocket_endpoint)
-    ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10))
+    ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=30))
     await ws_broker.start_polling()
 """
 
@@ -173,7 +173,7 @@ class StompBroker:
         self._lock: asyncio.Lock = asyncio.Lock()
         self._poll_task: Optional[asyncio.Task] = None
         self._bus_live_factory: Optional[Callable] = None
-        self._poll_interval: float = 15.0
+        self._poll_interval: float = 30.0
         self._poll_lat: float = 54.046
         self._poll_lon: float = -2.798
 
@@ -182,7 +182,7 @@ class StompBroker:
     def configure(
         self,
         bus_live_factory: Optional[Callable] = None,
-        poll_interval: float = 15.0,
+        poll_interval: float = 30.0,
         poll_lat: float = 54.046,
         poll_lon: float = -2.798,
     ) -> None:

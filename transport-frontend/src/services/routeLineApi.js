@@ -16,7 +16,7 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
  * @param {string} [operator] – optional SIRI operator code, e.g. "SCCU"
  * @returns {Promise<{ line: string, variants: Array<{ route_id: string, stops: Array }> }>}
  */
-export async function fetchRouteLine(line, operator = null) {
+export async function fetchRouteLine(line, operator = null, opts = {}) {
   // Debug: log the operator requested so we can trace incorrect matches
   try {
     console.debug(`[routeLineApi] fetchRouteLine requested: line='${line}' operator='${operator}'`);
@@ -35,10 +35,22 @@ export async function fetchRouteLine(line, operator = null) {
   } catch (e) {
     // ignore resolution errors
   }
-  let url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
-  const opToSend = resolvedOp || operator || null;
-  if (opToSend) {
-    url += `?operator=${encodeURIComponent(opToSend)}`;
+  // If the caller explicitly requested a journey-ordered geometry
+  // (opts.journeyId) prefer the by-journey endpoint. Otherwise, if
+  // the caller passed a full authoritative route id (contains ':'),
+  // request the by-id endpoint. Failing that use the line-based
+  // endpoint which returns variants for a short line name.
+  let url;
+  if (opts && typeof opts.journeyId === 'string' && opts.journeyId.trim()) {
+    url = `${API_BASE}/routes/by-journey/${encodeURIComponent(String(opts.journeyId).trim())}`;
+  } else if (String(line).includes(':')) {
+    url = `${API_BASE}/routes/by-id/${encodeURIComponent(line)}`;
+  } else {
+    url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
+    const opToSend = resolvedOp || operator || null;
+    if (opToSend) {
+      url += `?operator=${encodeURIComponent(opToSend)}`;
+    }
   }
   const res = await fetch(url);
   if (!res.ok) {
