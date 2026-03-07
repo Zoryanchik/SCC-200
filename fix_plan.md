@@ -25,10 +25,10 @@ Updated: 2026-03-05
 - [ ] John: train integration!
 
 ## Medium Priority
-- [ ] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
+- [x] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
 - [ ] Live map "Trains xx" and "Bus xx" button on click always shows "Trains 0", "Buses 0" and does not filter right
 - [ ] Refresh only map for live locations, not the whole page
-- [ ] Delay handling for bus
+- [x] Delay handling for bus
 - [ ] Delay handling for train
 - [x] Make weather widget nicer
 - [ ] Add number icon for tracked buses on the map page and make icons smaller
