@@ -51,7 +51,7 @@ Updated: 2026-03-05
 - [x] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
 - [x] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
 - [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
-- [ ] Verify button highlight color toggle works (dark blue + ✓ on click)
+- [x] Verify button highlight color toggle works (dark blue + ✓ on click)
 - [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
 - [ ] Update/write backend tests for `/routes/line/{line}` endpoint
 

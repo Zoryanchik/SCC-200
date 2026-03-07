@@ -390,6 +390,158 @@ describe('BusStopMarker — arrivals on popup open', () => {
   });
 });
 
+// ── BusStopMarker — chip highlight on popup open ────────────────────
+
+describe('BusStopMarker — route chip highlight', () => {
+  const stop = mockStops[0]; // Lancaster Bus Station: lines ['1', '2', '40']
+
+  it('chip buttons have a data-line attribute matching the line name', () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    for (const line of stop.lines) {
+      const btn = document.querySelector(`[data-line="${line}"]`);
+      expect(btn).toBeTruthy();
+    }
+  });
+
+  it('chips start with the bare line name (no checkmark) by default', () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    for (const line of stop.lines) {
+      const btn = document.querySelector(`[data-line="${line}"]`);
+      expect(btn?.textContent).toBe(line);
+    }
+  });
+
+  it('highlights already-active chip with ✓ when popup opens', async () => {
+    const isRouteActive = vi.fn((line) => line === '1');
+    render(<BusStopMarker stop={stop} zoom={16} isRouteActive={isRouteActive} />);
+
+    await act(async () => {
+      capturedPopupHandlers.add?.();
+    });
+
+    await waitFor(() => {
+      const activeBtn = document.querySelector('[data-line="1"]');
+      expect(activeBtn?.textContent).toContain('✓');
+    });
+  });
+
+  it('does not add ✓ to inactive chips when popup opens', async () => {
+    const isRouteActive = vi.fn(() => false);
+    render(<BusStopMarker stop={stop} zoom={16} isRouteActive={isRouteActive} />);
+
+    await act(async () => {
+      capturedPopupHandlers.add?.();
+    });
+
+    // Wait for the effect's setTimeout(0) to fire
+    await waitFor(() => expect(isRouteActive).toHaveBeenCalled());
+
+    for (const line of stop.lines) {
+      const btn = document.querySelector(`[data-line="${line}"]`);
+      expect(btn?.textContent).not.toContain('✓');
+    }
+  });
+
+  it('active chip gets dark-blue background', async () => {
+    const isRouteActive = vi.fn((line) => line === '1');
+    render(<BusStopMarker stop={stop} zoom={16} isRouteActive={isRouteActive} />);
+
+    await act(async () => { capturedPopupHandlers.add?.(); });
+
+    await waitFor(() => {
+      const btn = document.querySelector('[data-line="1"]');
+      // jsdom normalises hex → rgb(); either form is acceptable.
+      expect(btn?.style.background).toMatch(/rgb\(21,\s*101,\s*192\)|#1565C0/);
+    });
+  });
+
+  it('inactive chip retains light-blue background after popup opens', async () => {
+    const isRouteActive = vi.fn((line) => line === '1'); // only '1' is active
+    render(<BusStopMarker stop={stop} zoom={16} isRouteActive={isRouteActive} />);
+
+    await act(async () => { capturedPopupHandlers.add?.(); });
+
+    await waitFor(() => expect(isRouteActive).toHaveBeenCalled());
+
+    const inactiveBtn = document.querySelector('[data-line="2"]');
+    // jsdom normalises hex → rgb(); either form is acceptable.
+    expect(inactiveBtn?.style.background).toMatch(/rgb\(227,\s*242,\s*253\)|#E3F2FD/);
+  });
+
+  it('skips chip sync when no isRouteActive prop provided', async () => {
+    render(<BusStopMarker stop={stop} zoom={16} />);
+
+    await act(async () => { capturedPopupHandlers.add?.(); });
+
+    // Should not throw; chips should remain unchanged
+    for (const line of stop.lines) {
+      const btn = document.querySelector(`[data-line="${line}"]`);
+      expect(btn?.textContent).not.toContain('✓');
+    }
+  });
+});
+
+// ── BusStopLayer — global toggle handler updates chip styles ────────
+
+describe('BusStopLayer — window.__busRouteToggle chip highlight', () => {
+  it('activating a route adds ✓ to matching chip buttons via global handler', async () => {
+    let activeSet = new Set();
+    const isRouteActive = vi.fn((line) => activeSet.has(line));
+    const onToggleRoute = vi.fn(async (line) => { activeSet.add(line); });
+
+    mockZoom = 14;
+    render(<BusStopLayer onToggleRoute={onToggleRoute} isRouteActive={isRouteActive} />);
+
+    // Buttons should be in the DOM (Popup mock always renders children)
+    const btn = document.querySelector('[data-line="1"]');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).not.toContain('✓');
+
+    await act(async () => {
+      await window.__busRouteToggle('1');
+    });
+
+    expect(onToggleRoute).toHaveBeenCalledWith('1');
+    expect(btn.textContent).toContain('✓');
+    expect(btn.style.background).toMatch(/rgb\(21,\s*101,\s*192\)|#1565C0/);
+  });
+
+  it('deactivating a route removes ✓ and restores light-blue style', async () => {
+    const activeSet = new Set(['1']); // '1' starts active
+    const isRouteActive = vi.fn((line) => activeSet.has(line));
+    const onToggleRoute = vi.fn(async (line) => { activeSet.delete(line); });
+
+    mockZoom = 14;
+    render(<BusStopLayer onToggleRoute={onToggleRoute} isRouteActive={isRouteActive} />);
+
+    // Manually mark button as active first (simulating prior state)
+    const btn = document.querySelector('[data-line="1"]');
+    if (btn) {
+      btn.textContent = '✓ 1';
+      btn.style.background = '#1565C0';
+    }
+
+    await act(async () => {
+      await window.__busRouteToggle('1');
+    });
+
+    expect(btn?.textContent).not.toContain('✓');
+    expect(btn?.style.background).toMatch(/rgb\(227,\s*242,\s*253\)|#E3F2FD/);
+  });
+
+  it('global handler is a no-op when no onToggleRoute or isRouteActive provided', async () => {
+    mockZoom = 14;
+    render(<BusStopLayer />);
+
+    // Should not throw
+    await act(async () => {
+      await window.__busRouteToggle('1');
+    });
+  });
+});
+
 // ── ArrivalsPanel unit tests ────────────────────────────────────────
 
 describe('ArrivalsPanel', () => {

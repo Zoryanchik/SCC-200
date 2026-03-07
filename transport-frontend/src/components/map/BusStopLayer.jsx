@@ -96,8 +96,10 @@ function buildPopupHtml(stop) {
 
     for (const line of stop.lines) {
       const safe = line.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      const safeLine = line.replace(/"/g, '&quot;');
       html += '<button onclick="window.__busRouteToggle(\'' + safe + '\')" '
         + 'data-testid="route-chip-' + line + '" '
+        + 'data-line="' + safeLine + '" '
         + 'style="display:inline-block;padding:4px 10px;border-radius:8px;'
         + 'background:#E3F2FD;color:#1565C0;font-size:12px;font-weight:700;'
         + 'cursor:pointer;border:2px solid #90CAF9;margin:0;line-height:1.2;'
@@ -110,6 +112,22 @@ function buildPopupHtml(stop) {
 
   html += '</div>';
   return html;
+}
+
+/**
+ * Apply active/inactive visual state to a route-chip <button>.
+ * Sets inline styles and prefixes the line name with ✓ when active.
+ * Works on raw DOM nodes so it can be called outside of React render.
+ *
+ * @param {HTMLElement} btn
+ * @param {boolean} active
+ */
+function applyChipStyle(btn, active) {
+  btn.style.background = active ? '#1565C0' : '#E3F2FD';
+  btn.style.color = active ? '#fff' : '#1565C0';
+  btn.style.borderColor = active ? '#0D47A1' : '#90CAF9';
+  const lineName = btn.dataset.line || btn.textContent.replace(/^✓\s*/, '').trim();
+  btn.textContent = active ? `✓ ${lineName}` : lineName;
 }
 
 /**
@@ -186,13 +204,28 @@ export function ArrivalsPanel({ atcoCode }) {
  * Popup content is plain HTML (for route buttons) + a React ArrivalsPanel.
  * Arrivals are only fetched when the popup is opened.
  */
-function BusStopMarker({ stop, zoom = 16 }) {
+function BusStopMarker({ stop, zoom = 16, isRouteActive }) {
   const color = CLASS_COLORS[stop.classification] || CLASS_COLORS.local;
   const [popupOpen, setPopupOpen] = React.useState(false);
   // Re-derive the icon whenever zoom, colour, or popup-open state changes so
   // the marker enlarges / gains a halo ring while its popup is visible.
   const icon = useMemo(() => makeBusStopIcon(color, zoom, popupOpen), [color, zoom, popupOpen]);
   const popupHtml = useMemo(() => buildPopupHtml(stop), [stop]);
+
+  // When the popup opens (or isRouteActive identity changes while open),
+  // reflect the current active-route state on every chip button inside this
+  // popup.  We defer one tick so dangerouslySetInnerHTML has been flushed.
+  React.useEffect(() => {
+    if (!popupOpen || !isRouteActive) return;
+    const id = setTimeout(() => {
+      (stop.lines || []).forEach((line) => {
+        document
+          .querySelectorAll(`[data-line="${CSS.escape(line)}"]`)
+          .forEach((btn) => applyChipStyle(btn, isRouteActive(line)));
+      });
+    }, 0);
+    return () => clearTimeout(id);
+  }, [popupOpen, isRouteActive, stop.lines]);
 
   return (
     <Marker
@@ -247,10 +280,19 @@ export default function BusStopLayer({
   // Register global function for popup button clicks
   const toggleRef = React.useRef(onToggleRoute);
   toggleRef.current = onToggleRoute;
+  const isRouteActiveRef = React.useRef(isRouteActive);
+  isRouteActiveRef.current = isRouteActive;
 
   React.useEffect(() => {
-    window.__busRouteToggle = (line) => {
-      if (toggleRef.current) toggleRef.current(line);
+    window.__busRouteToggle = async (line) => {
+      if (toggleRef.current) await toggleRef.current(line);
+      // After the async toggle resolves, sync every visible chip for this line.
+      if (isRouteActiveRef.current) {
+        const active = isRouteActiveRef.current(line);
+        document
+          .querySelectorAll(`[data-line="${CSS.escape(line)}"]`)
+          .forEach((btn) => applyChipStyle(btn, active));
+      }
     };
     return () => { delete window.__busRouteToggle; };
   }, []);
@@ -288,7 +330,7 @@ export default function BusStopLayer({
   return (
     <>
       {visibleStops.map((stop) => (
-        <BusStopMarker key={stop.id} stop={stop} zoom={zoom} />
+        <BusStopMarker key={stop.id} stop={stop} zoom={zoom} isRouteActive={isRouteActive} />
       ))}
     </>
   );
