@@ -22,12 +22,14 @@ except ImportError:
     _USING_LXML = False
 
 class BusLoader:
-    def __init__( self, db_path, user=None, password=None, walking_db_path=None ):
+    def __init__( self, db_path, user=None, password=None, walking_db_path=None, merge_shift_padding=60 ): 
         self.db_path = db_path
         self.user = user
         self.password = password
         # Optional separate walking DB (contains stop_coords and walking_transfers)
         self.walking_db_path = walking_db_path
+        # padding (seconds) added when shifting timestamps to append halves
+        self.merge_shift_padding = int(merge_shift_padding or 0)
 
     # Connection helper: return a DB connection object. Backend is
     # Postgres-only: treat the configured DB path as a Postgres DSN
@@ -475,8 +477,24 @@ class BusLoader:
             info = jp_map[jp_ref]
             route_ref = info['route_ref']
             destination_display = info.get('destination_display', '')
-            jkey = f"{service_code}:{vj_code}" if service_code and vj_code else (vj_code or '')
-            rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
+            # Build composite identifiers that include the published line name
+            # to avoid mixing journeys that share the same VehicleJourneyCode
+            # but represent different services (different published lines).
+            if service_code and vj_code:
+                if line_name:
+                    jkey = f"{service_code}:{line_name}:{vj_code}"
+                else:
+                    jkey = f"{service_code}:{vj_code}"
+            else:
+                jkey = vj_code or ''
+
+            if service_code and route_ref:
+                if line_name:
+                    rkey = f"{service_code}:{line_name}:{route_ref}"
+                else:
+                    rkey = f"{service_code}:{route_ref}"
+            else:
+                rkey = route_ref or ''
             journey_routes_rows.append((jkey, rkey, line_name, destination_display))
 
             op = vj.find(f'{ns}OperatingProfile')
@@ -530,6 +548,52 @@ class BusLoader:
                 stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
                 route_track_rows, stop_coord_rows)
 
+    def _try_merge_journeys(self, existing_jt, new_jt):
+        """Public helper: attempt to concatenate existing_jt and new_jt.
+
+        existing_jt/new_jt are lists of tuples (atco_code, arrival_time)
+        Returns merged list on success, or None if not applicable.
+        """
+        if not existing_jt or not new_jt:
+            return None
+        ex_codes = [s for s, _t in existing_jt]
+        new_codes = [s for s, _t in new_jt]
+        ex_times = [t for _s, t in existing_jt]
+        new_times = [t for _s, t in new_jt]
+
+        # Heuristic 1: existing ends where new starts
+        if ex_codes[-1] == new_codes[0]:
+            # Ensure time ordering; if new starts earlier, shift new forward
+            if ex_times[-1] <= new_times[0]:
+                merged = existing_jt + new_jt[1:]
+                return merged
+            else:
+                shift = ex_times[-1] - new_times[0] + 60
+                shifted = [(s, t + shift) for s, t in new_jt[1:]]
+                merged = existing_jt + shifted
+                return merged
+
+        # Heuristic 2: new ends where existing starts (reverse order)
+        if new_codes[-1] == ex_codes[0]:
+            if new_times[-1] <= ex_times[0]:
+                merged = new_jt + existing_jt[1:]
+                return merged
+            else:
+                shift = new_times[-1] - ex_times[0] + 60
+                shifted = [(s, t + shift) for s, t in existing_jt[1:]]
+                merged = new_jt + shifted
+                return merged
+
+        # Heuristic 3: same origin & destination and non-overlapping times
+        if ex_codes[0] == new_codes[0] and ex_codes[-1] == new_codes[-1]:
+            # If one sequence is a prefix of the other, prefer the longer
+            if len(ex_codes) >= len(new_codes) and ex_codes[:len(new_codes)] == new_codes:
+                return existing_jt
+            if len(new_codes) > len(ex_codes) and new_codes[:len(ex_codes)] == ex_codes:
+                return new_jt
+
+        return None
+
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
         rows = self._parse_file(file_path)
@@ -553,45 +617,249 @@ class BusLoader:
         if total == 0:
             return
 
-        all_route_stops    = []
-        all_journey_routes = []
-        all_journey_times  = []
-        all_stop_names     = []
-        all_service_ops    = []
-        all_serviced_orgs  = []
-        all_journey_ops    = []
-        all_route_tracks   = []
-        all_stop_coords    = []
+        # Process files one-by-one and persist per-file. If the same
+        # VehicleJourney appears in multiple files it frequently means the
+        # journey is split across halves. We therefore attempt to concatenate
+        # matching halves (based on origin/destination/time heuristics). If
+        # concatenation is not applicable we fall back to the usual replace
+        # behaviour (the later file wins).
+        total_rows = 0
+        total_journeys = 0
+
+        # Keep an in-memory map of merged journeys seen so far during this
+        # folder load. Keys: journey_id -> (route_row, journey_times_list)
+        merged_journeys = {}
+        # Keep merged route tracks seen so far during this folder load.
+        # Keys: route_id -> list[(lat, lon), ...]
+        merged_route_tracks = {}
+
+        def _merge_journeys(existing_jt, new_jt):
+            """Attempt to concatenate existing_jt and new_jt.
+
+            existing_jt/new_jt are lists of tuples (atco_code, arrival_time)
+            Returns merged list on success, or None if not applicable.
+            """
+            if not existing_jt or not new_jt:
+                return None
+            ex_codes = [s for s, _t in existing_jt]
+            new_codes = [s for s, _t in new_jt]
+            ex_times = [t for _s, t in existing_jt]
+            new_times = [t for _s, t in new_jt]
+
+            # Heuristic 1: existing ends where new starts
+            if ex_codes[-1] == new_codes[0]:
+                # Ensure time ordering; if new starts earlier, shift new forward
+                if ex_times[-1] <= new_times[0]:
+                    merged = existing_jt + new_jt[1:]
+                    return merged
+                else:
+                    shift = ex_times[-1] - new_times[0] + self.merge_shift_padding
+                    shifted = [(s, t + shift) for s, t in new_jt[1:]]
+                    merged = existing_jt + shifted
+                    return merged
+
+            # Heuristic 2: new ends where existing starts (reverse order)
+            if new_codes[-1] == ex_codes[0]:
+                if new_times[-1] <= ex_times[0]:
+                    merged = new_jt + existing_jt[1:]
+                    return merged
+                else:
+                    shift = new_times[-1] - ex_times[0] + self.merge_shift_padding
+                    shifted = [(s, t + shift) for s, t in existing_jt[1:]]
+                    merged = new_jt + shifted
+                    return merged
+
+            # Heuristic 3: same origin & destination and non-overlapping times
+            if ex_codes[0] == new_codes[0] and ex_codes[-1] == new_codes[-1]:
+                # If one sequence is a prefix of the other, prefer the longer
+                if len(ex_codes) >= len(new_codes) and ex_codes[:len(new_codes)] == new_codes:
+                    return existing_jt
+                if len(new_codes) > len(ex_codes) and new_codes[:len(ex_codes)] == ex_codes:
+                    return new_jt
+
+            return None
 
         for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
             try:
                 r = self._parse_file(fpath)
-                if r:
-                    all_route_stops    .extend(r[0])
-                    all_journey_routes .extend(r[1])
-                    all_journey_times  .extend(r[2])
-                    all_stop_names     .extend(r[3])
-                    all_service_ops    .extend(r[4])
-                    all_serviced_orgs  .extend(r[5])
-                    all_journey_ops    .extend(r[6])
-                    all_route_tracks   .extend(r[7])
-                    all_stop_coords    .extend(r[8])
-                # Only print every 10th file or the last one to reduce log noise
+                if not r:
+                    # Print progress periodically
+                    if (idx + 1) % 10 == 0 or idx == total - 1:
+                        print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
+                    continue
+
+                route_stops_rows, journey_routes_rows, journey_times_rows, stop_names_rows, service_ops_rows, serviced_org_rows, journey_op_rows, route_track_rows, stop_coord_rows = r
+
+                # Build a per-file map of route_id -> track points (lat, lon)
+                file_route_tracks = {}
+                for rt in route_track_rows:
+                    try:
+                        rid, seq, lat, lon = rt
+                    except Exception:
+                        continue
+                    file_route_tracks.setdefault(rid, []).append((lat, lon))
+
+                # Initialize merged_route_tracks entries for any new routes in this file
+                for rid, trk in file_route_tracks.items():
+                    if rid not in merged_route_tracks:
+                        merged_route_tracks[rid] = trk
+
+                # Build a per-file map of journeys for easy lookup (index-aligned)
+                file_j_map = {}
+                for j_idx, jr in enumerate(journey_routes_rows):
+                    jkey = jr[0]
+                    jt = journey_times_rows[j_idx] if j_idx < len(journey_times_rows) else []
+                    file_j_map[jkey] = (jr, jt)
+
+                # For every journey in this file, attempt to merge with any
+                # previously-seen definition. Update merged_journeys accordingly.
+                for jkey, (jr, jt) in file_j_map.items():
+                    if jkey in merged_journeys:
+                        # If the same journey id appears in multiple files it may be
+                        # a split across halves — we attempt concatenation. However
+                        # do not concatenate when the published line name differs
+                        # between files (vehicles with same VehicleJourneyCode but
+                        # different line/published name must be treated as distinct).
+                        existing_jr, existing_jt = merged_journeys[jkey]
+                        try:
+                            existing_line = existing_jr[2] if len(existing_jr) > 2 else None
+                            new_line = jr[2] if len(jr) > 2 else None
+                        except Exception:
+                            existing_line = None
+                            new_line = None
+
+                        if existing_line and new_line and existing_line != new_line:
+                            # Different published line names — do not merge, replace
+                            merged_journeys[jkey] = (jr, jt)
+                            try:
+                                if jr[1] in file_route_tracks:
+                                    merged_route_tracks[jr[1]] = file_route_tracks[jr[1]]
+                            except Exception:
+                                pass
+                            continue
+
+                        # Attempt concatenation; fallback to replace if not possible
+                        merged = _merge_journeys(existing_jt, jt)
+                        if merged is not None:
+                            # Keep the route metadata from the newer file (jr)
+                            merged_journeys[jkey] = (jr, merged)
+                            # Also attempt to merge route tracks for the route
+                            try:
+                                existing_route = existing_jr[1]
+                                new_route = jr[1]
+                                # Prefer any existing merged track for existing_route
+                                existing_track = merged_route_tracks.get(existing_route) or merged_route_tracks.get(new_route)
+                                new_track = file_route_tracks.get(new_route)
+                                # Define a small helper to concat tracks sensibly
+                                import math
+                                def _hav(p1, p2):
+                                    R = 6371000.0
+                                    p1_lat, p1_lon = p1
+                                    p2_lat, p2_lon = p2
+                                    a1 = math.radians(p1_lat)
+                                    a2 = math.radians(p2_lat)
+                                    dp = math.radians(p2_lat - p1_lat)
+                                    dl = math.radians(p2_lon - p1_lon)
+                                    a = math.sin(dp / 2) ** 2 + math.cos(a1) * math.cos(a2) * math.sin(dl / 2) ** 2
+                                    return 2 * R * math.asin(math.sqrt(a))
+
+                                def _concat_tracks(a, b):
+                                    if not a:
+                                        return b
+                                    if not b:
+                                        return a
+                                    # If endpoints match (within 20m), avoid duplicate points
+                                    if _hav(a[-1], b[0]) <= 20:
+                                        return a + b[1:]
+                                    if _hav(b[-1], a[0]) <= 20:
+                                        return b + a[1:]
+                                    # Otherwise prefer the longer track (more detail)
+                                    return a if len(a) >= len(b) else b
+
+                                if existing_track or new_track:
+                                    merged_track = _concat_tracks(existing_track, new_track)
+                                    # Store under the new_route key (route id from newer file)
+                                    if merged_track:
+                                        merged_route_tracks[new_route] = merged_track
+                            except Exception:
+                                pass
+                        else:
+                            # Fallback: replace with the current file's definition
+                            merged_journeys[jkey] = (jr, jt)
+                            # When replacing, prefer the current file's track for this route
+                            try:
+                                if jr[1] in file_route_tracks:
+                                    merged_route_tracks[jr[1]] = file_route_tracks[jr[1]]
+                            except Exception:
+                                pass
+                    else:
+                        merged_journeys[jkey] = (jr, jt)
+                        # New journey: if this file contains a track for its route, record it
+                        try:
+                            if jr[1] in file_route_tracks:
+                                merged_route_tracks.setdefault(jr[1], file_route_tracks[jr[1]])
+                        except Exception:
+                            pass
+
+                # Build adjusted journey lists for this file using the
+                # (possibly) merged journeys so a per-file populate will insert
+                # the merged result and delete any prior DB rows for the same
+                # journey_id (populate() takes care of deletion).
+                adjusted_journey_routes = []
+                adjusted_journey_times = []
+                for j_idx, jr in enumerate(journey_routes_rows):
+                    jkey = jr[0]
+                    merged_jr, merged_jt = merged_journeys.get(jkey, (jr, journey_times_rows[j_idx] if j_idx < len(journey_times_rows) else []))
+                    adjusted_journey_routes.append(merged_jr)
+                    adjusted_journey_times.append(merged_jt)
+
+                # Persist this file's parsed rows, but use adjusted (merged)
+                # journey lists so duplicates are handled. For route tracks, use
+                # the merged_route_tracks entries for any route_ids present in
+                # the adjusted journeys so concatenated halves also persist their
+                # combined tracking. This ensures a merged journey's track is
+                # written back when its halves came from different files.
+                persist_route_tracks = []
+                # Include any tracks present in this file (keeps seq ordering)
+                included_rids = set(r for r, _seq, _lat, _lon in route_track_rows)
+                for rid, seq, lat, lon in route_track_rows:
+                    persist_route_tracks.append((rid, seq, lat, lon))
+                # Ensure merged tracks for adjusted journeys are persisted too
+                adjusted_route_ids = {jr[1] for jr in adjusted_journey_routes}
+                for rid in adjusted_route_ids:
+                    trk = merged_route_tracks.get(rid)
+                    if not trk:
+                        continue
+                    # If this route was already present in the file, we've already
+                    # included it. Otherwise append its merged track rows.
+                    if rid in included_rids:
+                        continue
+                    for seq, (lat, lon) in enumerate(trk):
+                        persist_route_tracks.append((rid, seq, lat, lon))
+
+                self.populate(
+                    route_stops_rows,
+                    adjusted_journey_routes,
+                    adjusted_journey_times,
+                    stop_names_rows,
+                    service_ops_rows,
+                    serviced_org_rows,
+                    journey_op_rows,
+                    persist_route_tracks,
+                    stop_coord_rows,
+                )
+
+                total_journeys += len(adjusted_journey_routes)
+                total_rows += sum(len(jt) for jt in adjusted_journey_times)
+
+                # Print progress periodically
                 if (idx + 1) % 10 == 0 or idx == total - 1:
                     print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
             except Exception as e:
                 print(f'  [bus] {prefix}ERR [{idx+1}/{total}] {fname}: {e}')
 
-        # Single bulk insert for the whole folder
-        self.populate(
-            all_route_stops, all_journey_routes, all_journey_times,
-            all_stop_names, all_service_ops, all_serviced_orgs, all_journey_ops,
-            all_route_tracks, all_stop_coords,
-        )
-        print(f'  [bus] {prefix}Done. {total} files, '
-              f'{len(all_journey_routes)} journeys, '
-              f'{len(all_journey_times)} stop-times.')
+        print(f'  [bus] {prefix}Done. {total} files, {total_journeys} journeys, {total_rows} stop-times.')
 
     def download_and_load(self, url, tag=None):
         """Download a zip of TXC XML files from a URL, extract, and load into the DB.
@@ -684,6 +952,23 @@ class BusLoader:
             on_conflict='ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order',
             key_indices=(0, 1),  # (route_id, atco_code)
         )
+        # --- Prevent unioning stop-lists for the same journey_id across multiple
+        # TXC files: when re-loading a dataset the same journey_id may appear
+        # in several files with differing stop-lists.  Delete any existing
+        # journey rows for the journey_ids we're about to insert so the new
+        # batch fully replaces previous definitions (instead of accumulating).
+        if journey_routes:
+            try:
+                journey_ids = [jr[0] for jr in journey_routes]
+                # Delete existing journey-level rows for these journeys so
+                # the subsequent INSERT will create the authoritative set.
+                cursor.execute("DELETE FROM bus_journey_times WHERE journey_id = ANY(%s)", (journey_ids,))
+                cursor.execute("DELETE FROM bus_journey_routes WHERE journey_id = ANY(%s)", (journey_ids,))
+            except Exception:
+                # Be conservative: if deletion fails, continue and rely on
+                # ON CONFLICT semantics (no-op) — avoid aborting the whole
+                # load for a single DB quirk.
+                pass
         _chunked_multi_insert(
             cursor,
             'bus_journey_routes',
