@@ -27,6 +27,7 @@ Fix: don't seperate the "get line of a stop" and "show route of line", when gett
 - [ ] John: train integration!
 
 ## Medium Priority
+- [ ] When clicking on a bus icon, label and route are not shown simutaneously, need fix
 - [x] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
 - [ ] Live map "Trains xx" and "Bus xx" button on click always shows "Trains 0", "Buses 0" and does not filter right
 - [ ] Refresh only map for live locations, not the whole page
