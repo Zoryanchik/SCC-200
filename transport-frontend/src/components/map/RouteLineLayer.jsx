@@ -97,6 +97,18 @@ export default function RouteLineLayer({ activeRoutes }) {
 
   if (entries.length === 0) return null;
 
+  try {
+    // Debug: log which composite keys are active and which route_ids
+    // are present so we can trace cases where the layer is not drawing.
+    const dbg = entries.map(([k, rd]) => ({ key: k, route_ids: Array.isArray(rd?.variants) ? rd.variants.map(v => v.route_id) : [] }));
+    // Use console.debug to avoid noisy logs in production but make it
+    // visible when developers enable verbose logging in the browser.
+    // eslint-disable-next-line no-console
+    console.debug('[RouteLineLayer] rendering activeRoutes', dbg);
+  } catch (e) {
+    // ignore logging errors
+  }
+
   return (
     <>
       {entries.map(([line, routeData]) => (

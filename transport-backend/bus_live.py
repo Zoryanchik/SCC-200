@@ -259,7 +259,10 @@ class BusLive:
                             "destination": dest,
                             "lat": lat_v,
                             "lon": lon_v,
+                            # Human-readable operator name for display
                             "operator": operator_name,
+                            # Operator reference code from the SIRI feed (e.g. 'SCCU')
+                            "operator_ref": operator_ref or None,
                             "delay_seconds": delay_seconds,
                             # --- rich SIRI fields for route display ---
                             "vehicle_ref": vehicle_ref or None,

@@ -1001,6 +1001,7 @@ export default function HomePage() {
             onMoveEnd={handleMoveEnd}
             sideContent={suggestedRoutesPanel}
             showSideOverlay={showSuggested}
+            liveBusOperator={"SCCU"}
           />
         </Suspense>
       </Paper>

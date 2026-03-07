@@ -5,6 +5,8 @@
  * user clicks a line chip inside a bus-stop popup.
  */
 
+import { resolveOperatorCode } from './operatorMap';
+
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
 
 /**
@@ -15,15 +17,42 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
  * @returns {Promise<{ line: string, variants: Array<{ route_id: string, stops: Array }> }>}
  */
 export async function fetchRouteLine(line, operator = null) {
+  // Debug: log the operator requested so we can trace incorrect matches
+  try {
+    console.debug(`[routeLineApi] fetchRouteLine requested: line='${line}' operator='${operator}'`);
+  } catch (e) {
+    // ignore logging failures in test environments
+  }
+  // Defensive: resolve human-friendly operator display names to SIRI codes
+  let resolvedOp = null;
+  try {
+    resolvedOp = resolveOperatorCode(operator);
+    if (operator && !resolvedOp) {
+      console.debug(`[routeLineApi] operator '${operator}' could not be resolved to a SIRI code`);
+    } else if (operator && resolvedOp && resolvedOp !== operator) {
+      console.debug(`[routeLineApi] resolved operator '${operator}' -> '${resolvedOp}'`);
+    }
+  } catch (e) {
+    // ignore resolution errors
+  }
   let url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
-  if (operator) {
-    url += `?operator=${encodeURIComponent(operator)}`;
+  const opToSend = resolvedOp || operator || null;
+  if (opToSend) {
+    url += `?operator=${encodeURIComponent(opToSend)}`;
   }
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch route line "${line}": ${res.status}`);
   }
-  return res.json();
+  const body = await res.json();
+  try {
+    // Small debug aid: show which route_ids came back for this fetch
+    console.debug(`[routeLineApi] fetched ${Array.isArray(body.variants) ? body.variants.length : 0} variants for line='${line}' operator='${opToSend}'`,
+      (Array.isArray(body.variants) && body.variants.map(v => v.route_id)));
+  } catch (e) {
+    // ignore logging failures
+  }
+  return body;
 }
 
 /**

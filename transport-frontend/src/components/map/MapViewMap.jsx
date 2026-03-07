@@ -7,11 +7,13 @@ import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
-import { useEffect } from "react";
+import { useEffect, useRef, useCallback } from "react";
 // Allow a sideContent prop to be injected by the parent (e.g. Suggested routes)
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
+import { resolveOperatorCode } from '../../services/operatorMap';
+import { stopsToLatLngs } from '../../services/routeLineApi';
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -134,14 +136,25 @@ export default function MapViewMap({
 	/** true while a background re-fetch is in-flight */
 	busRefreshing = false,
 		onMapReady,
- 		onMoveEnd,
- 		sideContent,
- 		showSideOverlay = true,
+		 onMoveEnd,
+		 sideContent,
+		 showSideOverlay = true,
+		// The operator code used to fetch live bus locations (e.g. 'SCCU').
+		// Used as a fallback when a marker lacks an explicit operator field.
+		liveBusOperator = null,
 }) {
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
 	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
+	// Keep a reference to the Leaflet map instance so we can call fitBounds
+	const mapRef = useRef(null);
+
+	// Wrap any external onMapReady passed in so we capture the map instance
+	const _onMapReady = useCallback((map) => {
+		mapRef.current = map;
+		if (typeof onMapReady === 'function') onMapReady(map);
+	}, [onMapReady]);
 
 	return (
 	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
@@ -247,7 +260,7 @@ export default function MapViewMap({
 						style={{ height: "100%", width: "100%" }}
 						className="leaflet-container-custom"
 					>
-					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />
+					<MapController onReady={_onMapReady} onMoveEnd={onMoveEnd} />
 					<TileLayer
 						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 						url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -263,11 +276,67 @@ export default function MapViewMap({
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
-								click: () => {
+								click: async () => {
 									// Toggle route display when clicking a bus marker
 									if (marker.type === 'bus' && marker.routeNumber != null) {
 										try {
-											toggleRoute(String(marker.routeNumber), marker.operator || null);
+											// Prefer the operator code when available; otherwise attempt to
+											// resolve a human-friendly operator name to a SIRI code.  As a
+											// last resort fall back to the page-level liveBusOperator.
+											let usedOp = marker.operatorCode || null;
+											if (!usedOp && marker.operator) {
+												usedOp = resolveOperatorCode(marker.operator) || null;
+											}
+											if (!usedOp) usedOp = liveBusOperator || null;
+											// Debug: record which operator we use when toggling a route
+											try { console.info(`[MapViewMap] toggleRoute line=${String(marker.routeNumber)} operator=${usedOp} markerId=${marker.id}`); } catch (e) { /* ignore */ }
+
+											// Determine a preferred last-stop/destination from the
+											// live marker (if present) so we can prefer variants
+											// that terminate where the vehicle is heading.
+											// Prefer a destination ATCO/code if present in the live
+											// marker (e.g. destination_ref). Fall back to human
+											// readable destination name if necessary.
+											const preferredAtco = marker.destination_ref || marker.destinationRef || marker.meta?.destination_ref || marker.meta?.destinationRef || marker.meta?.destination_atco || null;
+											const preferredName = marker.destination || marker.destination_name || marker.meta?.destination_name || marker.meta?.destination || null;
+
+											const preferredDest = preferredAtco || preferredName || null;
+
+											// Await toggleRoute so we can auto-zoom to the returned route bounds.
+											// Pass the preferred destination (ATCO preferred) so the
+											// hook can prefer matching variants by ATCO code.
+											let routeData = null;
+											try {
+												routeData = await toggleRoute(String(marker.routeNumber), usedOp, { preferredLastStop: preferredDest });
+											} catch (e) {
+												// swallow - toggleRoute already logs failures
+											}
+
+											// If we received route data (i.e. toggled ON), compute bounds and fit map
+											if (routeData && mapRef.current) {
+												try {
+													const allPositions = [];
+													if (Array.isArray(routeData.variants)) {
+														for (const variant of routeData.variants) {
+															const pos = variant.geometry ? variant.geometry : stopsToLatLngs(variant.stops);
+															if (Array.isArray(pos) && pos.length > 0) {
+																// geometry may be [[lat, lon], ...] or stopsToLatLngs returns same
+																for (const p of pos) {
+																	// ensure [lat, lon]
+																	if (Array.isArray(p) && p.length >= 2) allPositions.push([p[0], p[1]]);
+																}
+															}
+														}
+													}
+													if (allPositions.length > 0) {
+														const bounds = L.latLngBounds(allPositions);
+														// Use a small padding so the route is comfortably visible
+														mapRef.current.fitBounds(bounds, { padding: [64, 64] });
+													}
+												} catch (e) {
+													// ignore fitBounds failures
+												}
+											}
 										} catch (e) {
 											// ignore
 										}
@@ -285,7 +354,7 @@ export default function MapViewMap({
 										if (marker.type === 'bus' && marker.routeNumber != null) {
 											try {
 												// Only toggle off if currently active
-												if (isActive(String(marker.routeNumber))) toggleRoute(String(marker.routeNumber), marker.operator || null);
+												if (isActive(String(marker.routeNumber))) toggleRoute(String(marker.routeNumber), marker.operatorCode || marker.operator || liveBusOperator || null);
 											} catch (e) {
 												// ignore
 											}

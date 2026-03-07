@@ -836,6 +836,13 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
     allowed_prefixes: set = set()
     if operator_key and _SIRI_TO_TIMETABLE_PREFIXES:
         allowed_prefixes = set(_SIRI_TO_TIMETABLE_PREFIXES.get(operator_key, []))
+    # Diagnostic logging: record operator_key and allowed prefixes so we can
+    # trace why a particular timetable prefix was chosen (or none were).
+    try:
+        logger.info("[routes_for_line] operator_key=%r allowed_prefixes=%r line=%r", operator_key, sorted(list(allowed_prefixes)), line)
+    except Exception:
+        # best-effort logging; don't fail route building for logging errors
+        pass
 
     # ── Collect route indices whose line_name matches ──────────────
     # The frontend sends the full internal line ID (e.g.
@@ -861,6 +868,21 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
                     if route_prefix not in allowed_prefixes:
                         continue
                 matching_routes.append(r_idx)
+
+    # More diagnostic context: log which prefixes appeared among matching routes
+    try:
+        if matching_routes:
+            prefixes = set()
+            for r_idx in matching_routes:
+                meta = merged.route_metadata[r_idx] or {}
+                raw_line = (meta.get("line_name") or "").strip()
+                if raw_line and ":" in raw_line:
+                    prefixes.add(raw_line.split(":")[0])
+            logger.info("[routes_for_line] matched_route_indices=%r matched_prefixes=%r line=%r operator=%r", matching_routes, sorted(list(prefixes)), line, operator_key)
+        else:
+            logger.info("[routes_for_line] no matching routes found for line=%r operator=%r", line, operator_key)
+    except Exception:
+        pass
 
     if not matching_routes:
         result = {"line": line, "variants": []}
@@ -1059,6 +1081,12 @@ def _build_route_variants(line: str, line_key: str, merged, operator_key: str = 
         unique = unique[:3]
 
     result = {"line": line, "variants": unique}
+    try:
+        # Log which route_ids (if any) we're returning as variants for this query.
+        variant_ids = [v.get("route_id") for v in unique]
+        logger.info("[routes_for_line] returning_variants=%r for line=%r operator=%r", variant_ids, line, operator_key)
+    except Exception:
+        pass
     return result
 
 
@@ -1496,6 +1524,9 @@ async def bus_live_operator(
             "destination_ref": bus.get("destination_ref"),
             "journey_ref": bus.get("journey_ref"),
             "aimed_departure_time": bus.get("aimed_departure_time"),
+            # Include canonical SIRI operator code when available so the
+            # frontend can use it to disambiguate timetable lookups.
+            "operator_ref": bus.get("operator_ref") if bus.get("operator_ref") is not None else None,
         })
     return out
 

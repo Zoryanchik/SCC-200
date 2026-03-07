@@ -182,7 +182,11 @@ status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins
 routeNumber: item?.line || item?.routeNumber || item?.route,
 destination: item?.destination,
 departureTime: item?.departureTime || item?.scheduledTime,
-operator: item?.operator,
+        // Keep human-friendly operator name for display, but also capture
+        // the SIRI operator code when available so we can disambiguate
+        // route lookups later (operator_ref is added by the backend).
+        operator: item?.operator,
+        operatorCode: item?.operator_ref ?? null,
 delayMinutes: item?.delay_minutes ?? item?.delayMinutes,
 bearing: item?.bearing,
 direction: item?.direction,
@@ -467,6 +471,7 @@ busLoading={busLoading}
 trainLoading={trainLoading}
 onMapReady={setMapInstance}
 onMoveEnd={handleMoveEnd}
+    liveBusOperator={"SCCU"}
 />
 </Suspense>
 </Paper>
