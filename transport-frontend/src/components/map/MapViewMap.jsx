@@ -371,9 +371,26 @@ export default function MapViewMap({
 											<Box sx={{ mt: 1 }}>
 												{Object.entries(marker.meta)
 													.filter(([k]) => {
-														const kk = String(k).toLowerCase();
-														return !['lat', 'lon', 'latitude', 'longitude', 'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname', 'delay_minutes', 'delayminutes', 'status'].includes(kk);
-													})
+															const kk = String(k).toLowerCase();
+															// Exclude coordinate, operator and common live-feed fields
+															// including recent additions like vehicle_ref, delay_seconds,
+															// bearing, direction, origin/destination refs/names,
+															// journey_ref and aimed_departure_time.
+															return ![
+																'lat', 'lon', 'latitude', 'longitude',
+																'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname',
+																'status',
+																// delay variants
+																'delay_minutes', 'delayminutes', 'delay_seconds', 'delayseconds',
+																// vehicle / telemetry
+																'vehicle_ref', 'vehicleref', 'bearing', 'direction',
+																// origin / destination identifiers and names
+																'origin_ref', 'originref', 'origin_name', 'originname',
+																'destination_ref', 'destinationref', 'destination_name', 'destinationname',
+																// journey / timing
+																'journey_ref', 'journeyref', 'aimed_departure_time', 'aimed_departure'
+															].includes(kk);
+														})
 													.map(([key, value]) => (
 														<Typography key={key} variant="body2" sx={{ mb: 0.5 }}>
 															<strong>{key.replace(/_/g, ' ')}:</strong> {String(value)}
