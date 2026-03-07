@@ -7,7 +7,7 @@ import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 // Allow a sideContent prop to be injected by the parent (e.g. Suggested routes)
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
@@ -143,6 +143,51 @@ export default function MapViewMap({
 
 	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
 
+	// Ensure route and popup are bundled: when a popup is mounted for a bus
+	// marker we track how many popups are requesting the same line. The
+	// first popup to request a line activates it; the last popup to close
+	// deactivates it. This avoids races and ensures opening/closing any
+	// popup for a line shows/hides the route as a bundle.
+	const popupCountsRef = useRef(new Map());
+			// No need to track the last-opened popup explicitly — when a popup closes
+			// we simply check the ref-count for that line after the binder cleanup
+			// has run; if the count is zero we hide the route. This is simpler and
+			// avoids edge cases where lastOpenedRef can become stale.
+	const PopupRouteBinder = ({ line, operator }) => {
+		useEffect(() => {
+			if (!line) return undefined;
+			const key = String(line);
+			const cur = popupCountsRef.current.get(key) || 0;
+			popupCountsRef.current.set(key, cur + 1);
+
+			// If this is the first binder for this line, ensure the route is active
+			if (cur === 0) {
+				if (!isActive(key)) {
+					// fire-and-forget; toggleRoute may fetch data
+					toggleRoute(key, operator || null).catch(() => {});
+				}
+			}
+
+			return () => {
+				const prev = popupCountsRef.current.get(key) || 1;
+				const next = Math.max(0, prev - 1);
+				if (next === 0) popupCountsRef.current.delete(key);
+				else popupCountsRef.current.set(key, next);
+
+				// If there are no more popups for this line, hide the route
+				if (next === 0) {
+					try {
+						if (isActive(key)) toggleRoute(key, operator || null);
+					} catch (e) {
+						// ignore
+					}
+				}
+			};
+		}, [line, operator]);
+
+		return null;
+	};
+
 	return (
 	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
 			<Box sx={{
@@ -256,43 +301,66 @@ export default function MapViewMap({
 					<BusStopLayer onToggleRoute={toggleRoute} isRouteActive={isActive} />
 					<RouteLineLayer activeRoutes={activeRoutes} />
 					{filteredMarkers.map((marker) => (
-						<Marker
+				  <Marker
 							key={marker.id}
 							position={marker.position}
 							icon={marker.type === 'bus'
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
-								click: () => {
-									// Toggle route display when clicking a bus marker
-									if (marker.type === 'bus' && marker.routeNumber != null) {
-										try {
-											toggleRoute(String(marker.routeNumber), marker.operator || null);
-										} catch (e) {
-											// ignore
-										}
-									}
-									onOpenPopup(marker.id);
-								}
+				click: () => {
+					// Open the popup — the PopupRouteBinder will handle showing
+					// the corresponding route while the popup is mounted.
+					onOpenPopup(marker.id);
+				}
 							}}
 						>
 							{openPopupId === marker.id && (
-								<Popup
-									onClose={() => {
-										// Close popup as before
-										onClosePopup();
-										// When closing a bus popup, hide the route if it's active
-										if (marker.type === 'bus' && marker.routeNumber != null) {
-											try {
-												// Only toggle off if currently active
-												if (isActive(String(marker.routeNumber))) toggleRoute(String(marker.routeNumber), marker.operator || null);
-											} catch (e) {
-												// ignore
-											}
-										}
-									}}
-									autoClose={false}
-								>
+																<Popup
+																		onClose={() => {
+																				// Close popup as before — this will cause the PopupRouteBinder
+																				// to unmount and run its cleanup. We also schedule a microtask
+																				// to check the shared popupCountsRef after cleanup runs and
+																				// explicitly hide the route if there are no remaining popups
+																				// for the same line. This makes the hide action deterministic
+																				// for user-initiated closes.
+																				onClosePopup();
+
+																														// Run after current event loop so the binder cleanup runs first
+																														setTimeout(() => {
+																															const line = marker.routeNumber;
+																															const operator = marker.operator;
+																															if (!line) return;
+																															const key = String(line);
+																															const cnt = popupCountsRef.current.get(key) || 0;
+																															// If there are no more popups for this line, hide the route.
+																															if (cnt === 0 && isActive(key)) {
+																																try {
+																																	toggleRoute(key, operator || null).catch(() => {});
+																																} catch (e) {
+																																	// ignore
+																																}
+																															}
+																																									// Fallback: occasionally the cleanup may not have run yet
+																																									// (race with leaflet internals). After a short delay, if the
+																																									// route is still active for this line, attempt to hide it.
+																																									setTimeout(() => {
+																																										if (isActive(key)) {
+																																											try {
+																																												toggleRoute(key, operator || null).catch(() => {});
+																																											} catch (e) {
+																																												// ignore
+																																											}
+																																										}
+																																									}, 150);
+																														}, 0);
+																		}}
+																		autoClose={false}
+																>
+									{/* Bind the popup lifecycle to the route display */}
+									{marker.type === 'bus' && marker.routeNumber != null && (
+										<PopupRouteBinder line={marker.routeNumber} operator={marker.operator} />
+									)}
 									<Box sx={{ minWidth: '200px', pb: 1 }}>
 										<Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
 											{marker.name}
