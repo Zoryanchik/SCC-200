@@ -79,11 +79,11 @@ const createUserIcon = () => {
  * @param {number|null} delayMinutes
  */
 const busIconColor = (delayMinutes) => {
+	// Treat negative delays (early) visually the same as on-time.
 	if (delayMinutes == null) return '#1976d2';      // unknown → blue
 	if (delayMinutes >= 10) return '#d32f2f';        // very late → red
 	if (delayMinutes >= 2) return '#f57c00';         // delayed → orange
-	if (delayMinutes <= -1) return '#7b1fa2';        // early → purple
-	return '#1976d2';                                // on time → blue
+	return '#1976d2';                                // on time / early → blue
 };
 
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32');
@@ -296,33 +296,44 @@ export default function MapViewMap({
 										)}
 										{(() => {
 											const dm = marker.delayMinutes;
-											const isOnTime = dm == null || (dm > -1 && dm < 2);
-											const isEarly = dm != null && dm <= -1;
-											const bgColor = isOnTime ? '#e8f5e9' : isEarly ? '#f3e5f5' : (dm >= 10 ? '#ffebee' : '#fff3e0');
-											const txtColor = isOnTime ? '#2e7d32' : isEarly ? '#6a1b9a' : (dm >= 10 ? '#c62828' : '#e65100');
-											const icon = isOnTime ? '\u2713' : isEarly ? '\u23eb' : '\u26a0';
-						// Avoid repeating numeric delay in the pill when
-						// we already display the precise value below.
-						let statusText = marker.status || '';
-						if (marker.delayMinutes != null && statusText) {
-						    // Strip trailing numeric minute text such as
-						    // 'Delayed 5 min' -> 'Delayed', 'Early 2 min' -> 'Early'
-						    statusText = statusText.replace(/\s*\d+(?:\.\d+)?\s*min?s?/i, '').trim();
-						}
-						return (
-							<Box sx={{
-								display: 'inline-block',
-								padding: '4px 12px',
-								borderRadius: '12px',
-								backgroundColor: bgColor,
-								color: txtColor,
-								fontSize: '12px',
-								fontWeight: '600',
-								marginBottom: '8px'
-							}}>
-								{icon} {statusText}
-							</Box>
-						);
+											// Treat early (dm < 0) the same as on-time for visuals
+											const isOnTime = dm == null || dm < 2;
+											const isDelayed = dm != null && dm >= 2;
+											const bgColor = isOnTime ? '#e8f5e9' : (dm >= 10 ? '#ffebee' : '#fff3e0');
+											const txtColor = isOnTime ? '#2e7d32' : (dm >= 10 ? '#c62828' : '#e65100');
+											const icon = isOnTime ? '\u2713' : '\u26a0';
+
+											// Avoid repeating numeric delay in the pill when
+											// we already display the precise value below.
+											// If the backend returned an early status, normalize
+											// the displayed status to 'On time' so early buses
+											// look identical to on-time ones.
+											let statusText = marker.status || '';
+											if (isOnTime) {
+												statusText = 'On time';
+											} else if (marker.delayMinutes != null) {
+												// Show the delay with rounded minutes after the base status.
+												// If the backend provided a status like 'Delayed 5 min',
+												// strip any existing numeric suffix and append our rounded value.
+												const base = (statusText || 'Delayed').replace(/\s*\d+(?:\.\d+)?\s*min?s?/i, '').trim() || 'Delayed';
+												const mins = Math.round(Math.abs(marker.delayMinutes));
+												statusText = `${base} ${mins} min${mins !== 1 ? 's' : ''}`;
+											}
+
+											return (
+												<Box sx={{
+													display: 'inline-block',
+													padding: '4px 12px',
+													borderRadius: '12px',
+													backgroundColor: bgColor,
+													color: txtColor,
+													fontSize: '12px',
+													fontWeight: '600',
+													marginBottom: '8px'
+												}}>
+													{icon} {statusText}
+												</Box>
+											);
 										})()}
 										{/* Numeric delay removed — status pill conveys categorical state */}
 										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
