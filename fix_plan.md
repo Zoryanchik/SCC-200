@@ -12,6 +12,8 @@ Updated: 2026-03-05
 - [x] Allow arbitrary start date-time input in fronttend
 - [x] Number of transfer limit button in frontend
 - [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
+It's a name collision problem, it showed route of the same line name elsewhere.
+Fix: don't seperate the "get line of a stop" and "show route of line", when getting line of a stop, store the original reference for route showing.
 - [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
 - [ ] Add search to map page to avoid scrolling
 - [ ] After searching, display the route on the map
