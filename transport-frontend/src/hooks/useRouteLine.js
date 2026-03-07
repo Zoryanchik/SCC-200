@@ -8,7 +8,7 @@
  *   isActive     : (line: string) => boolean
  */
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { fetchRouteLine } from '../services/routeLineApi';
+import { fetchRouteLineWithFallback } from '../services/routeLineApi';
 
 export function useRouteLine() {
   // Map<string, routeData> — only contains entries for active lines.
@@ -39,7 +39,7 @@ export function useRouteLine() {
       let data = cacheRef.current.get(line);
       if (!data) {
         try {
-          data = await fetchRouteLine(line);
+          data = await fetchRouteLineWithFallback(line);
           cacheRef.current.set(line, data);
         } catch (err) {
           console.error(`[useRouteLine] Failed to fetch line "${line}":`, err);

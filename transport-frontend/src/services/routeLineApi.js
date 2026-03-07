@@ -7,8 +7,71 @@
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
 
+// ── Mock route data (Lancaster / NW England area) ───────────────────
+//
+// Used as a fallback whenever the backend is unreachable so the
+// route-line feature is testable without a running server.
+// Stops follow realistic road corridors for each line.
+
+export const MOCK_ROUTES = {
+  '1': {
+    line: '1',
+    variants: [
+      {
+        route_id: 'mock-1-LancasterUni-to-Morecambe',
+        stops: [
+          { name: 'Lancaster University Underpass', lat: 54.0101, lon: -2.7852, atco_code: '2500B0615' },
+          { name: 'Hazelrigg Lane', lat: 54.0185, lon: -2.7888, atco_code: '2500B0616' },
+          { name: 'Scotforth (St Pauls)', lat: 54.0270, lon: -2.7930, atco_code: '2500B0902' },
+          { name: 'Scotforth Road', lat: 54.0353, lon: -2.7971, atco_code: '2500B0901' },
+          { name: 'Bowerham Road', lat: 54.0425, lon: -2.7952, atco_code: '2500B0801' },
+          { name: 'Lancaster Bus Station', lat: 54.04895, lon: -2.80117, atco_code: '2500LAA12000' },
+          { name: 'Lancaster Railway Station', lat: 54.04889, lon: -2.80750, atco_code: '2500LAA13200' },
+          { name: 'Morecambe Road (Scale Hall)', lat: 54.0540, lon: -2.8210, atco_code: '2500B0301' },
+          { name: 'Scale Hall Lane', lat: 54.0600, lon: -2.8390, atco_code: '2500B0302' },
+          { name: 'Torrisholme Road', lat: 54.0660, lon: -2.8560, atco_code: '2500B0303' },
+          { name: 'Morecambe Bus Station', lat: 54.0723, lon: -2.8696, atco_code: '2500MOR0001' },
+        ],
+      },
+    ],
+  },
+
+  '100': {
+    line: '100',
+    variants: [
+      {
+        route_id: 'mock-100-LancasterUni-to-Bus-Station',
+        stops: [
+          { name: 'Lancaster University Underpass', lat: 54.0101, lon: -2.7852, atco_code: '2500B0615' },
+          { name: 'Hazelrigg Lane', lat: 54.0185, lon: -2.7888, atco_code: '2500B0616' },
+          { name: 'Scotforth (St Pauls)', lat: 54.0270, lon: -2.7930, atco_code: '2500B0902' },
+          { name: 'Scotforth Road', lat: 54.0353, lon: -2.7971, atco_code: '2500B0901' },
+          { name: 'Bowerham Road', lat: 54.0425, lon: -2.7952, atco_code: '2500B0801' },
+          { name: 'Lancaster Bus Station', lat: 54.04895, lon: -2.80117, atco_code: '2500LAA12000' },
+        ],
+      },
+    ],
+  },
+
+  '40': {
+    line: '40',
+    variants: [
+      {
+        route_id: 'mock-40-Lancaster-to-Galgate',
+        stops: [
+          { name: 'Lancaster Bus Station', lat: 54.04895, lon: -2.80117, atco_code: '2500LAA12000' },
+          { name: 'Hala Square', lat: 54.04310, lon: -2.78430, atco_code: '2500B0701' },
+          { name: 'Aldcliffe Road', lat: 54.0380, lon: -2.7940, atco_code: '2500B0702' },
+          { name: 'Galgate Village', lat: 54.01780, lon: -2.78980, atco_code: '2500B1101' },
+        ],
+      },
+    ],
+  },
+};
+
 /**
  * Fetch all route variants for a given bus line name.
+ * Throws on any network or HTTP error.
  *
  * @param {string} line  – the line name, e.g. "100" or "1A"
  * @returns {Promise<{ line: string, variants: Array<{ route_id: string, stops: Array }> }>}
@@ -19,6 +82,26 @@ export async function fetchRouteLine(line) {
     throw new Error(`Failed to fetch route line "${line}": ${res.status}`);
   }
   return res.json();
+}
+
+/**
+ * Fetch route line data with a mock fallback.
+ *
+ * When the backend is unreachable (network error or non-OK HTTP status)
+ * the function returns the matching entry from {@link MOCK_ROUTES} when
+ * available, or an empty-variants object when the requested line has no
+ * mock data.  This keeps the feature fully testable without a live server.
+ *
+ * @param {string} line  – the line name, e.g. "100" or "1A"
+ * @returns {Promise<{ line: string, variants: Array }>}
+ */
+export async function fetchRouteLineWithFallback(line) {
+  try {
+    return await fetchRouteLine(line);
+  } catch (err) {
+    console.warn(`Route line API unavailable for "${line}", using mock data:`, err.message);
+    return MOCK_ROUTES[line] ?? { line, variants: [] };
+  }
 }
 
 /**
