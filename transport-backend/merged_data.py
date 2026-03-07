@@ -48,6 +48,7 @@ class MergedData:
         self.journey_to_route = []
         self.route_metadata = []
         self.journey_metadata = []
+        self.route_tracks = []
 
         # Per-journey mode (BUS or TRAIN), filled during merge
         self._journey_mode = []
@@ -103,6 +104,11 @@ class MergedData:
             )
             self.journey_metadata.extend(
                 getattr(data, "journey_metadata", []) or [None] * n_journeys
+            )
+
+            # --- route_tracks (copy as-is, no remapping needed) ---
+            self.route_tracks.extend(
+                getattr(data, "route_tracks", []) or [[] for _ in range(n_routes)]
             )
 
             # Record the transport mode for every journey in this group
@@ -205,3 +211,4 @@ class _Empty:
     journey_to_route = []
     route_metadata = []
     journey_metadata = []
+    route_tracks = []

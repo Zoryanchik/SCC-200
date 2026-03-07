@@ -209,6 +209,14 @@ class BusLoader:
                 org_working  INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (journey_id)
             );
+            -- Track waypoints (lat/lon polyline) extracted from <Mapping><track>
+            CREATE TABLE IF NOT EXISTS bus_route_tracks (
+                route_id    TEXT NOT NULL,
+                seq         INTEGER NOT NULL,
+                lat         DOUBLE PRECISION NOT NULL,
+                lon         DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (route_id, seq)
+            );
             -- Indexes for faster JOINs in load_busdata_for_date
             CREATE INDEX IF NOT EXISTS idx_journey_routes_route ON bus_journey_routes(route_id);
             CREATE INDEX IF NOT EXISTS idx_route_stops_route ON bus_route_stops(route_id);
@@ -242,9 +250,10 @@ class BusLoader:
     def _parse_file(self, file_path):
         """Parse a TransXChange XML file and return row-lists without touching the DB.
 
-        Returns a 7-tuple:
+        Returns an 8-tuple:
             (route_stops_rows, journey_routes_rows, journey_times_rows,
-             stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows)
+             stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
+             route_track_rows)
         """
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -288,6 +297,38 @@ class BusLoader:
                 to_day_shift = int(jptl.findtext(f'{ns}To/{ns}DepartureDayShift') or '0')
                 links.append((jptl_id, from_stop, to_stop, run_sec, to_day_shift))
             jps_data[sid] = links
+
+        # --- Parse <RouteSections> track waypoints (lat/lon from <Mapping>) ---
+        route_section_tracks = {}  # section_id -> list of (lat, lon)
+        for rs in root.findall(f'{ns}RouteSections/{ns}RouteSection'):
+            rs_id = rs.attrib.get('id', '')
+            waypoints = []
+            for rl in rs.findall(f'{ns}RouteLink'):
+                mapping = rl.find(f'{ns}Track/{ns}Mapping')
+                if mapping is None:
+                    continue
+                for loc in mapping.findall(f'{ns}Location'):
+                    lat_s = loc.findtext(f'{ns}Translation/{ns}Latitude', '')
+                    lon_s = loc.findtext(f'{ns}Translation/{ns}Longitude', '')
+                    if lat_s and lon_s:
+                        try:
+                            waypoints.append((float(lat_s), float(lon_s)))
+                        except ValueError:
+                            pass
+            if waypoints:
+                route_section_tracks[rs_id] = waypoints
+
+        # --- Parse <Routes> and assemble full track polylines per Route ---
+        route_tracks_raw = {}  # route_id (XML-level) -> [(lat, lon), ...]
+        for rt in root.findall(f'{ns}Routes/{ns}Route'):
+            rt_id = rt.attrib.get('id', '')
+            track = []
+            for sec_ref in rt.findall(f'{ns}RouteSectionRef'):
+                sec_id = sec_ref.text
+                if sec_id in route_section_tracks:
+                    track.extend(route_section_tracks[sec_id])
+            if track:
+                route_tracks_raw[rt_id] = track
 
         def section_stops(sid):
             links = jps_data[sid]
@@ -348,6 +389,22 @@ class BusLoader:
             rkey = f"{service_code}:{route_id}" if service_code else route_id
             for idx, atco in enumerate(stops):
                 route_stops_rows.append((rkey, atco, idx))
+
+        # --- Build route track rows (route_id, seq, lat, lon) ---
+        # Simplify each track to at most ~100 points to keep DB size manageable.
+        route_track_rows = []
+        for route_id, track in route_tracks_raw.items():
+            rkey = f"{service_code}:{route_id}" if service_code else route_id
+            n = len(track)
+            if n <= 100:
+                simplified = track
+            else:
+                step = n / 100.0
+                simplified = [track[int(i * step)] for i in range(100)]
+                if track[-1] != simplified[-1]:
+                    simplified.append(track[-1])
+            for seq, (lat, lon) in enumerate(simplified):
+                route_track_rows.append((rkey, seq, lat, lon))
 
         journey_routes_rows = []
         journey_times_rows  = []
@@ -426,7 +483,8 @@ class BusLoader:
                     journey_times_rows.append((jkey, to_stop, cum))
 
         return (route_stops_rows, journey_routes_rows, journey_times_rows,
-                stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows)
+                stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
+                route_track_rows)
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
@@ -458,6 +516,7 @@ class BusLoader:
         all_service_ops    = []
         all_serviced_orgs  = []
         all_journey_ops    = []
+        all_route_tracks   = []
 
         for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
@@ -471,6 +530,7 @@ class BusLoader:
                     all_service_ops    .extend(r[4])
                     all_serviced_orgs  .extend(r[5])
                     all_journey_ops    .extend(r[6])
+                    all_route_tracks   .extend(r[7])
                 # Only print every 10th file or the last one to reduce log noise
                 if (idx + 1) % 10 == 0 or idx == total - 1:
                     print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
@@ -481,6 +541,7 @@ class BusLoader:
         self.populate(
             all_route_stops, all_journey_routes, all_journey_times,
             all_stop_names, all_service_ops, all_serviced_orgs, all_journey_ops,
+            all_route_tracks,
         )
         print(f'  [bus] {prefix}Done. {total} files, '
               f'{len(all_journey_routes)} journeys, '
@@ -508,7 +569,8 @@ class BusLoader:
             self.load_folder(tmp_dir, tag=label)
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
-                  service_ops=None, serviced_orgs=None, journey_ops=None ):
+                  service_ops=None, serviced_orgs=None, journey_ops=None,
+                  route_tracks=None ):
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
@@ -518,6 +580,7 @@ class BusLoader:
             service_ops:    list of (service_code, start_date, end_date)
             serviced_orgs:  list of (service_code, start_date, end_date)
             journey_ops:    list of (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working)
+            route_tracks:   list of (route_id, seq, lat, lon)
         """
         conn = self._connect(self.db_path)
         cursor = conn.cursor()
@@ -627,6 +690,15 @@ class BusLoader:
                 on_conflict='ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working',
                 key_indices=(0,),  # (journey_id,)
             )
+        if route_tracks:
+            _chunked_multi_insert(
+                cursor,
+                'bus_route_tracks',
+                ['route_id', 'seq', 'lat', 'lon'],
+                route_tracks,
+                on_conflict='ON CONFLICT (route_id, seq) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon',
+                key_indices=(0, 1),  # (route_id, seq)
+            )
         conn.commit()
         conn.close()
 
@@ -713,6 +785,23 @@ class BusLoader:
                     "route_id":  route_id,
                     "line_name": line_name,
                 }
+
+        # --- 5. load route tracks (lat/lon polylines) ---
+        try:
+            cursor.execute("SELECT route_id, lat, lon FROM bus_route_tracks ORDER BY route_id, seq")
+            current_route = None
+            track_buf = []
+            for route_id, lat, lon in cursor.fetchall():
+                if route_id != current_route:
+                    if current_route is not None:
+                        bd.add_route_track(current_route, track_buf)
+                    current_route = route_id
+                    track_buf = []
+                track_buf.append((lat, lon))
+            if current_route is not None:
+                bd.add_route_track(current_route, track_buf)
+        except Exception:
+            pass  # table may not exist in older DBs
 
         conn.close()
         return bd
@@ -914,6 +1003,27 @@ class BusLoader:
                     "route_id":  route_id,
                     "line_name": line_name,
                 }
+
+        # 3e. route tracks — only routes that have valid journeys
+        try:
+            cur.execute(
+                "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_tracks rt "
+                "JOIN _valid_routes vr ON rt.route_id = vr.route_id "
+                "ORDER BY rt.route_id, rt.seq"
+            )
+            current_route = None
+            track_buf = []
+            for route_id, lat, lon in cur.fetchall():
+                if route_id != current_route:
+                    if current_route is not None:
+                        bd.add_route_track(current_route, track_buf)
+                    current_route = route_id
+                    track_buf = []
+                track_buf.append((lat, lon))
+            if current_route is not None:
+                bd.add_route_track(current_route, track_buf)
+        except Exception:
+            pass  # table may not exist in older DBs
 
         conn.commit()  # commit to drop temp tables
         conn.close()
