@@ -222,6 +222,59 @@ export const fetchClassifiedStops = async (classification) => {
 };
 
 /**
+ * Mock arrival data used as a fallback when the API is unreachable.
+ * Represents a plausible set of upcoming departures from Lancaster Bus Station.
+ */
+export const MOCK_ARRIVALS = [
+  {
+    line: '1',
+    destination: 'Lancaster Bus Station',
+    scheduledTime: '12:00:00',
+    status: 'On time',
+  },
+  {
+    line: '40',
+    destination: 'Galgate',
+    scheduledTime: '12:08:00',
+    status: 'On time',
+  },
+  {
+    line: '100',
+    destination: 'Lancaster University',
+    scheduledTime: '12:15:00',
+    status: 'On time',
+  },
+];
+
+/**
+ * Fetch upcoming timetabled arrivals / departures for a bus stop.
+ *
+ * Uses ``GET /bus/arrivals/{stopCode}``.  Falls back to
+ * {@link MOCK_ARRIVALS} when the API is unavailable so the popup
+ * always shows *something* in development / demo mode.
+ *
+ * @param {string} atcoCode - ATCO stop code, e.g. ``"2500LAA12000"``
+ * @returns {Promise<Array>} Array of ``{line, destination, scheduledTime, status}``
+ */
+export const fetchBusArrivals = async (atcoCode) => {
+  try {
+    const url = `${API_BASE_URL}/bus/arrivals/${encodeURIComponent(atcoCode)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    if (!Array.isArray(data)) {
+      throw new Error('Unexpected response format');
+    }
+    return data;
+  } catch (err) {
+    console.warn('Bus arrivals API unavailable, using mock data:', err.message);
+    return MOCK_ARRIVALS;
+  }
+};
+
+/**
  * Get bus stops, falling back to mock data when the API is unavailable.
  *
  * @param {Object} [options]
@@ -238,10 +291,16 @@ export const getBusStopsWithFallback = async (options = {}) => {
     console.warn('Bus stops API unavailable, using mock data:', err.message);
   }
 
-  // Return mock data, optionally filtered by classification
+  // Return mock data, optionally filtered by classification and/or bbox
   let mocks = MOCK_BUS_STOPS;
   if (options.classification) {
     mocks = mocks.filter((s) => s.classification === options.classification);
+  }
+  if (options.bbox) {
+    const [south, west, north, east] = options.bbox.split(',').map(Number);
+    mocks = mocks.filter(
+      (s) => s.lat >= south && s.lat <= north && s.lon >= west && s.lon <= east,
+    );
   }
   return mocks;
 };

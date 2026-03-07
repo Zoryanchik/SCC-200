@@ -15,7 +15,9 @@ import {
   fetchBusStops,
   fetchClassifiedStops,
   getBusStopsWithFallback,
+  fetchBusArrivals,
   MOCK_BUS_STOPS,
+  MOCK_ARRIVALS,
 } from '../busStopsApi';
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -288,5 +290,133 @@ describe('getBusStopsWithFallback', () => {
 
     const calledUrl = global.fetch.mock.calls[0][0];
     expect(calledUrl).toContain('classification=interchange');
+  });
+
+  it('passes bbox to API call', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([makeApiStop()]),
+    });
+
+    await getBusStopsWithFallback({ bbox: '53.0,-3.5,55.0,-2.0' });
+
+    const calledUrl = global.fetch.mock.calls[0][0];
+    expect(calledUrl).toContain('bbox=53.0');
+  });
+
+  it('filters mock fallback stops by bbox', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('down'));
+
+    // Tight bbox around Lancaster city centre only
+    const result = await getBusStopsWithFallback({ bbox: '54.04,-2.815,54.06,-2.79' });
+
+    expect(result.length).toBeGreaterThan(0);
+    for (const stop of result) {
+      expect(stop.lat).toBeGreaterThanOrEqual(54.04);
+      expect(stop.lat).toBeLessThanOrEqual(54.06);
+      expect(stop.lon).toBeGreaterThanOrEqual(-2.815);
+      expect(stop.lon).toBeLessThanOrEqual(-2.79);
+    }
+  });
+
+  it('returns empty array from mock when bbox excludes all stops', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('down'));
+
+    // bbox in the middle of the North Sea — no stops
+    const result = await getBusStopsWithFallback({ bbox: '55.0,5.0,56.0,6.0' });
+
+    expect(result).toEqual([]);
+  });
+});
+
+// ── MOCK_ARRIVALS integrity ─────────────────────────────────────────
+
+describe('MOCK_ARRIVALS', () => {
+  it('contains at least one arrival', () => {
+    expect(MOCK_ARRIVALS.length).toBeGreaterThan(0);
+  });
+
+  it('every mock arrival has required fields', () => {
+    for (const a of MOCK_ARRIVALS) {
+      expect(a).toHaveProperty('line');
+      expect(a).toHaveProperty('destination');
+      expect(a).toHaveProperty('scheduledTime');
+      expect(a).toHaveProperty('status');
+    }
+  });
+
+  it('scheduledTime is in HH:MM:SS format', () => {
+    for (const a of MOCK_ARRIVALS) {
+      expect(a.scheduledTime).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    }
+  });
+});
+
+// ── fetchBusArrivals ────────────────────────────────────────────────
+
+describe('fetchBusArrivals', () => {
+  const ATCO = '2500LAA12000';
+  const API_ARRIVALS = [
+    { line: '1', destination: 'Lancaster', scheduledTime: '12:00:00', status: 'On time' },
+    { line: '100', destination: 'Uni', scheduledTime: '12:15:00', status: 'On time' },
+  ];
+
+  it('calls GET /bus/arrivals/{stopCode}', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(API_ARRIVALS),
+    });
+
+    await fetchBusArrivals(ATCO);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const url = global.fetch.mock.calls[0][0];
+    expect(url).toContain(`/bus/arrivals/${ATCO}`);
+  });
+
+  it('returns the arrivals array from the API', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(API_ARRIVALS),
+    });
+
+    const result = await fetchBusArrivals(ATCO);
+    expect(result).toEqual(API_ARRIVALS);
+  });
+
+  it('falls back to MOCK_ARRIVALS on network failure', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+    const result = await fetchBusArrivals(ATCO);
+    expect(result).toEqual(MOCK_ARRIVALS);
+  });
+
+  it('falls back to MOCK_ARRIVALS on HTTP error', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+
+    const result = await fetchBusArrivals(ATCO);
+    expect(result).toEqual(MOCK_ARRIVALS);
+  });
+
+  it('falls back to MOCK_ARRIVALS when API returns non-array', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ error: 'bad' }),
+    });
+
+    const result = await fetchBusArrivals(ATCO);
+    expect(result).toEqual(MOCK_ARRIVALS);
+  });
+
+  it('URL-encodes the stop code', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([]),
+    });
+
+    await fetchBusArrivals('2500 AB/12');
+
+    const url = global.fetch.mock.calls[0][0];
+    expect(url).toContain('2500%20AB%2F12');
   });
 });
