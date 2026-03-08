@@ -9,6 +9,7 @@ import ssl
 import tempfile
 import json
 import urllib.request
+from urllib.parse import urlparse
 import zipfile
 from bus_data import BusData
 import traceback
@@ -34,11 +35,8 @@ class BusLoader:
     # (psycopg) and return a native psycopg connection.
     def _connect(self, path=None):
         db = path or self.db_path
-
         # Always use Postgres (psycopg) in Postgres-only mode.
-        pg_conn = psycopg.connect(db)
-        # psycopg connection is returned directly for Postgres usage.
-        return pg_conn
+        return psycopg.connect(db)
 
     def get_download_urls(self):
         """Return a list of dataset download URLs.
@@ -161,13 +159,15 @@ class BusLoader:
                 route_id   TEXT,
                 atco_code  TEXT,
                 stop_order INTEGER NOT NULL,
+                revision   INTEGER,
                 PRIMARY KEY (route_id, atco_code)
             );
             CREATE TABLE IF NOT EXISTS bus_journey_routes (
                 journey_id TEXT PRIMARY KEY,
                 route_id   TEXT NOT NULL,
                 line_name  TEXT,
-                destination_display TEXT
+                destination_display TEXT,
+                revision   INTEGER
             );
             CREATE TABLE IF NOT EXISTS bus_journey_times (
                 journey_id     TEXT,
@@ -220,6 +220,9 @@ class BusLoader:
             -- Indexes for faster JOINs in load_busdata_for_date
             CREATE INDEX IF NOT EXISTS idx_journey_routes_route ON bus_journey_routes(route_id);
             CREATE INDEX IF NOT EXISTS idx_route_stops_route ON bus_route_stops(route_id);
+            -- Upgrade: add revision columns if they don't exist (for existing DBs)
+            ALTER TABLE bus_route_stops ADD COLUMN IF NOT EXISTS revision INTEGER;
+            ALTER TABLE bus_journey_routes ADD COLUMN IF NOT EXISTS revision INTEGER;
         '''
         import re as _re
         cur = conn.cursor()
@@ -250,10 +253,13 @@ class BusLoader:
     def _parse_file(self, file_path):
         """Parse a TransXChange XML file and return row-lists without touching the DB.
 
-        Returns an 8-tuple:
+        Returns a 9-tuple:
             (route_stops_rows, journey_routes_rows, journey_times_rows,
              stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-             route_track_rows)
+             route_track_rows, file_revision)
+
+        file_revision is the max RevisionNumber attribute found in the XML
+        (int), or None if no RevisionNumber attributes are present.
         """
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -334,9 +340,22 @@ class BusLoader:
             links = jps_data[sid]
             if not links:
                 return []
-            stops = [links[0][1]]
+            # Build the stop sequence for this JourneyPatternSection.
+            # Collapse consecutive duplicate StopPointRefs (these can
+            # appear when timing links repeat the same stop) but allow
+            # non-consecutive repeats (e.g. loops) to be preserved.
+            stops = []
+            prev = None
+            # The first link's 'From' stop is the start
+            first_from = links[0][1]
+            if first_from != prev:
+                stops.append(first_from)
+                prev = first_from
             for _, _, to_stop, _, _ in links:
+                if to_stop == prev:
+                    continue
                 stops.append(to_stop)
+                prev = to_stop
             return stops
 
         jp_map = {}
@@ -372,15 +391,34 @@ class BusLoader:
 
         route_stop_lists = {}
         for jp_id, info in jp_map.items():
-            rref  = info['route_ref']
+            rref = info['route_ref']
             stops = []
             for sid in info['section_ids']:
                 stops.extend(section_stops(sid))
-            seen, ordered = set(), []
+
+            # First collapse consecutive duplicates produced by joining
+            # adjacent sections (e.g. repeated StopPointRefs). Then enforce
+            # global uniqueness (preserve first occurrence) so the final
+            # route stop list contains each ATCO once and stop_order will
+            # be contiguous when inserted into the DB (table PK forbids
+            # duplicate atco per route).
+            collapsed = []
+            prev = None
             for s in stops:
-                if s not in seen:
-                    seen.add(s)
-                    ordered.append(s)
+                if s == prev:
+                    continue
+                collapsed.append(s)
+                prev = s
+
+            ordered = []
+            seen_glob = set()
+            for s in collapsed:
+                if s in seen_glob:
+                    continue
+                seen_glob.add(s)
+                ordered.append(s)
+
+            # Prefer the longest observed pattern for a given RouteRef
             if rref not in route_stop_lists or len(ordered) > len(route_stop_lists[rref]):
                 route_stop_lists[rref] = ordered
 
@@ -419,10 +457,10 @@ class BusLoader:
         }
 
         for vj in root.findall(f'{ns}VehicleJourneys/{ns}VehicleJourney'):
-            vj_code  = vj.findtext(f'{ns}VehicleJourneyCode')
-            jp_ref   = vj.findtext(f'{ns}JourneyPatternRef')
-            dep_hms  = vj.findtext(f'{ns}DepartureTime')
-            dep_sec  = self._hms_to_seconds(dep_hms)
+            vj_code = vj.findtext(f'{ns}VehicleJourneyCode')
+            jp_ref = vj.findtext(f'{ns}JourneyPatternRef')
+            dep_hms = vj.findtext(f'{ns}DepartureTime')
+            dep_sec = self._hms_to_seconds(dep_hms)
             line_ref = vj.findtext(f'{ns}LineRef', '')
             line_name = line_names.get(line_ref, '')
             if line_name:
@@ -438,8 +476,8 @@ class BusLoader:
             op = vj.find(f'{ns}OperatingProfile')
             dow_mask = 127
             op_start = svc_start
-            op_end   = svc_end
-            org_ref  = ''
+            op_end = svc_end
+            org_ref = ''
             org_working = 1
 
             if op is not None:
@@ -455,19 +493,21 @@ class BusLoader:
                     if inc is not None:
                         sd = inc.findtext(f'{ns}StartDate', '')
                         ed = inc.findtext(f'{ns}EndDate', '')
-                        if sd: op_start = sd
-                        if ed: op_end   = ed
+                        if sd:
+                            op_start = sd
+                        if ed:
+                            op_end = ed
 
             journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working))
 
             overrides = {}
             for vjtl in vj.findall(f'{ns}VehicleJourneyTimingLink'):
                 ref = vjtl.findtext(f'{ns}JourneyPatternTimingLinkRef')
-                rt  = vjtl.findtext(f'{ns}RunTime')
+                rt = vjtl.findtext(f'{ns}RunTime')
                 if ref and rt:
                     overrides[ref] = self._parse_duration(rt)
 
-            cum   = dep_sec
+            cum = dep_sec
             first = True
             for sid in info['section_ids']:
                 for jptl_id, from_stop, to_stop, base_run, to_day_shift in jps_data[sid]:
@@ -482,14 +522,32 @@ class BusLoader:
                             cum = min_time
                     journey_times_rows.append((jkey, to_stop, cum))
 
+        # --- Determine a file-level RevisionNumber if present ---
+        # Some TXC payloads put RevisionNumber attributes on elements
+        # (e.g. VehicleJourney). We take the maximum RevisionNumber seen
+        # as a coarse file-level revision. If none present, revision=None.
+        file_rev = None
+        for el in root.iter():
+            rn = el.attrib.get('RevisionNumber')
+            if rn:
+                try:
+                    rv = int(rn)
+                    if file_rev is None or rv > file_rev:
+                        file_rev = rv
+                except Exception:
+                    pass
+
         return (route_stops_rows, journey_routes_rows, journey_times_rows,
                 stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-                route_track_rows)
+                route_track_rows, file_rev)
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
         rows = self._parse_file(file_path)
-        self.populate(*rows)
+        if not rows:
+            return
+        *data_rows, file_rev = rows
+        self.populate(*data_rows, revision=file_rev)
 
     def load_folder(self, folder_path, tag=None):
         """Parse every .xml file in a folder sequentially and bulk-insert.
@@ -509,43 +567,26 @@ class BusLoader:
         if total == 0:
             return
 
-        all_route_stops    = []
-        all_journey_routes = []
-        all_journey_times  = []
-        all_stop_names     = []
-        all_service_ops    = []
-        all_serviced_orgs  = []
-        all_journey_ops    = []
-        all_route_tracks   = []
-
         for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
             try:
                 r = self._parse_file(fpath)
                 if r:
-                    all_route_stops    .extend(r[0])
-                    all_journey_routes .extend(r[1])
-                    all_journey_times  .extend(r[2])
-                    all_stop_names     .extend(r[3])
-                    all_service_ops    .extend(r[4])
-                    all_serviced_orgs  .extend(r[5])
-                    all_journey_ops    .extend(r[6])
-                    all_route_tracks   .extend(r[7])
+                    # _parse_file returns the 8 row-lists plus file_revision
+                    route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev = r
+                    # Populate per-file so we can make revision-aware decisions per payload
+                    self.populate(
+                        route_stops, journey_routes, journey_times,
+                        stop_names, service_ops, serviced_orgs, journey_ops,
+                        route_tracks, revision=file_rev, tag=tag,
+                    )
                 # Only print every 10th file or the last one to reduce log noise
                 if (idx + 1) % 10 == 0 or idx == total - 1:
                     print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
             except Exception as e:
                 print(f'  [bus] {prefix}ERR [{idx+1}/{total}] {fname}: {e}')
 
-        # Single bulk insert for the whole folder
-        self.populate(
-            all_route_stops, all_journey_routes, all_journey_times,
-            all_stop_names, all_service_ops, all_serviced_orgs, all_journey_ops,
-            all_route_tracks,
-        )
-        print(f'  [bus] {prefix}Done. {total} files, '
-              f'{len(all_journey_routes)} journeys, '
-              f'{len(all_journey_times)} stop-times.')
+        print(f'  [bus] {prefix}Done. {total} files.')
 
     def download_and_load(self, url, tag=None):
         """Download a zip of TXC XML files from a URL, extract, and load into the DB.
@@ -570,7 +611,7 @@ class BusLoader:
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None,
-                  route_tracks=None ):
+                  route_tracks=None, revision=None, tag=None ):
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
@@ -584,6 +625,183 @@ class BusLoader:
         """
         conn = self._connect(self.db_path)
         cursor = conn.cursor()
+
+        # Apply optional namespacing (tag) and revision-aware filtering.
+        # When tag is provided, prefix journey_id/route_id values with "{tag}::" so
+        # colliding ids from different datasets remain distinct.
+        def _apply_namespacing_and_revision():
+            nonlocal route_stops, journey_routes, journey_times, journey_ops, route_tracks
+
+            def _pref(x):
+                if not tag or not x:
+                    return x
+                return f"{tag}::{x}"
+
+            # Prefix ids
+            route_stops = [( _pref(rid), atco, so ) for (rid, atco, so) in (route_stops or [])]
+            journey_routes = [( _pref(jid), _pref(rid), ln, dd ) for (jid, rid, ln, dd) in (journey_routes or [])]
+            journey_times = [( _pref(jid), atco, at ) for (jid, atco, at) in (journey_times or [])]
+            journey_ops = [( _pref(jid), svc, dow, s, e, org, orgw ) for (jid, svc, dow, s, e, org, orgw) in (journey_ops or [])]
+            route_tracks = [( _pref(rid), seq, lat, lon ) for (rid, seq, lat, lon) in (route_tracks or [])]
+
+            # Revision-aware skipping/deletion. If the DB table contains a 'revision'
+            # column we compare incoming file-level revision (None->0) to existing
+            # per-entity revisions and either skip inserting (if existing > incoming)
+            # or delete older rows (if existing < incoming) before inserting.
+            incoming_rev = revision or 0
+
+            def _has_revision_col(table):
+                cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'revision'", (table,))
+                return cursor.fetchone() is not None
+
+            # Journey-level decisions
+            if journey_routes and _has_revision_col('bus_journey_routes'):
+                unique_jids = sorted({jr[0] for jr in journey_routes if jr[0]})
+                skip_jids = set()
+                for jid in unique_jids:
+                    cursor.execute("SELECT MAX(revision) FROM bus_journey_routes WHERE journey_id = %s", (jid,))
+                    row = cursor.fetchone()
+                    existing_rev = row[0] if row and row[0] is not None else 0
+                    if existing_rev > incoming_rev:
+                        skip_jids.add(jid)
+                    elif existing_rev < incoming_rev and existing_rev != 0:
+                        # incoming is newer: delete older dependent rows so inserts replace cleanly
+                        cursor.execute("DELETE FROM bus_journey_times WHERE journey_id = %s", (jid,))
+                        cursor.execute("DELETE FROM bus_journey_operating_profile WHERE journey_id = %s", (jid,))
+                        cursor.execute("DELETE FROM bus_journey_routes WHERE journey_id = %s", (jid,))
+
+                if skip_jids:
+                    journey_routes = [r for r in journey_routes if r[0] not in skip_jids]
+                    journey_times = [r for r in journey_times if r[0] not in skip_jids]
+                    journey_ops = [r for r in journey_ops if r[0] not in skip_jids]
+
+            # Route-level decisions
+            if route_stops and _has_revision_col('bus_route_stops'):
+                unique_rids = sorted({rs[0] for rs in route_stops if rs[0]})
+                skip_rids = set()
+                for rid in unique_rids:
+                    cursor.execute("SELECT MAX(revision) FROM bus_route_stops WHERE route_id = %s", (rid,))
+                    row = cursor.fetchone()
+                    existing_rev = row[0] if row and row[0] is not None else 0
+                    if existing_rev > incoming_rev:
+                        skip_rids.add(rid)
+                    elif existing_rev < incoming_rev and existing_rev != 0:
+                        cursor.execute("DELETE FROM bus_route_tracks WHERE route_id = %s", (rid,))
+                        cursor.execute("DELETE FROM bus_route_stops WHERE route_id = %s", (rid,))
+
+                if skip_rids:
+                    route_stops = [r for r in route_stops if r[0] not in skip_rids]
+                    route_tracks = [r for r in route_tracks if r[0] not in skip_rids]
+
+            # Fallback: when incoming revision is missing/zero, avoid loading
+            # data for IDs that already exist in the DB. This prevents
+            # accidental overwrites when no revision information is available.
+            if incoming_rev == 0:
+                try:
+                    # Journeys: skip any journey_id that already exists
+                    if journey_routes:
+                        unique_jids = sorted({jr[0] for jr in journey_routes if jr[0]})
+                        if unique_jids:
+                            cursor.execute(
+                                "SELECT journey_id FROM bus_journey_routes WHERE journey_id = ANY(%s)",
+                                (unique_jids,)
+                            )
+                            existing_j = {r[0] for r in cursor.fetchall()}
+                            if existing_j:
+                                journey_routes = [r for r in journey_routes if r[0] not in existing_j]
+                                journey_times = [r for r in journey_times if r[0] not in existing_j]
+                                journey_ops = [r for r in journey_ops if r[0] not in existing_j]
+
+                    # Routes: skip any route_id that already exists
+                    if route_stops:
+                        unique_rids = sorted({rs[0] for rs in route_stops if rs[0]})
+                        if unique_rids:
+                            cursor.execute(
+                                "SELECT DISTINCT route_id FROM bus_route_stops WHERE route_id = ANY(%s)",
+                                (unique_rids,)
+                            )
+                            existing_r = {r[0] for r in cursor.fetchall()}
+                            if existing_r:
+                                route_stops = [r for r in route_stops if r[0] not in existing_r]
+                                route_tracks = [r for r in route_tracks if r[0] not in existing_r]
+                except Exception:
+                    # If anything goes wrong with the fallback queries, ignore
+                    # and proceed — existing revision logic (if present) still applies.
+                    pass
+
+        # Apply the namespacing and revision logic before inserts
+        try:
+            _apply_namespacing_and_revision()
+        except Exception:
+            # If anything goes wrong here, fall back to non-namespaced insert
+            pass
+
+        # --- Deduplicate route_stops by (route_id, stop_order) ---
+        # Some TXC payloads or previous parsing logic can produce multiple
+        # different ATCO codes assigned the same stop_order for a route,
+        # possibly originating from different files. Because we call
+        # populate() per-file during folder loads, deduplication within a
+        # single call isn't enough. Here we skip inserting any incoming
+        # (route_id, stop_order) pair that already exists in the DB (this
+        # check comes after the per-entity revision deletion above, so
+        # newer incoming revisions have already removed older rows).
+        if route_stops:
+            try:
+                # Collect unique route_ids from incoming rows
+                unique_rids = sorted({rs[0] for rs in route_stops if rs[0]})
+                existing_pairs = set()
+                if unique_rids:
+                    # Fetch existing (route_id, stop_order) pairs for these routes
+                    cursor.execute(
+                        "SELECT route_id, stop_order FROM bus_route_stops WHERE route_id = ANY(%s)",
+                        (unique_rids,)
+                    )
+                    for row in cursor.fetchall():
+                        existing_pairs.add((row[0], row[1]))
+
+                # Keep first-seen incoming row for each (route_id, stop_order)
+                seen_rs = set()
+                deduped = []
+                for rid, atco, so in route_stops:
+                    key = (rid, so)
+                    if key in seen_rs:
+                        continue
+                    # If the DB already has this (route_id, stop_order), skip
+                    if key in existing_pairs:
+                        continue
+                    seen_rs.add(key)
+                    deduped.append((rid, atco, so))
+                route_stops = deduped
+            except Exception:
+                # If anything goes wrong with the DB probe, fall back to
+                # the local-first-occurrence dedupe to avoid inserting
+                # exact duplicates within this batch.
+                seen_rs = set()
+                deduped = []
+                for rid, atco, so in route_stops:
+                    key = (rid, so)
+                    if key in seen_rs:
+                        continue
+                    seen_rs.add(key)
+                    deduped.append((rid, atco, so))
+                route_stops = deduped
+
+        # Append revision to route_stops and journey_routes row tuples so the
+        # value is stored alongside the data for future comparisons.
+        rev_val = revision  # may be None or int
+        def _has_revision_col(table):
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = 'revision'", (table,))
+            return cursor.fetchone() is not None
+
+        _rs_has_rev = _has_revision_col('bus_route_stops')
+        _jr_has_rev = _has_revision_col('bus_journey_routes')
+
+        if _rs_has_rev and route_stops:
+            route_stops = [(*r, rev_val) for r in route_stops]
+        if _jr_has_rev and journey_routes:
+            journey_routes = [(*r, rev_val) for r in journey_routes]
 
         def _chunked_multi_insert(cur, table, cols, rows, on_conflict=None, key_indices=None, chunk_size=1000):
             """Insert rows using COPY to temp table + INSERT...SELECT...ON CONFLICT.
@@ -629,20 +847,30 @@ class BusLoader:
             else:
                 cur.execute(f"INSERT INTO {table} ({col_list}) SELECT {col_list} FROM {temp_table}{on_conf}")
 
+        _rs_cols = ['route_id', 'atco_code', 'stop_order']
+        _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order'
+        if _rs_has_rev:
+            _rs_cols.append('revision')
+            _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order, revision = EXCLUDED.revision'
         _chunked_multi_insert(
             cursor,
             'bus_route_stops',
-            ['route_id', 'atco_code', 'stop_order'],
+            _rs_cols,
             route_stops,
-            on_conflict='ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order',
+            on_conflict=_rs_conflict,
             key_indices=(0, 1),  # (route_id, atco_code)
         )
+        _jr_cols = ['journey_id', 'route_id', 'line_name', 'destination_display']
+        _jr_conflict = 'ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display'
+        if _jr_has_rev:
+            _jr_cols.append('revision')
+            _jr_conflict = 'ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display, revision = EXCLUDED.revision'
         _chunked_multi_insert(
             cursor,
             'bus_journey_routes',
-            ['journey_id', 'route_id', 'line_name', 'destination_display'],
+            _jr_cols,
             journey_routes,
-            on_conflict='ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display',
+            on_conflict=_jr_conflict,
             key_indices=(0,),  # (journey_id,)
         )
         _chunked_multi_insert(
@@ -1220,3 +1448,46 @@ class BusLoader:
 
     # Walking-related functions have been moved to `walking_loader.py`.
     # Use WalkingLoader(db_path) for NaPTAN download and walking precomputation.
+
+def ensure_db_and_schema(dsn):
+    """Ensure that the target Postgres database exists and the schema is created.
+
+    This is intended to be called explicitly at application startup (for
+    example from the FastAPI lifespan handler) when automatic DB creation is
+    desired in developer environments. It will attempt to connect to *dsn*; if
+    the database does not exist it will connect to the server 'postgres'
+    administrative database and issue CREATE DATABASE. After the database
+    exists, the standard schema creation is run.
+
+    Raises a RuntimeError if database creation or schema setup fails.
+    """
+    u = urlparse(dsn)
+    dbname = (u.path[1:] if u.path else '') or ''
+    if not dbname:
+        raise ValueError('DSN must include a database name')
+
+    # Fast path: if we can connect the DB already exists — ensure schema and return
+    try:
+        conn = psycopg.connect(dsn)
+        conn.close()
+        BusLoader(dsn).create_schema()
+        return
+    except Exception as orig_exc:
+        # If connection failed because DB doesn't exist, attempt to create it
+        # by connecting to the server 'postgres' DB.
+        admin_dsn = f"postgresql://{u.username or ''}:{u.password or ''}@{u.hostname or '127.0.0.1'}:{u.port or 5432}/postgres"
+        try:
+            admin_conn = psycopg.connect(admin_dsn)
+            admin_conn.autocommit = True
+            cur = admin_conn.cursor()
+            cur.execute(f'CREATE DATABASE "{dbname}"')
+            cur.close()
+            admin_conn.close()
+        except Exception as e:
+            raise RuntimeError(f'Failed to create database {dbname}: {e}') from orig_exc
+
+        # Create schema in the newly-created database
+        try:
+            BusLoader(dsn).create_schema()
+        except Exception as e:
+            raise RuntimeError(f'Failed to create schema in {dbname}: {e}') from e

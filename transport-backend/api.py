@@ -87,6 +87,18 @@ async def lifespan(app: FastAPI):
     """
     global _base_cache
     try:
+        # Optionally auto-create the Postgres database and schema in dev
+        # environments when BUS_AUTO_CREATE_DB=1. This keeps creation as an
+        # explicit startup step instead of happening inside low-level
+        # connection helpers.
+        if os.environ.get('BUS_AUTO_CREATE_DB') == '1':
+            try:
+                from bus_loader import ensure_db_and_schema
+                from main import BUS_DB_PATH as _bus_dsn
+                ensure_db_and_schema(_bus_dsn)
+            except Exception as _e:  # pragma: no cover
+                logger.warning('BUS_AUTO_CREATE_DB requested but ensure_db_and_schema failed: %s', _e)
+
         from main import initialize_base
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
