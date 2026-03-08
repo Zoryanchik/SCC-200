@@ -567,26 +567,64 @@ class BusLoader:
         if total == 0:
             return
 
+        # Group parsed file rows by operator (inferred from filename prefix
+        # before the first underscore, e.g. 'KLCO_...'). This batches files
+        # into small groups so we call populate() per-operator rather than
+        # per-file, reducing the number of DB transactions while still
+        # keeping datasets logically separated.
+        buckets = {}
+        counts = 0
         for idx, fname in enumerate(files):
             fpath = os.path.join(folder_path, fname)
             try:
                 r = self._parse_file(fpath)
-                if r:
-                    # _parse_file returns the 8 row-lists plus file_revision
-                    route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev = r
-                    # Populate per-file so we can make revision-aware decisions per payload
-                    self.populate(
-                        route_stops, journey_routes, journey_times,
-                        stop_names, service_ops, serviced_orgs, journey_ops,
-                        route_tracks, revision=file_rev, tag=tag,
-                    )
+                if not r:
+                    continue
+                route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev = r
+
+                # infer operator key from filename (safe fallback to 'DEFAULT')
+                op = fname.split('_', 1)[0] if '_' in fname else 'DEFAULT'
+                if op not in buckets:
+                    buckets[op] = {
+                        'route_stops': [], 'journey_routes': [], 'journey_times': [],
+                        'stop_names': [], 'service_ops': [], 'serviced_orgs': [], 'journey_ops': [],
+                        'route_tracks': [], 'revision': None, 'file_count': 0,
+                    }
+                b = buckets[op]
+                b['route_stops'].extend(route_stops)
+                b['journey_routes'].extend(journey_routes)
+                b['journey_times'].extend(journey_times)
+                b['stop_names'].extend(stop_names)
+                b['service_ops'].extend(service_ops)
+                b['serviced_orgs'].extend(serviced_orgs)
+                b['journey_ops'].extend(journey_ops)
+                b['route_tracks'].extend(route_tracks)
+                if file_rev is not None:
+                    if b['revision'] is None or (file_rev and file_rev > b['revision']):
+                        b['revision'] = file_rev
+                b['file_count'] += 1
+                counts += 1
+
                 # Only print every 10th file or the last one to reduce log noise
                 if (idx + 1) % 10 == 0 or idx == total - 1:
                     print(f'  [bus] {prefix}parsed [{idx+1}/{total}]')
             except Exception as e:
                 print(f'  [bus] {prefix}ERR [{idx+1}/{total}] {fname}: {e}')
 
-        print(f'  [bus] {prefix}Done. {total} files.')
+        # Now populate per-operator bucket so inserts are chunked into
+        # fewer transactions. Use the bucket-level max revision.
+        for op, b in sorted(buckets.items()):
+            sub_tag = f"{tag}:{op}" if tag else op
+            try:
+                self.populate(
+                    b['route_stops'], b['journey_routes'], b['journey_times'],
+                    b['stop_names'], b['service_ops'], b['serviced_orgs'], b['journey_ops'],
+                    b['route_tracks'], revision=b['revision'], tag=sub_tag,
+                )
+            except Exception as e:
+                print(f'  [bus] {prefix}ERR during populate for bucket {op}: {e}')
+
+        print(f'  [bus] {prefix}Done. {total} files parsed into {len(buckets)} buckets ({counts} files parsed)')
 
     def download_and_load(self, url, tag=None):
         """Download a zip of TXC XML files from a URL, extract, and load into the DB.
