@@ -780,7 +780,7 @@ async def routes_for_line(line: str):
     #   stops in a variant (default: 3500 m)
     # - ROUTE_MEAN_GAP_MULT: multiplier applied to the best mean gap to
     #   reject outlier variants (default: 1.8)
-    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '8'))
+    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '6'))
     max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
     mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
 
@@ -949,6 +949,174 @@ async def routes_for_line(line: str):
     if unique:
         _route_line_cache[line_key] = result
     return result
+
+
+@app.get("/routes/stop/{atco}")
+async def routes_for_stop(atco: str):
+    """Return route variants that pass through the given ATCO stop code.
+
+    Response mirrors `/routes/line/{line}` but selects routes by whether
+    the stop appears in their journey stop lists. Useful for showing the
+    route(s) that pass through a clicked stop on the frontend.
+    """
+    from fastapi.responses import JSONResponse
+
+    atco_code = atco.strip()
+    # thresholds (same as routes_for_line)
+    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '8'))
+    max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
+    mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
+
+    try:
+        merged, _router, _walking = get_router_for_date(datetime.now().strftime("%Y-%m-%d"))
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Build mapping of stop_ints whose ATCO code matches the provided code
+    matching_stop_ints = []
+    for s_int in range(len(merged.stop_to_routes)):
+        code = merged.get_atco_code(s_int)
+        if code == atco_code:
+            matching_stop_ints.append(s_int)
+
+    if not matching_stop_ints:
+        return {"atco": atco_code, "routes": []}
+
+    # Collect routes that serve any matching stop_int
+    matching_route_idxs = set()
+    for s in matching_stop_ints:
+        for rid in merged.stop_to_routes[s]:
+            matching_route_idxs.add(rid)
+
+    # Helper to build journey stops (reuse code from routes_for_line)
+    def _journey_stops(j_idx: int) -> list[dict]:
+        stops = []
+        # try to use atco loader coords via base cache
+        atco = _base_cache.get("atco_loader") if _base_cache else None
+        coord_map = {}
+        if atco:
+            try:
+                coord_map = atco.get_all_stop_coords()
+            except Exception:
+                coord_map = {}
+        for entry in merged.journey_times[j_idx]:
+            s_int = entry[0]
+            atco_code = merged.get_atco_code(s_int)
+            if not atco_code:
+                continue
+            coords = coord_map.get(atco_code)
+            if not coords:
+                continue
+            lat, lon = coords
+            name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
+            stops.append({"name": name or atco_code, "lat": lat, "lon": lon, "atco_code": atco_code})
+        return stops
+
+    import math
+    def _mean_gap(stops: list[dict]) -> float:
+        if len(stops) < 2:
+            return 0.0
+        total = 0.0
+        cos_lat = math.cos(math.radians(stops[0]["lat"]))
+        for i in range(len(stops) - 1):
+            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+            total += math.sqrt(dlat * dlat + dlon * dlon)
+        return total / (len(stops) - 1)
+
+    variants = []
+    for r_idx in sorted(matching_route_idxs):
+        # find journeys belonging to this route
+        j_list = [j for j, rid in enumerate(merged.journey_to_route) if rid == r_idx]
+        if not j_list:
+            continue
+        candidates = sorted(j_list, key=lambda j: len(merged.journey_times[j]), reverse=True)[:8]
+        best_stops = None
+        best_gap = float('inf')
+        for j in candidates:
+            s = _journey_stops(j)
+            if len(s) < min_stops:
+                continue
+            gap = _mean_gap(s)
+            if gap < best_gap:
+                best_gap = gap
+                best_stops = s
+        if best_stops and len(best_stops) >= 2:
+            meta = merged.route_metadata[r_idx] or {}
+            route_id = meta.get("route_id", f"route_{r_idx}")
+            variants.append({"route_id": route_id, "stops": best_stops})
+
+    # Deduplicate, sort, filter (same as routes_for_line)
+    seen_sigs = set()
+    unique = []
+    for v in variants:
+        sig = tuple(s["atco_code"] for s in v["stops"])
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(v)
+    unique.sort(key=lambda v: len(v["stops"]), reverse=True)
+    unique = unique[:3]
+
+    if unique:
+        def _max_gap(stops):
+            cos_lat = math.cos(math.radians(stops[0]["lat"]))
+            mx = 0.0
+            for i in range(len(stops) - 1):
+                dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+                dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+                mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
+            return mx
+
+        mean_gaps = [_mean_gap(v["stops"]) for v in unique]
+        best = min(mean_gaps)
+        filtered = [v for v, mg in zip(unique, mean_gaps) if mg <= best * mean_gap_mult and _max_gap(v["stops"]) < max_gap_m]
+        if filtered:
+            unique = filtered
+
+    # Fallback: if no variants found via merged journeys, query DB directly
+    if not unique:
+        try:
+            import psycopg
+            from main import BUS_DB_PATH
+            conn = psycopg.connect(BUS_DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT route_id FROM bus_route_stops WHERE atco_code = %s",
+                (atco_code,)
+            )
+            rows = [r[0] for r in cur.fetchall()]
+            routes = []
+            if rows:
+                # For each route, fetch ordered stop list and resolve coords via stop_coords
+                for rid in rows:
+                    cur.execute(
+                        "SELECT atco_code, stop_order FROM bus_route_stops WHERE route_id = %s ORDER BY stop_order",
+                        (rid,)
+                    )
+                    stop_rows = cur.fetchall()
+                    # Resolve coords
+                    atcos = [r[0] for r in stop_rows]
+                    stops = []
+                    if atcos:
+                        # Query stop_coords for all atcos
+                        placeholders = ','.join(['%s'] * len(atcos))
+                        cur.execute(f"SELECT atco_code, lat, lon FROM stop_coords WHERE atco_code IN ({placeholders})", tuple(atcos))
+                        coord_map = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+                        for atc, so in stop_rows:
+                            coords = coord_map.get(atc)
+                            if coords:
+                                stops.append({"atco_code": atc, "lat": coords[0], "lon": coords[1], "stop_order": so})
+                            else:
+                                stops.append({"atco_code": atc, "stop_order": so})
+                    routes.append({"route_id": rid, "stops": stops})
+            cur.close()
+            conn.close()
+            return {"atco": atco_code, "routes": routes}
+        except Exception:
+            # If DB fallback fails, return empty list
+            return {"atco": atco_code, "routes": []}
+
+    return {"atco": atco_code, "routes": unique}
 
 
 # — Static files & frontend ————————————————————————————————
