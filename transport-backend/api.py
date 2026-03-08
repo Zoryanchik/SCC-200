@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from urllib.request import Request as UrllibRequest, urlopen
+from xml.etree import ElementTree
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +25,7 @@ from pydantic import BaseModel
 
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
-from time_utils import seconds_since_midnight
+from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
 from modes import name_to_int, all_transit_modes
@@ -2151,6 +2152,80 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
         "main": main,
     }
 
+# Parse the lt8:trainServices element into its services
+def parse_train_services(root: ElementTree):
+    services = []
+    for service in root:
+        # lt8:service
+        service_data = {}
+        for child in service:
+            _, _, tag = child.tag.rpartition("}")
+            match tag:
+                case "std": service_data["scheduledTime"] = seconds_since_midnight(child.text + ":00")
+                case "etd":
+                    # Return the correct status for this service
+                    if child.text == "On time":
+                        service_data["status"] = "On time"
+                        service_data["departureTime"] = seconds_to_time(service_data["scheduledTime"])
+                    elif child.text == "Delayed":
+                        service_data["status"] = f"Delayed"
+                        service_data["departureTime"] = "Unknown Delay"
+                    else:
+                        etd = seconds_since_midnight(child.text + ":00")
+                        delay_min = (etd - service_data["scheduledTime"]) // 60
+                        service_data["delayMins"] = delay_min
+                        service_data["status"] = f"Delayed {delay_min} mins"
+                        service_data["departureTime"] = seconds_to_time(etd)
+
+                case "destination":
+                    service_data["destination"] = child[0][0].text # lt4:location>lt4:locationName
+    
+        services.append(service_data)
+
+    return services
+
+@app.get("/rail/departures/{station_code}")
+async def route_rail_departures(station_code):
+    if station_code is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "station_code is required"},
+        )
+    
+    fetch_url = f"https://transport.scc.lancs.ac.uk/rail/departures/{station_code}"
+
+    import requests
+    try:
+        resp = requests.get(fetch_url, headers={"User-Agent": "transport-backend/1.0"}, timeout=10)
+        resp.raise_for_status()
+        tree = ElementTree.fromstring(resp.content)
+    except Exception as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": str(exc)},
+        )
+
+    location_name = None
+    services = []
+
+    for child in tree:
+        _, _, tag = child.tag.rpartition("}")
+        match tag:
+            case "locationName":
+                location_name = child.text
+            
+            case "trainServices":
+                services = parse_train_services(child)
+
+    # Add station information to services
+    def add_service_data(s):
+        s["stationName"] = location_name + " Station"
+        # FIXME: Hardcoded Lancaster Station
+        s["lat"] = 54.0486361
+        s["lon"] = -2.80811389
+        return s
+
+    return [add_service_data(s) for s in services]
 
 if __name__ == "__main__":
     import uvicorn
