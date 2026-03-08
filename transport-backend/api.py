@@ -773,6 +773,17 @@ async def routes_for_line(line: str):
     # Normalise the line name for cache lookup (case-insensitive)
     line_key = line.strip().upper()
 
+    # Configurable thresholds (allow tuning via environment variables)
+    # - ROUTE_MIN_STOPS: minimum number of stops a candidate journey must
+    #   have to be considered a representative (default: 8)
+    # - ROUTE_MAX_GAP_METERS: maximum single-gap allowed between consecutive
+    #   stops in a variant (default: 3500 m)
+    # - ROUTE_MEAN_GAP_MULT: multiplier applied to the best mean gap to
+    #   reject outlier variants (default: 1.8)
+    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '8'))
+    max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
+    mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
+
     if line_key in _route_line_cache:
         return _route_line_cache[line_key]
 
@@ -874,7 +885,7 @@ async def routes_for_line(line: str):
         best_gap = float("inf")
         for j in candidates:
             s = _journey_stops(j)
-            if len(s) < 10:
+            if len(s) < min_stops:
                 continue
             gap = _mean_gap(s)
             if gap < best_gap:
@@ -901,8 +912,11 @@ async def routes_for_line(line: str):
     unique = unique[:3]
 
     # Drop variants whose mean gap is much worse than the best,
-    # or that contain any single gap > 2 km — these are typically
-    # messy journey patterns that zigzag across the map.
+    # or that contain any single gap > 2.5 km — these are typically
+    # messy journey patterns that zigzag across the map. If the
+    # filters remove all candidates we fall back to the unfiltered
+    # top-3 variants so short/irregular routes (e.g. local shuttles)
+    # are still shown to the user.
     if unique:
         def _max_gap(stops):
             cos_lat = math.cos(math.radians(stops[0]["lat"]))
@@ -915,13 +929,25 @@ async def routes_for_line(line: str):
 
         mean_gaps = [_mean_gap(v["stops"]) for v in unique]
         best = min(mean_gaps)
-        unique = [
+        filtered = [
             v for v, mg in zip(unique, mean_gaps)
-            if mg <= best * 1.8 and _max_gap(v["stops"]) < 2500
+        if mg <= best * mean_gap_mult and _max_gap(v["stops"]) < max_gap_m
         ]
+        if filtered:
+            unique = filtered
+        else:
+            # Fallback: keep the unfiltered top-3 variants when the
+            # gap-based heuristics eliminate everything.
+            unique = unique[:3]
 
     result = {"line": line, "variants": unique}
-    _route_line_cache[line_key] = result
+    # Only cache positive results. Caching empty variant lists can cause
+    # stale-empty responses when the router/atco caches are built later
+    # (for example shortly after server start). Allow empty results to be
+    # recomputed on subsequent calls so late-initialised data can populate
+    # the response.
+    if unique:
+        _route_line_cache[line_key] = result
     return result
 
 
