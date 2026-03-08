@@ -2170,6 +2170,9 @@ def parse_train_services(root: ElementTree):
                     elif child.text == "Delayed":
                         service_data["status"] = f"Delayed"
                         service_data["departureTime"] = "Unknown Delay"
+                    elif child.text == "Cancelled":
+                        service_data["status"] = f"Cancelled"
+                        service_data["departureTime"] = "No Departure"
                     else:
                         etd = seconds_since_midnight(child.text + ":00")
                         delay_min = (etd - service_data["scheduledTime"]) // 60
