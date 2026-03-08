@@ -22,7 +22,7 @@ Updated: 2026-03-05
 - [ ] Estimated cost for route
 - [ ] Check milestone deliverables
 - [ ] Write milestone report
-- [ ] John: train integration!
+- [x] `/rail/departures/{station}` Implementation
 
 ## Medium Priority
 - [x] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
@@ -33,7 +33,7 @@ Updated: 2026-03-05
 - [x] Make weather widget nicer
 - [ ] Add number icon for tracked buses on the map page and make icons smaller
 - [x] Widen search bar — allow location text shown in one line
-- [ ] Implement `/rail/departures/{station}` endpoint *(not implemented)*
+- [x] Implement `/rail/departures/{station}` endpoint
 - [ ] Implement timetable filtering by time and service
 - [ ] Implement station selection via map interaction (tap stop → select as origin/destination)
 - [ ] Implement display of estimated arrival times at stations
@@ -95,7 +95,7 @@ The frontend calls these endpoints, but `api.py` does not define them. They will
 
 | Frontend function        | Missing endpoint                | Status | Owner |
 |--------------------------|----------------------------------|--------|-------|
-| `fetchRailDepartures()`  | `GET /rail/departures/{station}` | ❌ 404 | John  |
+| `fetchRailDepartures()`  | `GET /rail/departures/{station}` | ✅ done | John  |
 | `fetchServiceAlerts()`   | `GET /alerts`                    | ❌ 404 | John  |
 | `fetchPricing()`         | `GET /pricing?from=&to=`         | ❌ 404 | John  |
 | `fetchBusTimes()`        | `GET /bus/times/{stopCode}`      | ❌ 404 | John  |
