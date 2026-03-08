@@ -134,7 +134,6 @@ export default function HomePage() {
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
-  const { data: departures, loading: departuresLoading } = useLiveDepartures("LAN");
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState([]);
@@ -309,17 +308,27 @@ export default function HomePage() {
         });
       }
       if (Array.isArray(trainDepartures)) {
-        trainDepartures.forEach((train) => {
-          newMarkers.push({
-            id: id++,
-            position: [train.latitude || train.lat, train.longitude || train.lon],
-            name: train.station || train.name || "Train Station",
-            type: "train",
-            status: train.status || (train.delayMinutes ? "Delayed " + train.delayMinutes + " mins" : "On time"),
-            destination: train.destination,
-            departureTime: train.departureTime || train.scheduledTime,
+        const stations = {};
+        trainDepartures.forEach((service) => {
+          // Build new markers with each station having a list of its current services
+          if (!stations[service.stationName]) {
+            stations[service.stationName] = {
+              id: id++,
+              name: service.stationName,
+              position: [service.lat, service.lon],
+              type: 'train',
+              services: []
+            }
+          }
+
+          stations[service.stationName].services.push({
+            status: service.status,
+            destination: service.destination,
+            departureTime: service.departureTime,
+            delayMins: service.delayMins,
           });
         });
+        newMarkers.push(...Object.values(stations));
       }
       setMarkers(newMarkers);
     }
@@ -411,23 +420,25 @@ export default function HomePage() {
     });
   }, [liveAlertUpdate]);
 
+  // FIXME: 'Departures' only tracks trains - should this use markers instead, for buses + trains?
   const liveDepartures = useMemo(() => {
-    if (!Array.isArray(departures) || departures.length === 0) {
+    if (!Array.isArray(trainDepartures) || trainDepartures.length === 0) {
       return [
         { id: 1, type: "bus", route: "2", destination: "Blackpool", time: "2 mins", status: "On time" },
         { id: 2, type: "train", route: "Northern", destination: "Manchester", time: "5 mins", status: "Delayed 3 mins" },
         { id: 3, type: "bus", route: "100", destination: "Morecambe", time: "8 mins", status: "On time" },
       ];
     }
-    return departures.slice(0, 3).map((dep, idx) => ({
+    // Get the first 3 departures (by scheduled time, not actual departure time)
+    return trainDepartures.toSorted((a, b) => a.scheduledTime ? a.scheduledTime - b.scheduledTime : 0).slice(0, 3).map((dep, idx) => ({
       id: idx + 1,
-      type: dep.type || "bus",
-      route: dep.routeNumber || dep.route || "\u2014",
+      type: dep.type || "train",
+      route: dep.routeNumber || dep.route || (dep.stationName ? "From: " + dep.stationName : "\u2014"),
       destination: dep.destination || dep.to || "Unknown",
-      time: dep.minutesToDeparture ? dep.minutesToDeparture + " mins" : dep.time || "\u2014",
+      time: dep.departureTime ?? (dep.minutesToDeparture ? dep.minutesToDeparture + " mins" : dep.time || "\u2014"),
       status: dep.status || (dep.delayMinutes ? "Delayed " + dep.delayMinutes + " mins" : "On time"),
     }));
-  }, [departures]);
+  }, [trainDepartures]);
 
   const alerts = useMemo(() => {
     const apiAlerts =
@@ -1058,11 +1069,11 @@ export default function HomePage() {
           <Stack direction="row" spacing={1} alignItems="center">
             <Clock size={18} />
             <Typography variant="h6" fontWeight={700}>
-              Nearby departures
+              Upcoming Train Departures
             </Typography>
           </Stack>
           <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-            {departuresLoading ? (
+            {trainLoading ? (
               [1, 2, 3].map((i) => (
                 <Skeleton key={i} height={80} sx={{ flex: 1 }} variant="rounded" />
               ))

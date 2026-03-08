@@ -12,6 +12,7 @@ import { useEffect } from "react";
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
+import Grid from "@mui/material/Grid";
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -117,6 +118,38 @@ const MapController = ({ onReady, onMoveEnd }) => {
 
 	return null;
 };
+
+// Build the contents of the train station markers on the map
+const makeTrainMarker = marker => {
+	return <>{marker.services.map(service => {
+		const isOnTime = service.status === 'On time';
+		const dm = service.delayMins ?? 10;
+		const bgColor = isOnTime ? '#e8f5e9' : (dm >= 10 ? '#ffebee' : '#fff3e0');
+		const txtColor = isOnTime ? '#2e7d32' : (dm >= 10 ? '#c62828' : '#e65100');
+		const icon = isOnTime ? '\u2713' : '\u26a0';
+
+		let status = service.status;
+		if(status.startsWith("Delayed ")) {
+			status = status.replace("Delayed ", "");
+		}
+
+		return <Grid container justifyContent="space-between">
+			{service.destination}
+			<Box sx={{
+				display:'inline-block',
+				padding: '4px 12px',
+				borderRadius: '12px',
+				backgroundColor: bgColor,
+				color: txtColor,
+				fontSize: '12px',
+				fontWeight: '600',
+				marginBottom: '8px'
+			}}>
+				{icon} {status}
+			</Box>
+		</Grid>
+	})}</>
+}
 
 export default function MapViewMap({
 	filteredMarkers,
@@ -276,8 +309,9 @@ export default function MapViewMap({
 											{marker.name}
 										</Typography>
 										<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.5 }}>
-											{marker.type === 'bus' ? '\U0001f68c Bus' : '\U0001f682 Train'}
+											{marker.type === 'bus' ? '\u{01f68c} Bus' : '\u{01f682} Train'}
 										</Typography>
+										{marker.type === 'train' ? makeTrainMarker(marker) : <></>}
 										{marker.type === 'bus' && marker.routeNumber != null && (
 											<Box sx={{
 												display: 'inline-flex',
@@ -294,7 +328,7 @@ export default function MapViewMap({
 												Line {String(marker.routeNumber)}
 											</Box>
 										)}
-										{(() => {
+										{marker.type !== 'train' ? (() => {
 											const dm = marker.delayMinutes;
 											// Treat early (dm < 0) the same as on-time for visuals
 											const isOnTime = dm == null || dm < 2;
@@ -334,7 +368,7 @@ export default function MapViewMap({
 													{icon} {statusText}
 												</Box>
 											);
-										})()}
+										})() : <></>}
 										{/* Numeric delay removed — status pill conveys categorical state */}
 										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
 										{marker.operator && (

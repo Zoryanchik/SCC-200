@@ -91,18 +91,28 @@ routeNumber: bus.routeNumber || bus.route
 }
 
 // Add train departures
-if (Array.isArray(trainDepartures) && trainDepartures.length > 0) {
-trainDepartures.forEach(train => {
-newMarkers.push({
-id: id++,
-position: [train.latitude || train.lat, train.longitude || train.lon],
-name: train.station || train.name || 'Train Station',
-type: 'train',
-status: train.status || train.delayMinutes ? `Delayed ${train.delayMinutes} mins` : 'On time',
-destination: train.destination,
-departureTime: train.departureTime || train.scheduledTime
-});
-});
+if (Array.isArray(trainDepartures)) {
+    const stations = {};
+    trainDepartures.forEach((service) => {
+        // Build new markers with each station having a list of its current services
+        if (!stations[service.stationName]) {
+        stations[service.stationName] = {
+            id: id++,
+            name: service.stationName,
+            position: [service.lat, service.lon],
+            type: 'train',
+            services: []
+        }
+        }
+
+        stations[service.stationName].services.push({
+        status: service.status,
+        destination: service.destination,
+        departureTime: service.departureTime,
+        delayMins: service.delayMins,
+        });
+    });
+    newMarkers.push(...Object.values(stations));
 }
 
 setMarkers(newMarkers);

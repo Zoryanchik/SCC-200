@@ -33,10 +33,10 @@ export const DepartureCard = memo(function DepartureCard({ departure }) {
           )}
           <Box minWidth={0}>
             <Typography fontWeight={700} variant="body2">
-              {departure.route}
+              {departure.destination}
             </Typography>
             <Typography variant="caption" color="text.secondary" noWrap>
-              {departure.destination}
+              {departure.route}
             </Typography>
           </Box>
         </Stack>
