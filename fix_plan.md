@@ -11,7 +11,7 @@ Updated: 2026-03-05
 - [x] Auto input user location as start point
 - [x] Allow arbitrary start date-time input in fronttend
 - [x] Number of transfer limit button in frontend
-- [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
+- [ ] Fix bus routes not working: 942, 11, 81, 82 (and others)
 - [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
 - [ ] Add search to map page to avoid scrolling
 - [ ] After searching, display the route on the map
