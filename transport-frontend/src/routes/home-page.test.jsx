@@ -138,7 +138,7 @@ describe("HomePage (combined search + map)", () => {
     vi.useRealTimers();
     await renderPage();
 
-    expect(screen.getByText("Nearby departures")).toBeTruthy();
+    expect(screen.getByText("Upcoming Train Departures")).toBeTruthy();
   });
 
   test("renders suggested routes section", async () => {
