@@ -28,6 +28,7 @@ Fix: don't seperate the "get line of a stop" and "show route of line", when gett
 - [ ] line 1 bug: line 1 passing underpass seems not shown, causing chaining effect
 
 ## Medium Priority
+- [ ] If a bus is off track, mark it as "Off track" to avoid misleading delay display
 - [ ] Live loading is slow
 - [ ] Fix delay bug (faulty display of delayed 1 hour/40 min)
 - [ ] Fix bug of function click on bus to show route, (line 1, 6, 7, etc.)
