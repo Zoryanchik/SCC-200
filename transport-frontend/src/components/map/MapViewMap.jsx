@@ -8,7 +8,7 @@ import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
 import { useEffect } from "react";
-import WeatherWidget from "../common/WeatherWidget";
+// Allow a sideContent prop to be injected by the parent (e.g. Suggested routes)
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
@@ -79,11 +79,11 @@ const createUserIcon = () => {
  * @param {number|null} delayMinutes
  */
 const busIconColor = (delayMinutes) => {
+	// Treat negative delays (early) visually the same as on-time.
 	if (delayMinutes == null) return '#1976d2';      // unknown → blue
 	if (delayMinutes >= 10) return '#d32f2f';        // very late → red
 	if (delayMinutes >= 2) return '#f57c00';         // delayed → orange
-	if (delayMinutes <= -1) return '#7b1fa2';        // early → purple
-	return '#1976d2';                                // on time → blue
+	return '#1976d2';                                // on time / early → blue
 };
 
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32');
@@ -133,8 +133,10 @@ export default function MapViewMap({
 	busRefreshInterval = 30000,
 	/** true while a background re-fetch is in-flight */
 	busRefreshing = false,
-	onMapReady,
-	onMoveEnd
+		onMapReady,
+ 		onMoveEnd,
+ 		sideContent,
+ 		showSideOverlay = true,
 }) {
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
@@ -142,16 +144,16 @@ export default function MapViewMap({
 	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
 
 	return (
-		<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 750 } }}>
+	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
 			<Box sx={{
-				flex: 1,
+				flex: 2,
 				position: 'relative',
 				borderRadius: '12px',
 				overflow: 'hidden',
 				boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
 				border: '1px solid',
 				borderColor: 'divider',
-				height: { xs: 420, sm: 520, md: '100%' }
+				height: { xs: 320, sm: 420, md: '100%' }
 			}}>
 				{/* Full overlay only on the very first load — not on every 30-second refresh */}
 				{(busLoading || trainLoading) && (
@@ -217,21 +219,7 @@ export default function MapViewMap({
 								</Typography>
 							</Box>
 						</Box>
-						{/* Label pill below the ring */}
-						<Box sx={{
-							backgroundColor: 'rgba(255,255,255,0.92)',
-							borderRadius: '8px',
-							px: 0.8, py: 0.3,
-							boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
-						}}>
-							<Typography
-								variant="caption"
-								fontWeight={600}
-								sx={{ fontSize: '10px', color: busRefreshing ? '#6366F1' : '#374151', whiteSpace: 'nowrap' }}
-							>
-								{busRefreshing ? 'Updating…' : 'Next update'}
-							</Typography>
-						</Box>
+
 					</Box>
 				)}
 				{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
@@ -249,13 +237,16 @@ export default function MapViewMap({
 						</Typography>
 					</Box>
 				)}
-				<MapContainer
-					center={[54.050556, -2.800556]}
-					zoom={10}
-					scrollWheelZoom
-					style={{ height: "100%", width: "100%" }}
-					className="leaflet-container-custom"
-				>
+					<MapContainer
+						center={[54.050556, -2.800556]}
+						zoom={10}
+						// Disable scroll-wheel / trackpad two-finger slide zoom but allow pinch-to-zoom on touch devices
+						// (scrollWheelZoom handles mouse wheel and trackpad two-finger scroll; touchZoom enables pinch)
+							scrollWheelZoom={false}
+							touchZoom={true}
+						style={{ height: "100%", width: "100%" }}
+						className="leaflet-container-custom"
+					>
 					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />
 					<TileLayer
 						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -300,16 +291,35 @@ export default function MapViewMap({
 												fontWeight: '700',
 												mb: 1,
 											}}>
-												Route {String(marker.routeNumber)}
+												Line {String(marker.routeNumber)}
 											</Box>
 										)}
 										{(() => {
 											const dm = marker.delayMinutes;
-											const isOnTime = dm == null || (dm > -1 && dm < 2);
-											const isEarly = dm != null && dm <= -1;
-											const bgColor = isOnTime ? '#e8f5e9' : isEarly ? '#f3e5f5' : (dm >= 10 ? '#ffebee' : '#fff3e0');
-											const txtColor = isOnTime ? '#2e7d32' : isEarly ? '#6a1b9a' : (dm >= 10 ? '#c62828' : '#e65100');
-											const icon = isOnTime ? '\u2713' : isEarly ? '\u23eb' : '\u26a0';
+											// Treat early (dm < 0) the same as on-time for visuals
+											const isOnTime = dm == null || dm < 2;
+											const isDelayed = dm != null && dm >= 2;
+											const bgColor = isOnTime ? '#e8f5e9' : (dm >= 10 ? '#ffebee' : '#fff3e0');
+											const txtColor = isOnTime ? '#2e7d32' : (dm >= 10 ? '#c62828' : '#e65100');
+											const icon = isOnTime ? '\u2713' : '\u26a0';
+
+											// Avoid repeating numeric delay in the pill when
+											// we already display the precise value below.
+											// If the backend returned an early status, normalize
+											// the displayed status to 'On time' so early buses
+											// look identical to on-time ones.
+											let statusText = marker.status || '';
+											if (isOnTime) {
+												statusText = 'On time';
+											} else if (marker.delayMinutes != null) {
+												// Show the delay with rounded minutes after the base status.
+												// If the backend provided a status like 'Delayed 5 min',
+												// strip any existing numeric suffix and append our rounded value.
+												const base = (statusText || 'Delayed').replace(/\s*\d+(?:\.\d+)?\s*min?s?/i, '').trim() || 'Delayed';
+												const mins = Math.round(Math.abs(marker.delayMinutes));
+												statusText = `${base} ${mins} min${mins !== 1 ? 's' : ''}`;
+											}
+
 											return (
 												<Box sx={{
 													display: 'inline-block',
@@ -321,10 +331,11 @@ export default function MapViewMap({
 													fontWeight: '600',
 													marginBottom: '8px'
 												}}>
-													{icon} {marker.status}
+													{icon} {statusText}
 												</Box>
 											);
 										})()}
+										{/* Numeric delay removed — status pill conveys categorical state */}
 										{/* Render operator prominently (if available) and then backend-provided meta fields (exclude coords and operator keys) */}
 										{marker.operator && (
 											// force a full-width break before operator so it is always on its own line
@@ -370,11 +381,29 @@ export default function MapViewMap({
 						</Marker>
 					)}
 				</MapContainer>
+
+				{/* Render sideContent as an overlay on top of the map on md+ screens */}
+				{showSideOverlay && sideContent && (
+					<Box sx={{
+						position: 'absolute',
+						top: 16,
+						right: 16,
+						// Keep the suggested routes under the AppBar header
+						zIndex: 1050,
+						display: { xs: 'none', md: 'block' },
+						minWidth: 320,
+					}}>
+						{sideContent}
+					</Box>
+				)}
 			</Box>
 
-			<Box sx={{ minWidth: { xs: '100%', md: 320 } }}>
-				<WeatherWidget />
-			</Box>
+			{/* On small screens, render the sideContent below the map (full width) */}
+			{showSideOverlay && sideContent && (
+				<Box sx={{ display: { xs: 'block', md: 'none' }, width: '100%' }}>
+					{sideContent}
+				</Box>
+			)}
 		</Stack>
 	);
 }

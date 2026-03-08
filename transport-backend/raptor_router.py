@@ -237,6 +237,14 @@ class RaptorRouter:
         *initial_walk_stops* maps stop-int → walk_seconds for stops
         reached directly from the origin; these use a relaxed boarding
         threshold (no MIN_TRANSFER_SECONDS penalty) on the first round.
+
+        **Round isolation** – standard RAPTOR requires that boarding
+        decisions within a round are based on arrival times from the
+        *previous* round, not the in-progress current round.  We
+        snapshot arrival times at the start of each round and pass
+        them to ``first_journey`` so that cascading improvements
+        within the same round cannot enable extra transfers beyond
+        the transfer-limit.
         """
         if not switch_a or n_transfer == transfer_limit:
             return
@@ -244,11 +252,16 @@ class RaptorRouter:
         switch_b: set = set()
         net = self.network
 
+        # ── Snapshot arrival times from the previous round ────────
+        # first_journey will use *prev_arrival* for boarding-eligibility
+        # checks while writing improvements into *reach_stops*.
+        prev_arrival = [row[1] for row in reach_stops]
+
         # Scan every route passing through each improved stop.
         # Process stops in ascending arrival-time order (nearest first)
         # to ensure propagation follows earliest-known states rather than
         # arbitrary set iteration order.
-        ordered_switch_a = sorted(switch_a, key=lambda s: reach_stops[s][1])
+        ordered_switch_a = sorted(switch_a, key=lambda s: prev_arrival[s])
         for stop in ordered_switch_a:
             routes = net.stop_to_routes[stop]
             for route in routes:
@@ -263,6 +276,7 @@ class RaptorRouter:
                 self.first_journey(
                     net, route, stop, reach_stops, switch_b,
                     allowed_modes, is_initial_walk,
+                    prev_arrival=prev_arrival,
                     debug_stop_ids=debug_stop_ids)
 
         # Walking transfers from newly-improved stops. Process newly
@@ -270,19 +284,38 @@ class RaptorRouter:
         # considered from the soonest originating stop first.
         ordered_switch_b = sorted(list(switch_b), key=lambda s: reach_stops[s][1])
         for stop in ordered_switch_b:
-            walk_stops = walking.inter_walk(stop)
-            for walk_stop, secs in walk_stops.items():
-                walk_arrival = reach_stops[stop][1] + secs
-                if reach_stops[walk_stop][1] > walk_arrival:
-                    reach_stops[walk_stop][1] = walk_arrival
-                    reach_stops[walk_stop][0] = stop
-                    reach_stops[walk_stop][2] = WALKING
-                    switch_b.add(walk_stop)
-                    # Debug: record walking transfer update
-                    if debug_stop_ids is not None and walk_stop in debug_stop_ids:
-                        if not hasattr(self, '_debug_events'):
-                            self._debug_events = []
-                        self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
+            if reach_stops[stop][2] == WALKING:
+                pre = reach_stops[stop][0]
+                if pre is None:
+                    continue
+                walk_stops = walking.inter_walk(stop)
+                for walk_stop, _ in walk_stops.items():
+                    walk_arrival = reach_stops[pre][1] + walking.walking_time_between(
+                        walking.get_loc_coords(pre), walking.get_loc_coords(walk_stop))
+                    if reach_stops[walk_stop][1] > walk_arrival:
+                        reach_stops[walk_stop][1] = walk_arrival
+                        reach_stops[walk_stop][0] = pre
+                        reach_stops[walk_stop][2] = WALKING
+                        switch_b.add(walk_stop)
+                        # Debug: record walking transfer update
+                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                            if not hasattr(self, '_debug_events'):
+                                self._debug_events = []
+                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, pre))        
+            else:
+                walk_stops = walking.inter_walk(stop)
+                for walk_stop, secs in walk_stops.items():
+                    walk_arrival = reach_stops[stop][1] + secs
+                    if reach_stops[walk_stop][1] > walk_arrival:
+                        reach_stops[walk_stop][1] = walk_arrival
+                        reach_stops[walk_stop][0] = stop
+                        reach_stops[walk_stop][2] = WALKING
+                        switch_b.add(walk_stop)
+                        # Debug: record walking transfer update
+                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                            if not hasattr(self, '_debug_events'):
+                                self._debug_events = []
+                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
 
         self.recursive_raptor(
             n_transfer, transfer_limit, reach_stops, walking,
@@ -293,10 +326,19 @@ class RaptorRouter:
 
     def first_journey(self, network, route, stop, reach_stops,
                       switch_b, allowed_modes, is_initial_walk=False,
+                      prev_arrival: Optional[List[float]] = None,
                       debug_stop_ids: Optional[Set[int]] = None):
         """Find the first journey on *route* that departs from *stop*
         after the current arrival + connection buffer, then propagate
         improved arrival times to downstream stops.
+
+        *prev_arrival* is the snapshot of arrival times from the
+        previous round.  Boarding-eligibility (the departure-time
+        check) is based on ``prev_arrival[stop]`` so that
+        improvements written to *reach_stops* during the current
+        round cannot cascade into additional boardings within the
+        same round.  This is a core RAPTOR invariant that ensures
+        the transfer count is accurate.
 
         When *is_initial_walk* is True the stop was reached by walking
         from the origin, so the 90 s transfer penalty is dropped and a
@@ -314,11 +356,18 @@ class RaptorRouter:
         if not stop_deps:
             return None
 
-        # We'll search for candidate departures at or after the walking
-        # arrival time, then apply a per-journey-mode buffer before
-        # accepting a departure.  This lets us pick different buffers
-        # for buses vs trains (e.g. buses tolerate 1 min, trains 3 min).
-        search_lower = reach_stops[stop][1]
+        # Use the previous-round snapshot for boarding eligibility so
+        # that in-round cascading is prevented.  Fall back to the live
+        # reach_stops value when no snapshot is supplied (e.g. from
+        # legacy callers).
+        boarding_arrival = (prev_arrival[stop]
+                           if prev_arrival is not None
+                           else reach_stops[stop][1])
+
+        # We'll search for candidate departures at or after the
+        # boarding_arrival time, then apply a per-journey-mode buffer
+        # before accepting a departure.
+        search_lower = boarding_arrival
         idx = bisect.bisect_left(stop_deps, (search_lower,))
 
         while idx < len(stop_deps):
@@ -327,8 +376,9 @@ class RaptorRouter:
             jmode = network.journey_type(first_journey)
             required_buffer = TRAIN_BOARD_BUFFER if jmode == TRAIN else BUS_BOARD_BUFFER
             # If this departure is earlier than arrival + required buffer,
-            # skip it.
-            if dep_time < reach_stops[stop][1] + required_buffer:
+            # skip it.  Use boarding_arrival (previous-round snapshot) for
+            # round isolation.
+            if dep_time < boarding_arrival + required_buffer:
                 idx += 1
                 continue
             

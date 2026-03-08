@@ -145,7 +145,7 @@ export const searchStops = async (query) => {
  * @param {string} departureTime - Departure time in ISO format
  * @returns {Promise<Array>} Array of journey options
  */
-export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
+export const getJourneyPlans = async (fromStop, toStop, departureTime, options = {}) => {
   try {
     const from = normalizeStopLocation(fromStop);
     const to = normalizeStopLocation(toStop);
@@ -153,6 +153,8 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
       throw new Error('fromStop and toStop must include lat/lon');
     }
     const { date, time } = normalizeDateTime(departureTime);
+    const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 5;
+    const mode = typeof options.mode === 'string' ? options.mode : 'combined';
     const response = await fetch(
       `${API_BASE_URL}/journey/plan`,
       {
@@ -164,7 +166,9 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
           fromStop: from,
           toStop: to,
           departureTime: time,
-          date
+          date,
+          maxTransfers,
+          mode
         })
       }
     );
@@ -204,6 +208,19 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime) => {
         // won't break callers that expect the original field names.
         copy.arrival_time_with_offset = makeWithOffset(copy.arrival_time, copy.arrival_day_offset);
         copy.departure_time_with_offset = makeWithOffset(copy.departure_time, copy.departure_day_offset);
+
+        // Real-time fields: if the backend provides realtime_departure_time /
+        // realtime_arrival_time (bus legs with live delay), expose them with
+        // day-offset variants too.  These are separate from the scheduled
+        // (planned) times.
+        if (copy.realtime_departure_time) {
+          copy.realtime_departure_time_with_offset = makeWithOffset(
+            copy.realtime_departure_time, copy.departure_day_offset);
+        }
+        if (copy.realtime_arrival_time) {
+          copy.realtime_arrival_time_with_offset = makeWithOffset(
+            copy.realtime_arrival_time, copy.arrival_day_offset);
+        }
 
         // Optional: also expose ISO datetimes computed from the requested date.
         // Only add when both date and time exist. These are in UTC-ish ISO format

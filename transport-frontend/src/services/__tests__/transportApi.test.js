@@ -583,7 +583,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     expect(url).toBe('http://localhost:5050/search/stops?q=test');
   });
 
-  test('defaults to http://localhost:8000 when VITE_API_BASE_URL is undefined', async () => {
+  test('defaults to http://localhost:5050 when VITE_API_BASE_URL is undefined', async () => {
     // In vitest, deleting an env key is done by setting it to undefined
     vi.stubEnv('VITE_API_BASE_URL', undefined);
     vi.resetModules();

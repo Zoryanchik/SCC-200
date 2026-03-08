@@ -15,6 +15,12 @@ vi.mock("../services/transportApi", () => ({
   getJourneyPlans: vi.fn().mockResolvedValue([]),
   fetchServiceAlerts: vi.fn().mockResolvedValue([]),
   fetchPricing: vi.fn().mockResolvedValue(null),
+  // Weather API used by WeatherWidget
+  fetchWeatherData: vi.fn().mockResolvedValue({
+    weather: [{ main: 'Clear' }],
+    main: { temp: 12, humidity: 50 },
+    wind: { speed: 2.3 },
+  }),
 }));
 
 vi.mock("../services/liveUpdates", () => ({
@@ -31,13 +37,14 @@ vi.mock("../services/liveUpdates", () => ({
 // Stub the lazy-loaded MapViewMap so we don't need leaflet in jsdom
 vi.mock("../components/map/MapViewMap", () => ({
   __esModule: true,
-  default: ({ onMoveEnd, filteredMarkers, busLoading, trainLoading }) => {
+  default: ({ onMoveEnd, filteredMarkers, busLoading, trainLoading, sideContent }) => {
     // Expose onMoveEnd so tests can simulate map pan
     if (typeof window !== "undefined") {
       window.__testOnMoveEnd = onMoveEnd;
     }
     return (
       <div data-testid="map-stub">
+        <div data-testid="side-content">{sideContent}</div>
         <span data-testid="marker-count">{filteredMarkers.length}</span>
         {busLoading && <span data-testid="bus-loading">loading</span>}
         {trainLoading && <span data-testid="train-loading">loading</span>}
@@ -75,6 +82,16 @@ afterEach(() => {
   delete window.__testOnMoveEnd;
 });
 
+// Provide a minimal geolocation stub for jsdom tests
+beforeAll(() => {
+  if (typeof global.navigator === 'undefined') global.navigator = {};
+  global.navigator.geolocation = {
+    getCurrentPosition: vi.fn((success) =>
+      success({ coords: { latitude: 54.05, longitude: -2.8 } })
+    ),
+  };
+});
+
 const renderPage = async () => {
   const mod = await import("./home-page");
   const HomePage = mod.default;
@@ -95,16 +112,17 @@ describe("HomePage (combined search + map)", () => {
     vi.useRealTimers();
     await renderPage();
 
-    // Map section title is always visible (not lazy)
-    expect(screen.getByText("Live Transport Map")).toBeTruthy();
 
     // The MapViewMap is lazy-loaded via Suspense; wait for it to appear
     await waitFor(() => {
       expect(screen.getByTestId("map-stub")).toBeTruthy();
     });
 
-    // Search section
-    expect(screen.getByText("Quick journey search")).toBeTruthy();
+    // Map area and search controls are present
+    await waitFor(() => {
+      expect(screen.getByTestId("map-stub")).toBeTruthy();
+    });
+    // Search button should be present
     expect(screen.getByText("Search routes")).toBeTruthy();
   });
 
@@ -385,8 +403,11 @@ describe("Bus route number display on markers", () => {
 
     await waitFor(() => {
       const names = screen.getAllByTestId("marker-name");
-      expect(names.some((el) => el.textContent.includes("100"))).toBe(true);
+      // Primary label now shows destination as 'To: <destination>'
       expect(names.some((el) => el.textContent.includes("Blackpool"))).toBe(true);
+      // Route number should still be present in the route-number element
+      const routeNumbers = screen.getAllByTestId("bus-route-number");
+      expect(routeNumbers.some((el) => el.textContent === "100")).toBe(true);
     });
   });
 

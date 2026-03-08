@@ -251,12 +251,9 @@ background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
 color: 'white',
 borderRadius: '16px'
 }}>
-<Stack direction="row" spacing={1.5} alignItems="center">
-<MapPin size={26} />
-<Typography variant="h5" fontWeight={700}>
-Live Transport Map
-</Typography>
-</Stack>
+    <Stack direction="row" spacing={1.5} alignItems="center">
+    {/* Map header - icon removed */}
+    </Stack>
 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.95)', mt: 1.5, fontWeight: 500 }}>
 Real-time bus and train locations across Lancashire
 </Typography>
@@ -335,28 +332,30 @@ Trains {filteredMarkers.filter(m => m.type === 'train').length}
 </Box>
 
 <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
-<Button
-variant="outlined"
-size="small"
-onClick={requestLocation}
-disabled={locationStatus === 'loading'}
-sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
->
-{locationStatus === 'loading' ? (
-<Stack direction="row" spacing={1} alignItems="center">
-<CircularProgress size={16} />
-<Typography variant="caption">Locating</Typography>
-</Stack>
-) : (
-'Use my location'
+{!userLocation && (
+    <Button
+        variant="outlined"
+        size="small"
+        onClick={requestLocation}
+        disabled={locationStatus === 'loading'}
+        sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+    >
+        {locationStatus === 'loading' ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={16} />
+                <Typography variant="caption">Locating</Typography>
+            </Stack>
+        ) : (
+            'Use my location'
+        )}
+    </Button>
 )}
-</Button>
 {userLocation && (
 <Button
 variant="contained"
 size="small"
 onClick={handleCenterOnUser}
-sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' }, backgroundColor: '#D97974', color: '#ffffff', '&:hover': { backgroundColor: '#c86b66' } }}
 >
 Center on me
 </Button>

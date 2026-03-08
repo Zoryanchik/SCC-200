@@ -107,12 +107,30 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   </Typography>
                 )}
 
-                {/* Departure / Arrival times */}
+                {/* Departure / Arrival times — scheduled (planned) */}
                 {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
-                  <Typography variant="caption" fontWeight={500} color="text.secondary" data-testid={`step-time-${idx}`} sx={{ display: "block", mt: 0.25 }}>
+                  <Typography variant="caption" fontWeight={500} color={step.delay_seconds > 0 ? "text.disabled" : "text.secondary"} data-testid={`step-time-${idx}`} sx={{ display: "block", mt: 0.25, textDecoration: step.delay_seconds > 0 ? "line-through" : "none" }}>
                     {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ""}
                     {step.departure_time_with_offset && step.arrival_time_with_offset ? "  •  " : ""}
                     {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ""}
+                    {" (planned)"}
+                  </Typography>
+                )}
+
+                {/* Real-time departure / arrival (when delay data exists) */}
+                {step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset) && (
+                  <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.25 }}>
+                    {step.realtime_departure_time_with_offset ? `Dep ${step.realtime_departure_time_with_offset}` : ""}
+                    {step.realtime_departure_time_with_offset && step.realtime_arrival_time_with_offset ? "  •  " : ""}
+                    {step.realtime_arrival_time_with_offset ? `Arr ${step.realtime_arrival_time_with_offset}` : ""}
+                    {" (expected)"}
+                  </Typography>
+                )}
+
+                {/* Delay status badge */}
+                {step.status && step.status !== "On time" && (
+                  <Typography variant="caption" fontWeight={700} color="error.main" data-testid={`step-delay-${idx}`} sx={{ display: "inline-block", mt: 0.25, px: 0.75, py: 0.15, borderRadius: 1, bgcolor: "error.50" }}>
+                    ⚠ {step.status}
                   </Typography>
                 )}
               </Box>

@@ -190,12 +190,12 @@ class TestBusDelayHandling:
         assert data[0]["delay_minutes"] == 10.5
 
     def test_early_bus_reports_early(self, client: TestClient):
-        """Negative delay <= -60 s should report 'Early N min'."""
+        """Negative delay (early) should be treated as 'On time' in the status string."""
         api_module.get_bus_live.return_value = [
             ("44", "Carnforth", 54.05, -2.80, "Stagecoach", -120),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
-        assert data[0]["status"] == "Early 2 min"
+        assert data[0]["status"] == "On time"
         assert data[0]["delay_minutes"] == -2.0
 
     def test_delay_minutes_rounds_to_one_decimal(self, client: TestClient):

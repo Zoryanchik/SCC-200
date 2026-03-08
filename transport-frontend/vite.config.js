@@ -14,6 +14,14 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: [],
   },
+  server: {
+    // Default dev server port for this project
+    port: 5075,
+    // Note: do not bind to all interfaces by default here. Leaving
+    // `host` unset ensures Vite prints the standard network hint
+    // ("➜  Network: use --host to expose") and developers can opt-in
+    // to exposing the server with `npm run dev -- --host` when needed.
+  },
   build: {
     rollupOptions: {
       output: {

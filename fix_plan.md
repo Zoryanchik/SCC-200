@@ -8,16 +8,41 @@ Updated: 2026-03-05
 
 ## High Priority
 - [x] Implement frontend for routing (journey results display)
-- [ ] Number of transfer limit botton in frontend
+- [x] Auto input user location as start point
+- [x] Allow arbitrary start date-time input in fronttend
+- [x] Number of transfer limit button in frontend
+- [ ] Fix bus routes not working: 1, 1A, 42, 942, 11, 2X (and others)
+- [ ] Add clear button / clear feature (e.g. click map) to remove toggled bus routes
+- [ ] Add search to map page to avoid scrolling
+- [ ] After searching, display the route on the map
+- [ ] Show multiple route options from a search so the user can choose and select one
+- [ ] When sharing location, show closest bus stops and nearest bus (check map page)
+- [ ] Map page: remove weather, favourite routes, and "schedule for nearest bus" sections
+- [ ] Pricing: figure out pricing model (prices vary by time, stop, etc.)
+- [ ] Estimated cost for route
+- [ ] Check milestone deliverables
+- [ ] Write milestone report
+- [ ] John: train integration!
 
 ## Medium Priority
+- [x] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
+- [ ] Live map "Trains xx" and "Bus xx" button on click always shows "Trains 0", "Buses 0" and does not filter right
 - [ ] Refresh only map for live locations, not the whole page
+- [x] Delay handling for bus
 - [ ] Delay handling for train
+- [x] Make weather widget nicer
+- [ ] Add number icon for tracked buses on the map page and make icons smaller
 - [x] Widen search bar — allow location text shown in one line
 - [ ] Implement `/rail/departures/{station}` endpoint *(not implemented)*
-- [ ] Implement timetable / bus filtering
+- [ ] Implement timetable filtering by time and service
+- [ ] Implement station selection via map interaction (tap stop → select as origin/destination)
+- [ ] Implement display of estimated arrival times at stations
+- [ ] Implement pricing display for routes and ticket types (frontend)
 - [ ] Implement `/pricing` endpoint (distance-based stub ok) *(not implemented)*
-- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5173) *(not implemented — still hardcoded in api.py)*
+- [ ] Implement frequently / recently used routes feature
+- [ ] UI refinement for desktop and mobile layouts
+- [ ] Implement accessibility features (contrast, scaling, map clarity)
+- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5075) *(not implemented — still hardcoded in api.py)*
 - [ ] Implement `/alerts` endpoint *(not implemented)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
 - [x] Implement `GET /bus/arrivals/{stopCode}` endpoint *(implemented)*
@@ -50,7 +75,7 @@ Updated: 2026-03-05
 - [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
 - [x] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
 - [x] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
-- [ ] Road-following route lines via OSRM (replace straight stop-to-stop with road geometry)
+- [ ] Road-following route lines via OSRM/transport API (`bus/times/{stopCode}`) — replace straight stop-to-stop with road geometry
 - [x] Verify button highlight color toggle works (dark blue + ✓ on click)
 - [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
 - [ ] Update/write backend tests for `/routes/line/{line}` endpoint
@@ -78,7 +103,7 @@ The frontend calls these endpoints, but `api.py` does not define them. They will
 
 ### P6 — No environment-based CORS configuration
 - **File:** `transport-backend/api.py`
-- **Problem:** `allow_origins` is hardcoded to `localhost:3000` and `localhost:5173`. Production or other dev ports will be blocked.
+- **Problem:** `allow_origins` is hardcoded to `localhost:3000` and `localhost:5075`. Production or other dev ports will be blocked.
 - **Fix:** Read origins from an env variable (e.g., `CORS_ORIGINS`).
 
 ### P7 — `POST /api/route` (legacy) returns raw RAPTOR dict

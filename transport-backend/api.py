@@ -117,9 +117,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173",
+        "http://localhost:5075",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5075",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -248,6 +248,43 @@ def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
     return q
 
 
+def _looks_like_street(s: str) -> bool:
+    """Heuristic: return True if the suffix looks like a street/address.
+
+    Checks for house numbers, common street-type tokens (street, rd,
+    lane, avenue, drive, etc.) or short numeric/postcode-like tokens.
+    Used to decide whether the text after a comma should be treated as
+    a town/city filter (False) or as part of a street address (True).
+    """
+    if not s:
+        return False
+    s = s.strip().lower()
+    import re
+    # If it contains a number (house number, postcode fragment), treat as street/address
+    if re.search(r"\d", s):
+        return True
+
+    # Common street-type tokens
+    street_tokens = {
+        'street', 'st', 'road', 'rd', 'lane', 'ln', 'avenue', 'ave', 'drive', 'dr',
+        'way', 'court', 'ct', 'crescent', 'close', 'terrace', 'gardens', 'place',
+        'square', 'hill', 'park', 'boulevard', 'blvd', 'grove', 'row', 'alley', 'isle',
+        'mount', 'mountain', 'walk', 'end'
+    }
+    words = re.split(r"[\s,]+", s)
+    for w in words:
+        if w in street_tokens:
+            return True
+        if w.rstrip('.') in street_tokens:
+            return True
+
+    # Very short tails (1-3 chars) are more likely postcode fragments or abbreviations — treat as street-like
+    if 0 < len(s) <= 3:
+        return True
+
+    return False
+
+
 def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
     """Query Nominatim and return candidates filtered to Lancashire.
 
@@ -263,19 +300,43 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
     if not query or limit <= 0:
         return []
 
-    # Fuzzy-correct the query against known Lancashire places / POIs
-    corrected = _fuzzy_correct_query(query)
+    # Handle comma-suffix heuristics: if the user typed "Morrisons,Morecambe"
+    # we should treat the text after the comma as a town/city filter and
+    # bias Nominatim toward that place. If it looks like a street/address
+    # (contains numbers or a street token) we keep the whole query intact.
+    main_q = query
+    town_hint = None
+    if "," in query:
+        first, tail = query.split(",", 1)
+        first = first.strip()
+        tail = tail.strip()
+        if tail and not _looks_like_street(tail):
+            main_q = first
+            town_hint = tail
+
+    # Fuzzy-correct the main query and the town hint separately against
+    # the known Lancashire places / POIs so typos like 'Morrisions'
+    # or 'Lancster' are corrected before hitting Nominatim.
+    corrected = _fuzzy_correct_query(main_q)
+    if town_hint:
+        town_corrected = _fuzzy_correct_query(town_hint)
+    else:
+        town_corrected = None
 
     # When a county is provided, always append it to the query so
     # Nominatim returns geographically relevant results. This works
     # well for place names ("Lancaster Lancashire") and brands alike
     # ("Sainsbury Lancashire"). We ask Nominatim for extra results and
     # then do a lenient post-filter to trim any outliers.
+    # Build the effective Nominatim query. Prefer: "<corrected main> <town> <county>"
     effective_query = corrected
+    if town_corrected:
+        effective_query = f"{corrected} {town_corrected}"
     if county:
-        # Only append if the user hasn't already included the county
-        if county.lower() not in corrected.lower():
-            effective_query = f"{corrected} {county}"
+        # Only append if the user hasn't already included the county or town
+        lower_eff = effective_query.lower()
+        if county.lower() not in lower_eff and (not town_corrected or county.lower() not in town_corrected.lower()):
+            effective_query = f"{effective_query} {county}"
 
     nominatim_limit = limit * 3 if county else limit  # over-fetch for filtering
     params = {
@@ -393,13 +454,79 @@ async def search_stops(
                     break
             return filtered
 
-        # Default: return only geocoded locations (Lancashire)
+        # Default: return a merged list of NaPTAN stops (from loader) and
+        # geocoded POIs so the frontend can prompt both types. We prefer
+        # stop DB results first, then append geocoded locations.
         location_results = []
+        stop_results = []
+        try:
+            # Prefer ATCO/NaPTAN stop metadata (stop_coords table) when
+            # available — this ensures canonical stop names/types are used
+            # instead of the bus-specific stop names table.
+            atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+            if atco_loader:
+                try:
+                    # Use the atco_loader's DB to search stop_coords by name
+                    conn = atco_loader._connect()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                        "WHERE LOWER(name) LIKE LOWER(%s) LIMIT %s",
+                        (f"%{q}%", limit),
+                    )
+                    rows = cur.fetchall()
+                    conn.close()
+                    stop_results = []
+                    for i, (atco, name, town, lat, lon) in enumerate(rows):
+                        display = name or atco
+                        if town:
+                            display = f"{display}, {town}"
+                        stop_results.append({
+                            "id": i,
+                            "name": name or atco,
+                            "display_name": display,
+                            "atco_code": atco,
+                            "lat": lat,
+                            "lon": lon,
+                            "type": "stop",
+                        })
+                except Exception as exc:
+                    logger.warning("ATCO stop lookup failed: %s", exc)
+            else:
+                # Fallback to legacy loader when ATCO loader unavailable
+                loader = _base_cache.get("loader") if _base_cache else None
+                if loader:
+                    stop_results = loader.search_stops(q, limit)
+                    for stop in stop_results:
+                        stop["type"] = "stop"
+        except Exception as exc:
+            logger.warning("Stop DB lookup failed: %s", exc)
+
         try:
             location_results = geocode_locations(q, limit)
         except Exception as exc:
             logger.warning("Geocoding lookup failed: %s", exc)
-        return location_results
+
+        # Basic de-duplication by lower-cased name to avoid duplicates
+        combined = []
+        seen = set()
+        for item in (stop_results or []):
+            name = (item.get("name") or "").strip().lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            combined.append(item)
+        for item in (location_results or []):
+            name = (item.get("name") or "").strip().lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            combined.append(item)
+
+        # Respect requested limit: return up to `limit` items. The
+        # frontend further slices stop-type suggestions to 3, so this
+        # keeps responses compact while ensuring both types are present.
+        return combined[:limit]
     except Exception as exc:
         return JSONResponse(
             status_code=500,
@@ -821,15 +948,329 @@ async def _apple_touch_icon():
 
 def _bus_delay_status(delay_s: Optional[int]) -> str:
     """Convert delay_seconds to a human-readable bus status string."""
+    # Treat missing or small negative delays as 'On time'. Only sufficiently
+    # large positive delays should be labelled 'Delayed N min'. The project
+    # preference: if a vehicle is early, show it as 'On time' rather than
+    # explicitly marking it 'Early'. Keep delay value itself unchanged.
     if delay_s is None:
         return "On time"
     if delay_s >= 120:
         minutes = round(delay_s / 60)
         return f"Delayed {minutes} min"
-    if delay_s <= -60:
-        minutes = round(-delay_s / 60)
-        return f"Early {minutes} min"
+    # All negative delays are presented to callers as negative numeric
+    # minutes but the human-readable status will be 'On time'. This avoids
+    # showing 'Early' labels in the UI.
     return "On time"
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    """Return distance in meters between two lat/lon points using haversine."""
+    import math
+    R = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
+    """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
+
+    Smart algorithm:
+    1. Find candidate journeys by line name / destination.
+    2. For each candidate, project the vehicle onto the route track polyline
+       (from <Mapping><track> in the TransXChange XMLs) to measure how far
+       along the route the bus is.
+    3. Skip candidates where the bus is not near the track (wrong route).
+    4. Skip candidates where the bus hasn't started yet (near start, before
+       departure) or has already finished (near end, after last arrival).
+    5. Interpolate the expected scheduled time from the vehicle's progress
+       fraction and the journey's stop timetable, then compute
+       delay = now - expected_time.
+    Returns int seconds or None when no confident match is found.
+    """
+    try:
+        from datetime import datetime
+        import math
+
+        today = datetime.now().date().isoformat()
+        now = datetime.now()
+        now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        merged, router, walking = get_router_for_date(today, start_time=now_seconds)
+    except Exception:
+        return None
+
+    line_q = (line_ref or "").strip()
+    dest_q = (dest or "").strip().lower()
+
+    # ── helper: haversine distance in metres ──
+    def _hav(lat1, lon1, lat2, lon2):
+        R = 6371000.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * R * math.asin(math.sqrt(a))
+
+    # ── helper: cumulative distance along a polyline ──
+    def _cum_distances(track):
+        """Return list of cumulative distances (metres) for each point."""
+        dists = [0.0]
+        for i in range(1, len(track)):
+            dists.append(dists[-1] + _hav(track[i - 1][0], track[i - 1][1],
+                                           track[i][0], track[i][1]))
+        return dists
+
+    # ── helper: project a point onto a polyline ──
+    def _project_onto_track(plat, plon, track, cum_dists):
+        """Find the closest point on the polyline to (plat, plon).
+
+        Returns (min_dist_m, progress_fraction) where progress_fraction
+        is 0.0 at the start and 1.0 at the end.
+        """
+        if not track:
+            return (1e9, 0.0)
+        total_len = cum_dists[-1] if cum_dists[-1] > 0 else 1.0
+        best_dist = 1e9
+        best_progress = 0.0
+        for i in range(len(track)):
+            d = _hav(plat, plon, track[i][0], track[i][1])
+            if d < best_dist:
+                best_dist = d
+                best_progress = cum_dists[i] / total_len
+        return (best_dist, best_progress)
+
+    # ── helper: compute stop progress fractions along a track ──
+    def _stop_progress_on_track(jt, walking, track, cum_dists):
+        """For each stop in a journey's timetable, find its progress fraction
+        along the track.
+
+        Returns list of (progress_frac, sched_time) sorted by progress.
+        """
+        total_len = cum_dists[-1] if cum_dists[-1] > 0 else 1.0
+        result = []
+        for sid, atime, dtime in jt:
+            try:
+                slat, slon = walking.get_loc_coords(sid)
+            except Exception:
+                continue
+            # find closest track point to this stop
+            best_d = 1e9
+            best_p = 0.0
+            for i in range(len(track)):
+                d = _hav(slat, slon, track[i][0], track[i][1])
+                if d < best_d:
+                    best_d = d
+                    best_p = cum_dists[i] / total_len
+            sched = atime if atime is not None else dtime
+            if sched is not None:
+                result.append((best_p, sched))
+        result.sort(key=lambda x: x[0])
+        return result
+
+    # ── 1. collect candidate journeys ──
+    candidates = []
+    for j_id, jmeta in enumerate(merged.journey_metadata):
+        if not jmeta:
+            continue
+        line_name = jmeta.get("line_name") or ""
+        simple_line = line_name.split(":")[-1] if line_name else ""
+        if line_q:
+            # Exact match on the short line name to avoid e.g. '1' matching 'N1' or '1A'
+            if simple_line != line_q:
+                continue
+        dest_display = (jmeta.get("destination_display") or "").lower()
+        if dest_q and dest_q not in dest_display:
+            continue
+        try:
+            jt = merged.journey_times[j_id]
+            if not jt:
+                continue
+            start_dep = jt[0][2]   # departure time of first stop
+            end_arr   = jt[-1][1]  # arrival time of last stop
+        except Exception:
+            continue
+
+        r_int = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else -1
+        if r_int < 0:
+            continue
+
+        candidates.append((j_id, start_dep, end_arr, r_int))
+
+    if not candidates:
+        return None
+
+    # ── 2. score each candidate using track matching ──
+    best_delay = None
+    best_score = None   # lower = better (distance to track)
+
+    # Cache track data per route to avoid recomputation
+    _track_cache = {}
+
+    for j_id, start_dep, end_arr, r_int in candidates:
+        # Get or compute track + cumulative distances for this route
+        if r_int not in _track_cache:
+            track = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
+            if not track:
+                # Fallback: build a pseudo-track from the stop coordinates
+                route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
+                track = []
+                for sid in route_stops:
+                    try:
+                        slat, slon = walking.get_loc_coords(sid)
+                        track.append((slat, slon))
+                    except Exception:
+                        continue
+            if not track:
+                _track_cache[r_int] = None
+                continue
+            cum = _cum_distances(track)
+            _track_cache[r_int] = (track, cum)
+        else:
+            cached = _track_cache[r_int]
+            if cached is None:
+                continue
+            track, cum = cached
+
+        # Project vehicle onto track
+        dist_m, progress = _project_onto_track(lat_v, lon_v, track, cum)
+
+        # Skip if vehicle is too far from this route's track (> 800m)
+        if dist_m > 800:
+            continue
+
+        # Skip if journey hasn't started yet: bus near start but before departure
+        if progress < 0.05 and now_seconds < start_dep - 300:
+            continue
+
+        # Skip if journey is finished: bus near end and well past last arrival
+        if progress > 0.95 and now_seconds > end_arr + 300:
+            continue
+
+        # Skip if the journey is over and bus is NOT near the end — it can't
+        # be this journey (e.g. bus is at a terminus that happens to be near
+        # the start of a different, already-completed journey).
+        if now_seconds > end_arr + 300 and progress < 0.85:
+            continue
+
+        # Skip if journey is too far in time (> 2 hours from current window)
+        if now_seconds < start_dep - 7200 or now_seconds > end_arr + 7200:
+            continue
+
+        # Skip if the journey duration has fully elapsed and bus isn't
+        # near the final stop — avoids matching short-distance routes
+        # whose terminus is near the bus's current position.
+        journey_dur = end_arr - start_dep
+        if journey_dur > 0 and now_seconds > end_arr + max(600, journey_dur * 0.5):
+            continue
+
+        # ── 3. Interpolate expected scheduled time from progress ──
+        jt = merged.journey_times[j_id]
+        stop_progs = _stop_progress_on_track(jt, walking, track, cum)
+
+        if not stop_progs:
+            continue
+
+        # Find the two bounding stops by progress
+        expected_time = None
+        if progress <= stop_progs[0][0]:
+            # Before/at first stop
+            expected_time = stop_progs[0][1]
+        elif progress >= stop_progs[-1][0]:
+            # At/past last stop
+            expected_time = stop_progs[-1][1]
+        else:
+            # Interpolate between two surrounding stops
+            for k in range(len(stop_progs) - 1):
+                p0, t0 = stop_progs[k]
+                p1, t1 = stop_progs[k + 1]
+                if p0 <= progress <= p1:
+                    seg = p1 - p0
+                    frac = (progress - p0) / seg if seg > 0 else 0.0
+                    expected_time = t0 + frac * (t1 - t0)
+                    break
+
+        if expected_time is None:
+            continue
+
+        delay = int(now_seconds - expected_time)
+
+        # Score: prefer the candidate whose track is closest to the vehicle
+        # and whose timing window best matches now
+        time_gap = abs(now_seconds - (start_dep + end_arr) / 2)
+        score = dist_m + time_gap * 0.01  # distance-dominant scoring
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_delay = delay
+
+    return best_delay
+
+
+# ── Live delay cache for journey planning ────────────────────────
+# Fetches all live bus positions once, caches for a short window, and
+# looks up delays by line name.  Used by build_journey_plan_response()
+# to annotate bus legs with real-time information.
+_live_delay_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
+_LIVE_DELAY_TTL = 30  # seconds
+
+
+def _fetch_all_live_buses() -> list:
+    """Return all live bus records from all operators (cached)."""
+    import time as _time
+    now = _time.time()
+    if now - _live_delay_cache["ts"] < _LIVE_DELAY_TTL and _live_delay_cache["data"]:
+        return _live_delay_cache["data"]
+    try:
+        from bus_live import BusLive
+        bl = BusLive(timeout=10)
+        # Fetch with a very wide bounding box to get everything
+        results = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
+        _live_delay_cache["data"] = results
+        _live_delay_cache["ts"] = now
+        return results
+    except Exception:
+        return _live_delay_cache["data"]  # stale is better than nothing
+
+
+def _get_live_delay_for_line(line_name: str) -> Optional[int]:
+    """Look up the current delay (seconds) for a bus line from live feeds.
+
+    Queries the cached live-bus positions, filters by exact short line name,
+    and computes delay.  For vehicles that have a feed-supplied delay, we
+    use that directly.  For vehicles without feed delay, we call the
+    timetable-matching algorithm.
+
+    Returns the median delay (seconds) across all matching live vehicles,
+    or None if no live vehicle is found for the line.
+    """
+    if not line_name:
+        return None
+    line_q = line_name.strip()
+    buses = _fetch_all_live_buses()
+    delays: list[int] = []
+    for line_ref, dest, lat_v, lon_v, _op, delay_s in buses:
+        # Exact short line name match
+        short = (line_ref or "").split(":")[-1].strip()
+        if short != line_q:
+            continue
+        if delay_s is not None:
+            delays.append(delay_s)
+        else:
+            try:
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                if computed is not None:
+                    delays.append(computed)
+            except Exception:
+                pass
+    if not delays:
+        return None
+    # Use median to avoid outlier skew
+    delays.sort()
+    mid = len(delays) // 2
+    return delays[mid]
 
 
 @app.get("/bus/live/{operator}")
@@ -867,18 +1308,25 @@ async def bus_live_operator(
             content={"error": str(exc)},
         )
 
-    return [
-        {
+    out = []
+    for line_ref, dest, lat_v, lon_v, _operator, delay_s in results:
+        computed = None
+        if delay_s is None:
+            try:
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+            except Exception:
+                computed = None
+        final_delay = delay_s if delay_s is not None else computed
+        out.append({
             "line": line_ref,
             "destination": dest,
             "lat": lat_v,
             "lon": lon_v,
             "operator": _operator,
-            "delay_minutes": round(delay_s / 60, 1) if delay_s is not None else None,
-            "status": _bus_delay_status(delay_s),
-        }
-        for line_ref, dest, lat_v, lon_v, _operator, delay_s in results
-    ]
+            "delay_minutes": round(final_delay / 60, 1) if final_delay is not None else None,
+            "status": _bus_delay_status(final_delay),
+        })
+    return out
 
 # ── Upcoming timetabled departures from a bus stop ──────────────────
 
@@ -1117,8 +1565,32 @@ def format_route_text(route_result, merged):
         walk_min = start_walk / 60
         out.append(f"    - Walk {walk_min:.0f} min ({start_walk}s)")
 
+    # Resolve town names for stops (if an AtcoLoader is available)
+    try:
+        stop_codes = [s for s, _ in legs]
+        atco_codes = {merged.get_atco_code(s) for s in stop_codes if merged.get_atco_code(s)}
+    except Exception:
+        atco_codes = set()
+    town_map = {}
+    if getattr(merged, "atco", None) and atco_codes:
+        try:
+            town_map = merged.atco.get_stop_towns_bulk(atco_codes) or {}
+        except Exception:
+            town_map = {}
+
+    def _label_with_town(idx: int) -> str:
+        base = merged.stop_metadata[idx] if idx < len(merged.stop_metadata) else f"stop#{idx}"
+        try:
+            code = merged.get_atco_code(idx)
+            town = town_map.get(code)
+            if town and town.strip() and town not in base:
+                return f"{base}, {town}"
+        except Exception:
+            pass
+        return base
+
     for i, (stop_int, info) in enumerate(legs):
-        stop_label = merged.stop_metadata[stop_int] if stop_int < len(merged.stop_metadata) else f"stop#{stop_int}"
+        stop_label = _label_with_town(stop_int)
         arrival = seconds_to_time(int(info["arrival_time"])) if info["arrival_time"] != float("inf") else "--:--:--"
         # Support both new 'mode' key and legacy 'type' key in route dicts
         transport = info.get("mode") or info.get("type") or "origin"
@@ -1149,8 +1621,22 @@ def format_route_text(route_result, merged):
                     desc_parts.append(f"{j_origin} -> {j_dest}")
                 if board_dep is not None:
                     desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
+
+                # Look up live delay for bus legs and show both times
+                delay_tag = ""
+                if transport == "bus" and line_name:
+                    delay_s = _get_live_delay_for_line(line_name)
+                    if delay_s is not None and delay_s >= 120:
+                        mins = round(delay_s / 60)
+                        delay_tag = f" [Delayed {mins} min]"
+                        if board_dep is not None:
+                            rt_dep = seconds_to_time(int(board_dep + delay_s))
+                            desc_parts.append(f"expected {rt_dep}")
+                    elif delay_s is not None:
+                        delay_tag = " [On time]"
+
                 desc = " - ".join(desc_parts) if desc_parts else transport
-                out.append(f"    - {desc}")
+                out.append(f"    - {desc}{delay_tag}")
 
             out.append(f"  - {stop_label}")
             out.append(f"    Arrive at {arrival}")
@@ -1261,6 +1747,32 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             return merged.stop_metadata[idx]
         return f"stop#{idx}"
 
+    # Try to resolve town names for stops using the MergedData's
+    # AtcoLoader (if available).  We'll use this to append ", Town"
+    # to displayed stop names when a town is present in the DB.
+    try:
+        ordered_stop_indices = [s for s, _ in ordered]
+        atco_codes_for_ordered = {merged.get_atco_code(s) for s in ordered_stop_indices if merged.get_atco_code(s)}
+    except Exception:
+        atco_codes_for_ordered = set()
+    town_map = {}
+    if getattr(merged, "atco", None) and atco_codes_for_ordered:
+        try:
+            town_map = merged.atco.get_stop_towns_bulk(atco_codes_for_ordered) or {}
+        except Exception:
+            town_map = {}
+
+    def _display_name(idx: int) -> str:
+        base = _stop_name(idx)
+        try:
+            code = merged.get_atco_code(idx)
+            town = town_map.get(code)
+            if town and town.strip() and town not in base:
+                return f"{base}, {town}"
+        except Exception:
+            pass
+        return base
+
     def _time_str(secs):
         if secs is None or secs == math.inf:
             return None
@@ -1281,7 +1793,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
         first_int = ordered[0][0]
         first_coord = stop_coords.get(first_int)
-        first_name = _stop_name(first_int)
+        first_name = _display_name(first_int)
         to_loc = {"name": first_name}
         if first_coord:
             to_loc["lat"] = first_coord[0]
@@ -1311,8 +1823,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
         transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
-        prev_name = _stop_name(prev_int)
-        curr_name = _stop_name(curr_int)
+        prev_name = _display_name(prev_int)
+        curr_name = _display_name(curr_int)
         prev_coord = stop_coords.get(prev_int)
         curr_coord = stop_coords.get(curr_int)
 
@@ -1358,6 +1870,40 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             else:
                 leg["duration_seconds"] = None
 
+            # ── Real-time delay annotation for bus legs ──────────
+            # Scheduled times are what the timetable says (already in
+            # departure_time / arrival_time).  We look up live delay
+            # and compute adjusted real-time estimates.
+            if transport == "bus" and line_name:
+                delay_s = _get_live_delay_for_line(line_name)
+            else:
+                delay_s = None
+
+            # Store scheduled times explicitly
+            leg["scheduled_departure_time"] = leg["departure_time"]
+            leg["scheduled_arrival_time"] = leg["arrival_time"]
+
+            if delay_s is not None and delay_s != 0:
+                leg["delay_seconds"] = delay_s
+                leg["status"] = _bus_delay_status(delay_s)
+                # Compute real-time adjusted times
+                if board_dep is not None:
+                    leg["realtime_departure_time"] = _time_str(
+                        int(board_dep + delay_s))
+                else:
+                    leg["realtime_departure_time"] = leg["departure_time"]
+                arr_secs = curr_info["arrival_time"]
+                if arr_secs < math.inf:
+                    leg["realtime_arrival_time"] = _time_str(
+                        int(arr_secs + delay_s))
+                else:
+                    leg["realtime_arrival_time"] = leg["arrival_time"]
+            else:
+                leg["delay_seconds"] = 0 if delay_s == 0 else None
+                leg["status"] = "On time" if delay_s is not None else None
+                leg["realtime_departure_time"] = leg["departure_time"]
+                leg["realtime_arrival_time"] = leg["arrival_time"]
+
         legs.append(leg)
 
         # -- geometry for this leg --
@@ -1387,7 +1933,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             and end_walk > 0 and ordered):
         last_int = ordered[-1][0]
         last_coord = stop_coords.get(last_int)
-        last_name = _stop_name(last_int)
+        last_name = _display_name(last_int)
         from_loc = {"name": last_name}
         if last_coord:
             from_loc["lat"] = last_coord[0]
@@ -1414,6 +1960,19 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "color": "#888888",
         })
 
+    # Compute the total real-time delay from all bus legs
+    total_delay_s = 0
+    has_any_delay = False
+    for leg in legs:
+        ds = leg.get("delay_seconds")
+        if ds is not None and ds != 0:
+            total_delay_s += ds
+            has_any_delay = True
+
+    rt_total_arrival = None
+    if total_arrival is not None and has_any_delay:
+        rt_total_arrival = _time_str(int(total_arrival + total_delay_s))
+
     return {
         "success": True,
         "legs": legs,
@@ -1421,6 +1980,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "start_walk_seconds": start_walk,
             "end_walk_seconds": end_walk,
             "total_arrival": _time_str(total_arrival),
+            "realtime_total_arrival": rt_total_arrival,
+            "total_delay_seconds": total_delay_s if has_any_delay else None,
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),

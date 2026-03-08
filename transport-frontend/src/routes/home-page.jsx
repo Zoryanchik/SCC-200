@@ -2,8 +2,10 @@ import React, { useMemo, useState, useEffect, useCallback, lazy, Suspense } from
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
+import IconButton from "@mui/material/IconButton";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
+import MenuItem from '@mui/material/MenuItem';
 import Divider from "@mui/material/Divider";
 import InputAdornment from "@mui/material/InputAdornment";
 import Paper from "@mui/material/Paper";
@@ -12,11 +14,12 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
-import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Train, Heart } from "lucide-react";
+import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Crosshair, Train, Heart, X } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
+import WeatherWidget from "../components/common/WeatherWidget";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
@@ -52,6 +55,13 @@ function journeyToRouteCard(journey) {
       // keep original times for the time display row in RouteCard
       departure_time_with_offset: leg.departure_time_with_offset ?? null,
       arrival_time_with_offset: leg.arrival_time_with_offset ?? null,
+      // Real-time delay info for bus/train legs
+      scheduled_departure_time: leg.scheduled_departure_time ?? null,
+      scheduled_arrival_time: leg.scheduled_arrival_time ?? null,
+      realtime_departure_time_with_offset: leg.realtime_departure_time_with_offset ?? null,
+      realtime_arrival_time_with_offset: leg.realtime_arrival_time_with_offset ?? null,
+      delay_seconds: leg.delay_seconds ?? null,
+      status: leg.status ?? null,
     };
   });
 
@@ -108,6 +118,17 @@ export default function HomePage() {
   const [selectedFromStop, setSelectedFromStop] = useState(null);
   const [selectedToStop, setSelectedToStop] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
+  // Journey search controls: date, time, max transfers
+  const pad2 = (n) => (n < 10 ? `0${n}` : `${n}`);
+  const now = new Date();
+  const defaultDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  const defaultTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`; // HH:MM
+  const [departureDate, setDepartureDate] = useState(defaultDate);
+  const [departureClock, setDepartureClock] = useState(defaultTime);
+  // default transfers changed to 0 per request
+  const [maxTransfers, setMaxTransfers] = useState(0);
+  // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
+  const [transportMode, setTransportMode] = useState('all');
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 300);
   const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
@@ -117,6 +138,7 @@ export default function HomePage() {
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
   const [routes, setRoutes] = useState([]);
+  const [showSuggested, setShowSuggested] = useState(false);
 
   // ---- Map + live-bus state (merged from map-view-page) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
@@ -124,11 +146,92 @@ export default function HomePage() {
   const [openPopupId, setOpenPopupId] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [geoError, setGeoError] = useState(null);
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationStatus, setLocationStatus] = useState('idle');
+  const [locationError, setLocationError] = useState(null);
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
   const handleMoveEnd = useCallback(({ lat, lon }) => {
     setMapCenter({ lat, lon });
   }, []);
+
+  const handleUseMyLocation = useCallback(() => {
+    if (!navigator || !navigator.geolocation) {
+      setGeoError('Geolocation not supported by your browser');
+      setTimeout(() => setGeoError(null), 4000);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        const loc = {
+          name: 'My location',
+          display_name: 'My location',
+          lat,
+          lon,
+          type: 'location',
+        };
+        setSelectedFromStop(loc);
+        setFromLocation('My location');
+        setMapCenter({ lat, lon });
+        // also set userLocation for map-level centering/follow
+        setUserLocation([lat, lon]);
+        setLocationStatus('granted');
+        setLocationError(null);
+        setGeoError(null);
+      },
+      (err) => {
+        setGeoError(err.message || 'Failed to get location');
+        setLocationStatus('error');
+        setLocationError(err.message || 'Failed to get location');
+        setTimeout(() => setGeoError(null), 4000);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }, [setSelectedFromStop, setFromLocation, setMapCenter]);
+
+  const requestLocation = useCallback(() => {
+    if (!navigator || !navigator.geolocation) {
+      setLocationStatus('error');
+      setLocationError('Geolocation not supported by your browser');
+      setTimeout(() => setLocationError(null), 4000);
+      return;
+    }
+    setLocationStatus('loading');
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords = [pos.coords.latitude, pos.coords.longitude];
+        setUserLocation(coords);
+        setLocationStatus('granted');
+        setLocationError(null);
+        // centre map if we have the instance
+        if (mapInstance && typeof mapInstance.flyTo === 'function') {
+          try {
+            mapInstance.flyTo(coords, Math.max(mapInstance.getZoom(), 12), { duration: 1.0 });
+          } catch (e) {
+            // ignore
+          }
+        }
+      },
+      (err) => {
+        setLocationStatus('error');
+        setLocationError(err?.message || 'Location permission denied');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  }, [mapInstance]);
+
+  const handleCenterOnUser = useCallback(() => {
+    if (!userLocation || !mapInstance) return;
+    try {
+      mapInstance.flyTo(userLocation, Math.max(mapInstance.getZoom(), 12), { duration: 1.0 });
+    } catch (e) {
+      // ignore
+    }
+  }, [userLocation, mapInstance]);
 
   // Debounced live bus data tied to the current map center
   const {
@@ -184,9 +287,11 @@ export default function HomePage() {
           // Remove delay/status keys – shown in the popup header, not in meta
           ['delay_minutes', 'delayMinutes', 'status'].forEach((k) => delete meta[k]);
 
-          const displayName = (bus.line ? String(bus.line) : '')
-                              + (bus.destination ? (' → ' + bus.destination) : '')
-                              || (bus.name || `Bus ${bus.id || ''}`);
+          // Show destination as the primary label line (e.g. "To: Night Stop").
+          // Route/line number is shown separately in the popup pill.
+          const displayName = bus.destination
+                              ? `To: ${bus.destination}`
+                              : (bus.name || (bus.line ? String(bus.line) : `Bus ${bus.id || ''}`));
 
           const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 
@@ -250,6 +355,24 @@ export default function HomePage() {
     () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
     [markers, filters.showBuses, filters.showTrains]
   );
+
+  const nearestStop = useMemo(() => {
+    if (!userLocation || !Array.isArray(filteredMarkers) || filteredMarkers.length === 0) return null;
+    const toRadians = (deg) => (deg * Math.PI) / 180;
+    const R = 6371000;
+    const [ulat, ulon] = userLocation;
+    let nearest = null;
+    for (const marker of filteredMarkers) {
+      const [mlat, mlon] = marker.position;
+      const dLat = toRadians(mlat - ulat);
+      const dLon = toRadians(mlon - ulon);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(ulat)) * Math.cos(toRadians(mlat)) * Math.sin(dLon / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const dist = R * c;
+      if (!nearest || dist < nearest.distance) nearest = { ...marker, distance: dist };
+    }
+    return nearest;
+  }, [userLocation, filteredMarkers]);
   // ---- end map state ----
 
   const getCoordsFromOption = (option) => {
@@ -324,16 +447,36 @@ export default function HomePage() {
   }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
-    const fromResults = fromLoading ? [] : fromStopResults?.length ? fromStopResults : [];
-    const toResults = toLoading ? [] : toStopResults?.length ? toStopResults : [];
+    const buildOptions = (results) => {
+      if (!Array.isArray(results) || results.length === 0) return [];
+      const strings = [];
+      const stops = [];
+      const locations = [];
+      for (const r of results) {
+        if (typeof r === "string") strings.push(r);
+        else if (r && r.type === "location") locations.push(r);
+        else stops.push(r);
+      }
+      // Limit to 3 stops to keep the dropdown focused
+      return [...strings, ...stops.slice(0, 3), ...locations];
+    };
+
+    const fromResults = fromLoading ? [] : buildOptions(fromStopResults);
+    const toResults = toLoading ? [] : buildOptions(toStopResults);
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
   const handleSearch = async () => {
     if (!fromCoords || !toCoords) return;
+    // show the suggested routes overlay when a search starts
+    setShowSuggested(true);
     setIsSearching(true);
     try {
-      const journey = await getJourneyPlans(fromCoords, toCoords, new Date().toISOString());
+      // Build ISO datetime from user-selected date + clock (local)
+      const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
+  // Map UI transportMode -> API mode: 'all' -> 'combined'
+  const apiMode = transportMode === 'all' ? 'combined' : transportMode;
+  const journey = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers, mode: apiMode });
       const card = journeyToRouteCard(journey);
       setRoutes(card ? [card] : []);
     } catch (error) {
@@ -364,12 +507,45 @@ export default function HomePage() {
     <Skeleton variant="rounded" sx={{ width: "100%", height: { xs: 350, md: 450 } }} />
   );
 
+  // Build the suggested routes panel so it can be injected into the map side column
+  const suggestedRoutesPanel = (
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050 }}>
+      <Stack spacing={2}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 1051 }}>
+          <Typography variant="h6" fontWeight={700}>
+            Suggested routes
+          </Typography>
+          <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
+            <X size={14} />
+          </IconButton>
+        </Box>
+        {isSearching ? (
+          <Stack spacing={2}>
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} height={120} variant="rounded" />
+            ))}
+          </Stack>
+        ) : routes.length > 0 ? (
+          <Stack spacing={2}>
+            {routes.map((route) => (
+              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
+            ))}
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            No routes found. Try adjusting your search.
+          </Typography>
+        )}
+      </Stack>
+    </Paper>
+  );
+
   return (
-    <Stack spacing={{ xs: 2, md: 3 }}>
+    <Stack spacing={{ xs: 1.5, md: 2 }}>
       <Paper
         elevation={0}
         sx={{
-          p: { xs: 2.5, md: 3.5 },
+          p: { xs: 0.5, md: 0.7 },
           background: "linear-gradient(135deg, #6366F1 0%, #EC4899 100%)",
           color: "white",
           borderRadius: "16px",
@@ -377,14 +553,327 @@ export default function HomePage() {
       >
         <Stack direction="row" spacing={1.5} alignItems="center">
           <Bus size={24} />
-          <Typography variant="h5" fontWeight={700}>
+          <Typography variant="h5" fontWeight={550}>
             Dashboard
           </Typography>
           <Chip
             label="Live"
-            sx={{ fontWeight: 700, backgroundColor: "rgba(255,255,255,0.25)", color: "white" }}
+            sx={{ fontWeight: 550, backgroundColor: "rgba(255,255,255,0.25)", color: "white" }}
             size="small"
           />
+        </Stack>
+      </Paper>
+
+      <Paper
+        elevation={0}
+        sx={{
+          p: { xs: 2, md: 3 },
+          borderRadius: "16px",
+          border: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+          <Stack spacing={2}>
+            <Stack direction="row" alignItems="center" spacing={2} justifyContent="center">
+              {/* Quick journey search heading removed per UI update */}
+
+              {/* Date/time/transfers moved below the search inputs */}
+            </Stack>
+
+            <Stack
+              direction={{ xs: "column", md: "row" }}
+              spacing={2}
+              alignItems={{ md: "flex-start" }}
+            >
+                {/* Leftmost: quick 'use my location' for the From field - always visible */}
+                <IconButton
+                  aria-label="Use my location"
+                  onClick={handleUseMyLocation}
+                  size="large"
+                  sx={{ alignSelf: 'center' }}
+                >
+                    <Crosshair size={18} />
+                </IconButton>
+
+                <Autocomplete
+                  fullWidth
+                  freeSolo
+                  filterOptions={(x) => x}
+                  options={allStops.from}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
+                  value={selectedFromStop}
+                  onChange={(e, value) => {
+                    if (typeof value === "string") {
+                      setSelectedFromStop(null);
+                      setFromLocation(value);
+                      return;
+                    }
+                    setSelectedFromStop(value);
+                    if (value && typeof value === "object") setFromLocation(value.display_name || value.name || "");
+                  }}
+                  inputValue={fromLocation}
+                  onInputChange={(e, value) => setFromLocation(value)}
+                  loading={fromLoading}
+                  renderOption={(props, option) => {
+                    const label = typeof option === "string" ? option : (option.display_name || option.name);
+                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                    return (
+                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                        <Box sx={{ flexGrow: 1 }}>
+                          <Typography variant="body2" fontWeight={600}>
+                            {label}
+                          </Typography>
+                          {optionType === "location" && (
+                            <Typography variant="caption" color="text.secondary">
+                              Location
+                            </Typography>
+                          )}
+                        </Box>
+                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                      </Box>
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="From"
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <MapPin size={18} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: fromLoading ? (
+                          <CircularProgress color="inherit" size={20} />
+                        ) : (
+                          params.InputProps.endAdornment
+                        ),
+                      }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                        },
+                        "& .MuiInputBase-input": {
+                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
+                          textOverflow: "ellipsis",
+                        },
+                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      }}
+                    />
+                  )}
+                />
+
+                {/* Swap button: exchange From and To values */}
+                <IconButton
+                  aria-label="Swap start and destination"
+                  onClick={() => {
+                    // swap both the selected stop objects and the input strings
+                    setSelectedFromStop((prevFrom) => {
+                      // use functional updates to ensure sync
+                      const oldFrom = prevFrom;
+                      setSelectedToStop(oldFrom);
+                      return selectedToStop;
+                    });
+                    setSelectedToStop((prev) => prev); // no-op to satisfy eslint-like rules
+                    // swap input text values
+                    setFromLocation((prevFromLoc) => {
+                      const oldFromLoc = prevFromLoc;
+                      setToLocation(oldFromLoc);
+                      return toLocation;
+                    });
+                  }}
+                  size="large"
+                  sx={{
+                    alignSelf: 'center',
+                    width: 56,
+                    height: 56,
+                    p: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: '12px',
+                    // Ensure keyboard focus is visible
+                    '&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
+                  }}
+                >
+                  <span style={{ fontSize: 22, lineHeight: 1 }}>⇄</span>
+                </IconButton>
+
+                <Autocomplete
+                  fullWidth
+                  freeSolo
+                  filterOptions={(x) => x}
+                  options={allStops.to}
+                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
+                  value={selectedToStop}
+                  onChange={(e, value) => {
+                    if (typeof value === "string") {
+                      setSelectedToStop(null);
+                      setToLocation(value);
+                      return;
+                    }
+                    setSelectedToStop(value);
+                    if (value && typeof value === "object") setToLocation(value.display_name || value.name || "");
+                  }}
+                  inputValue={toLocation}
+                  onInputChange={(e, value) => setToLocation(value)}
+                  loading={toLoading}
+                  renderOption={(props, option) => {
+                    const label = typeof option === "string" ? option : (option.display_name || option.name);
+                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                    return (
+                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                        <Box sx={{ flexGrow: 1 }}>
+                          <Typography variant="body2" fontWeight={600}>
+                            {label}
+                          </Typography>
+                          {optionType === "location" && (
+                            <Typography variant="caption" color="text.secondary">
+                              Location
+                            </Typography>
+                          )}
+                        </Box>
+                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                      </Box>
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="To"
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                            <InputAdornment position="start">
+                            <NavIcon size={18} />
+                          </InputAdornment>
+                        ),
+                        endAdornment: toLoading ? (
+                          <CircularProgress color="inherit" size={20} />
+                        ) : (
+                          params.InputProps.endAdornment
+                        ),
+                      }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                        },
+                        "& .MuiInputBase-input": {
+                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
+                          textOverflow: "ellipsis",
+                        },
+                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      }}
+                    />
+                  )}
+                />
+
+            <Button
+              variant="contained"
+              size="large"
+              sx={{
+                minWidth: { xs: "100%", md: 180 },
+                height: 56,
+                flexShrink: 0,
+              }}
+              onClick={handleSearch}
+              disabled={!fromCoords || !toCoords || isSearching}
+            >
+              {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
+            </Button>
+          </Stack>
+
+          {/* Date/time/transfers controls moved here (below search inputs) */}
+          <Box sx={{ mt: 2, display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <TextField
+              label="Date"
+              type="date"
+              size="small"
+              value={departureDate}
+              onChange={(e) => setDepartureDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 140 }}
+            />
+            <TextField
+              label="Time"
+              type="time"
+              size="small"
+              value={departureClock}
+              onChange={(e) => setDepartureClock(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 110 }}
+            />
+            <TextField
+              label="Transfers"
+              type="number"
+              size="small"
+              value={maxTransfers}
+              onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+              InputProps={{ inputProps: { min: 0, max: 10 } }}
+              sx={{ width: 110 }}
+            />
+            <TextField
+              select
+              size="small"
+              value={transportMode}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val !== null) setTransportMode(val);
+              }}
+              sx={{ ml: 1, minWidth: 120, maxWidth: 180 }}
+              SelectProps={{
+                renderValue: (selected) => {
+                  if (!selected) return '';
+                  return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1);
+                },
+              }}
+            >
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="bus">Bus</MenuItem>
+              <MenuItem value="train">Train</MenuItem>
+            </TextField>
+          </Box>
+
+          {geoError && (
+            <Box sx={{ mt: 1 }}>
+              <Alert severity="error">{geoError}</Alert>
+            </Box>
+          )}
+
+          {favorites.length > 0 && (
+            <Box>
+              <Typography variant="caption" fontWeight={700} display="block" mb={1}>
+                Recent Journeys
+              </Typography>
+              <Stack spacing={1}>
+                    {favorites.slice(0, 3).map((fav, idx) => (
+                      <Box
+                        key={idx}
+                        onClick={() => {
+                          setFromLocation(fav.fromName);
+                          setToLocation(fav.toName);
+                        }}
+                        sx={{
+                          p: 1,
+                          borderRadius: 1,
+                          backgroundColor: "#f5f5f5",
+                          cursor: "pointer",
+                          "&:hover": { backgroundColor: "#eeeeee" },
+                        }}
+                      >
+                        <Typography variant="caption" fontWeight={600}>
+                          {fav.fromName} \u2192 {fav.toName}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                </Box>
+              )}
         </Stack>
       </Paper>
 
@@ -393,11 +882,8 @@ export default function HomePage() {
         elevation={0}
         sx={{ p: { xs: 2, md: 3 }, borderRadius: "16px", border: "1px solid", borderColor: "divider" }}
       >
-        <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
-          <MapPin size={20} color="#6366F1" />
-          <Typography variant="subtitle1" fontWeight={700}>
-            Live Transport Map
-          </Typography>
+        <Stack direction="row" spacing={1.5} alignItems="center" mb={0}>
+          {/* Map header - icon intentionally removed */}
         </Stack>
 
         <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
@@ -407,8 +893,9 @@ export default function HomePage() {
             sx={{
               padding: "8px 16px",
               border: "2px solid " + (filters.showBuses ? "#6366F1" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
+              borderRadius: "12px",
+              minHeight: 48,
+              display: "inline-flex",
               alignItems: "center",
               gap: 1,
               cursor: "pointer",
@@ -426,8 +913,9 @@ export default function HomePage() {
             sx={{
               padding: "8px 16px",
               border: "2px solid " + (filters.showTrains ? "#10B981" : "#E2E8F0"),
-              borderRadius: "10px",
-              display: "flex",
+              borderRadius: "12px",
+              minHeight: 48,
+              display: "inline-flex",
               alignItems: "center",
               gap: 1,
               cursor: "pointer",
@@ -439,26 +927,81 @@ export default function HomePage() {
           >
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
           </Box>
+          <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
+          {!userLocation && (
+            <Button
+              variant="outlined"
+              size="large"
+              onClick={requestLocation}
+              disabled={locationStatus === 'loading'}
+              sx={(theme) => ({
+                borderRadius: '12px',
+                textTransform: 'none',
+                width: { xs: '100%', sm: 160 },
+                height: 48,
+                px: 2,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: theme.palette.mode === 'dark' ? 'white' : undefined,
+                borderColor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.7)' : undefined,
+                // ensure icon/text inside follow the color
+                '& .MuiButton-startIcon, & .MuiTypography-root': { color: theme.palette.mode === 'dark' ? 'white' : undefined },
+              })}
+            >
+              {locationStatus === 'loading' ? (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <CircularProgress size={18} />
+                  <Typography variant="body2">Locating</Typography>
+                </Stack>
+              ) : (
+                'Use my location'
+              )}
+            </Button>
+          )}
+          {userLocation && (
+            <Button
+              variant="contained"
+              size="large"
+              onClick={handleCenterOnUser}
+              sx={{
+                borderRadius: '12px',
+                textTransform: 'none',
+                width: { xs: '100%', sm: 160 },
+                height: 48,
+                px: 2,
+                backgroundColor: '#D97974',
+                color: '#ffffff',
+                '&:hover': { backgroundColor: '#c86b66' },
+              }}
+            >
+              Center on me
+            </Button>
+          )}
+          {/* Compact weather aligned to the right of the filter row */}
+          <Box sx={{ display: { xs: 'none', sm: 'flex' }, ml: 1 }}>
+            <WeatherWidget variant="inline" />
+          </Box>
         </Stack>
 
         <Suspense fallback={<MapFallback />}>
-          <Box sx={{ height: { xs: 350, md: 450 }, borderRadius: "12px", overflow: "hidden" }}>
-            <MapViewMap
-              filteredMarkers={filteredMarkers}
-              openPopupId={openPopupId}
-              onOpenPopup={setOpenPopupId}
-              onClosePopup={() => setOpenPopupId(null)}
-              userLocation={null}
-              nearestStop={null}
-              busLoading={busLoading}
-              busRefreshing={busRefreshing}
-              busCountdown={busCountdown}
-              busRefreshInterval={busRefreshInterval}
-              trainLoading={trainLoading}
-              onMapReady={setMapInstance}
-              onMoveEnd={handleMoveEnd}
-            />
-          </Box>
+          <MapViewMap
+            filteredMarkers={filteredMarkers}
+            openPopupId={openPopupId}
+            onOpenPopup={setOpenPopupId}
+            onClosePopup={() => setOpenPopupId(null)}
+            userLocation={userLocation}
+            nearestStop={nearestStop}
+            busLoading={busLoading}
+            busRefreshing={busRefreshing}
+            busCountdown={busCountdown}
+            busRefreshInterval={busRefreshInterval}
+            trainLoading={trainLoading}
+            onMapReady={setMapInstance}
+            onMoveEnd={handleMoveEnd}
+            sideContent={suggestedRoutesPanel}
+            showSideOverlay={showSuggested}
+          />
         </Suspense>
       </Paper>
 
@@ -510,214 +1053,6 @@ export default function HomePage() {
         </Stack>
       </Paper>
 
-      <Paper
-        elevation={0}
-        sx={{
-          p: { xs: 2, md: 3 },
-          borderRadius: "16px",
-          border: "1px solid",
-          borderColor: "divider",
-        }}
-      >
-        <Stack spacing={2}>
-          <Typography variant="h6" fontWeight={700}>
-            Quick journey search
-          </Typography>
-
-          <Stack
-            direction={{ xs: "column", md: "row" }}
-            spacing={2}
-            alignItems={{ md: "flex-start" }}
-          >
-                <Autocomplete
-                  fullWidth
-                  freeSolo
-                  filterOptions={(x) => x}
-                  options={allStops.from}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
-                  value={selectedFromStop}
-                  onChange={(e, value) => {
-                    if (typeof value === "string") {
-                      setSelectedFromStop(null);
-                      setFromLocation(value);
-                      return;
-                    }
-                    setSelectedFromStop(value);
-                    if (value && typeof value === "object") setFromLocation(value.name || "");
-                  }}
-                  inputValue={fromLocation}
-                  onInputChange={(e, value) => setFromLocation(value)}
-                  loading={fromLoading}
-                  renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : option.name;
-                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                    return (
-                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                        <Box sx={{ flexGrow: 1 }}>
-                          <Typography variant="body2" fontWeight={600}>
-                            {label}
-                          </Typography>
-                          {optionType === "location" && (
-                            <Typography variant="caption" color="text.secondary">
-                              Location
-                            </Typography>
-                          )}
-                        </Box>
-                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                      </Box>
-                    );
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="From"
-                      InputProps={{
-                        ...params.InputProps,
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <MapPin size={18} />
-                          </InputAdornment>
-                        ),
-                        endAdornment: fromLoading ? (
-                          <CircularProgress color="inherit" size={20} />
-                        ) : (
-                          params.InputProps.endAdornment
-                        ),
-                      }}
-                      sx={{
-                        "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                        },
-                        "& .MuiInputBase-input": {
-                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
-                          textOverflow: "ellipsis",
-                        },
-                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                      }}
-                    />
-                  )}
-                />
-
-                <Autocomplete
-                  fullWidth
-                  freeSolo
-                  filterOptions={(x) => x}
-                  options={allStops.to}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : option.name || "")}
-                  value={selectedToStop}
-                  onChange={(e, value) => {
-                    if (typeof value === "string") {
-                      setSelectedToStop(null);
-                      setToLocation(value);
-                      return;
-                    }
-                    setSelectedToStop(value);
-                    if (value && typeof value === "object") setToLocation(value.name || "");
-                  }}
-                  inputValue={toLocation}
-                  onInputChange={(e, value) => setToLocation(value)}
-                  loading={toLoading}
-                  renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : option.name;
-                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                    return (
-                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                        <Box sx={{ flexGrow: 1 }}>
-                          <Typography variant="body2" fontWeight={600}>
-                            {label}
-                          </Typography>
-                          {optionType === "location" && (
-                            <Typography variant="caption" color="text.secondary">
-                              Location
-                            </Typography>
-                          )}
-                        </Box>
-                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                      </Box>
-                    );
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="To"
-                      InputProps={{
-                        ...params.InputProps,
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <NavIcon size={18} />
-                          </InputAdornment>
-                        ),
-                        endAdornment: toLoading ? (
-                          <CircularProgress color="inherit" size={20} />
-                        ) : (
-                          params.InputProps.endAdornment
-                        ),
-                      }}
-                      sx={{
-                        "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
-                        },
-                        "& .MuiInputBase-input": {
-                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
-                          textOverflow: "ellipsis",
-                        },
-                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                      }}
-                    />
-                  )}
-                />
-
-            <Button
-              variant="contained"
-              size="large"
-              sx={{
-                minWidth: { xs: "100%", md: 180 },
-                height: 56,
-                flexShrink: 0,
-              }}
-              onClick={handleSearch}
-              disabled={!fromCoords || !toCoords || isSearching}
-            >
-              {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
-            </Button>
-          </Stack>
-
-          {favorites.length > 0 && (
-            <Box>
-              <Typography variant="caption" fontWeight={700} display="block" mb={1}>
-                Recent Journeys
-              </Typography>
-              <Stack spacing={1}>
-                    {favorites.slice(0, 3).map((fav, idx) => (
-                      <Box
-                        key={idx}
-                        onClick={() => {
-                          setFromLocation(fav.fromName);
-                          setToLocation(fav.toName);
-                        }}
-                        sx={{
-                          p: 1,
-                          borderRadius: 1,
-                          backgroundColor: "#f5f5f5",
-                          cursor: "pointer",
-                          "&:hover": { backgroundColor: "#eeeeee" },
-                        }}
-                      >
-                        <Typography variant="caption" fontWeight={600}>
-                          {fav.fromName} \u2192 {fav.toName}
-                        </Typography>
-                      </Box>
-                    ))}
-                  </Stack>
-                </Box>
-              )}
-        </Stack>
-      </Paper>
-
       <Paper elevation={1} sx={{ p: { xs: 2, md: 3 } }}>
         <Stack spacing={2}>
           <Stack direction="row" spacing={1} alignItems="center">
@@ -742,30 +1077,7 @@ export default function HomePage() {
         </Stack>
       </Paper>
 
-      <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 } }}>
-        <Stack spacing={2}>
-          <Typography variant="h6" fontWeight={700}>
-            Suggested routes
-          </Typography>
-          {isSearching ? (
-            <Stack spacing={2}>
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} height={120} variant="rounded" />
-              ))}
-            </Stack>
-          ) : routes.length > 0 ? (
-            <Stack spacing={2}>
-              {routes.map((route) => (
-                <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
-              ))}
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              No routes found. Try adjusting your search.
-            </Typography>
-          )}
-        </Stack>
-      </Paper>
+      {/* Bottom weather widget removed — now shown inline in the map filter row */}
     </Stack>
   );
 }
