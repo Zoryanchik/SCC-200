@@ -774,6 +774,34 @@ class BusLoader:
             # If anything goes wrong here, fall back to non-namespaced insert
             pass
 
+        # --- Atomic per-route replace when incoming revision is present ---
+        # To prevent persisted (possibly swapped) stop_order anomalies we
+        # perform an explicit replace of existing route rows whenever the
+        # incoming file carries a revision (non-zero). This ensures the
+        # incoming canonical stop list replaces any previous rows rather
+        # than being merged with them via per-row dedupe or upserts.
+        # (If incoming revision is missing/zero we keep the previous
+        # behaviour where existing DB rows are preserved.)
+        try:
+            incoming_rev_val = revision or 0
+            if route_stops and incoming_rev_val:
+                unique_rids = sorted({rs[0] for rs in route_stops if rs[0]})
+                if unique_rids:
+                    # Remove any existing tracks/stops for these routes so
+                    # the subsequent bulk insert is an atomic replacement.
+                    cursor.execute(
+                        "DELETE FROM bus_route_tracks WHERE route_id = ANY(%s)",
+                        (unique_rids,)
+                    )
+                    cursor.execute(
+                        "DELETE FROM bus_route_stops WHERE route_id = ANY(%s)",
+                        (unique_rids,)
+                    )
+        except Exception:
+            # If deletion fails for any reason, fall back to previous flow
+            # (dedupe/upsert) so the ingest still proceeds.
+            pass
+
         # --- Deduplicate route_stops by (route_id, stop_order) ---
         # Some TXC payloads or previous parsing logic can produce multiple
         # different ATCO codes assigned the same stop_order for a route,
