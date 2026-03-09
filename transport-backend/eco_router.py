@@ -1,4 +1,4 @@
-"""RAPTOR router — single-network variant.
+"""ECO RAPTOR router — single-network variant.
 
 The caller builds a MergedData containing two day-halves (e.g.
 yesterday + today before noon, today + tomorrow after noon) with their
@@ -397,7 +397,7 @@ class RaptorRouter:
             for subsequent_point, subsequent_a_time, _d in journey_times[start_pos + 1:]:
                 if subsequent_point == stop:
                     continue
-                if subsequent_a_time < reach_stops[subsequent_point][1]:
+                if subsequent_a_time < reach_stops[subsequent_point][1] and reach_stops[subsequent_point][2] != WALKING:
                     reach_stops[subsequent_point][1] = subsequent_a_time
                     reach_stops[subsequent_point][0] = stop
                     reach_stops[subsequent_point][2] = network.journey_type(first_journey)
