@@ -2059,6 +2059,17 @@ def format_route_text(route_result, merged):
                 j_origin = info.get("journey_origin", "")
                 j_dest = info.get("journey_destination", "")
                 board_dep = info.get("board_departure")
+
+                # Look up live delay for bus legs so we can display
+                # both scheduled and real-time departure.
+                # board_dep already contains delay (from the delay-
+                # adjusted router), so:
+                #   scheduled = board_dep - delay_s
+                #   realtime  = board_dep
+                delay_s = None
+                if transport == "bus" and line_name:
+                    delay_s = _get_live_delay_for_line(line_name)
+
                 desc_parts = []
                 if transport:
                     desc_parts.append(transport)
@@ -2066,21 +2077,22 @@ def format_route_text(route_result, merged):
                     desc_parts.append(f"line {line_name}")
                 if j_origin and j_dest:
                     desc_parts.append(f"{j_origin} -> {j_dest}")
-                if board_dep is not None:
-                    desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
 
-                # Look up live delay for bus legs and show both times
                 delay_tag = ""
-                if transport == "bus" and line_name:
-                    delay_s = _get_live_delay_for_line(line_name)
-                    if delay_s is not None and delay_s >= 60:
-                        mins = round(delay_s / 60)
-                        delay_tag = f" [Delayed {mins} min]"
-                        if board_dep is not None:
-                            rt_dep = seconds_to_time(int(board_dep + delay_s))
-                            desc_parts.append(f"expected {rt_dep}")
-                    elif delay_s is not None:
-                        delay_tag = " [On time]"
+                if delay_s is not None and delay_s >= 60 and board_dep is not None:
+                    sched_dep = seconds_to_time(int(board_dep - delay_s))
+                    rt_dep = seconds_to_time(int(board_dep))
+                    desc_parts.append(f"departs {sched_dep}")
+                    desc_parts.append(f"expected {rt_dep}")
+                    mins = round(delay_s / 60)
+                    delay_tag = f" [Delayed {mins} min]"
+                elif delay_s is not None:
+                    if board_dep is not None:
+                        desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
+                    delay_tag = " [On time]"
+                else:
+                    if board_dep is not None:
+                        desc_parts.append(f"departs {seconds_to_time(int(board_dep))}")
 
                 desc = " - ".join(desc_parts) if desc_parts else transport
                 out.append(f"    - {desc}{delay_tag}")
@@ -2308,48 +2320,54 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             leg["journey_destination"] = (
                 curr_info.get("journey_destination", "") or None)
             board_dep = curr_info.get("board_departure")
-            leg["departure_time"] = _time_str(board_dep)
-            dur_start = board_dep if board_dep else prev_info["arrival_time"]
-            if (curr_info["arrival_time"] < math.inf
-                    and dur_start < math.inf):
-                leg["duration_seconds"] = int(
-                    curr_info["arrival_time"] - dur_start)
-            else:
-                leg["duration_seconds"] = None
+            arr_secs = curr_info["arrival_time"]
 
             # ── Real-time delay annotation for bus legs ──────────
-            # Scheduled times are what the timetable says (already in
-            # departure_time / arrival_time).  We look up live delay
-            # and compute adjusted real-time estimates.
+            # When the router was built with apply_delay=True the
+            # journey_times were shifted by the per-journey delay,
+            # so board_dep and arr_secs already include the delay.
+            # To avoid double-counting we derive:
+            #   scheduled = raw_value - delay   (original timetable)
+            #   realtime  = raw_value           (already shifted)
             if transport == "bus" and line_name:
                 delay_s = _get_live_delay_for_line(line_name)
             else:
                 delay_s = None
 
-            # Store scheduled times explicitly
-            leg["scheduled_departure_time"] = leg["departure_time"]
-            leg["scheduled_arrival_time"] = leg["arrival_time"]
-
             if delay_s is not None and delay_s != 0:
+                # Scheduled = undo the shift that the delay-adjusted
+                # router already applied.
+                sched_dep = (board_dep - delay_s) if board_dep is not None else None
+                sched_arr = (arr_secs - delay_s) if arr_secs < math.inf else None
+
+                leg["departure_time"] = _time_str(sched_dep)
+                leg["arrival_time"] = _time_str(sched_arr) if sched_arr is not None else leg["arrival_time"]
+                leg["scheduled_departure_time"] = leg["departure_time"]
+                leg["scheduled_arrival_time"] = leg["arrival_time"]
+
                 leg["delay_seconds"] = delay_s
                 leg["status"] = _bus_delay_status(delay_s)
-                # Compute real-time adjusted times
-                if board_dep is not None:
-                    leg["realtime_departure_time"] = _time_str(
-                        int(board_dep + delay_s))
-                else:
-                    leg["realtime_departure_time"] = leg["departure_time"]
-                arr_secs = curr_info["arrival_time"]
-                if arr_secs < math.inf:
-                    leg["realtime_arrival_time"] = _time_str(
-                        int(arr_secs + delay_s))
-                else:
-                    leg["realtime_arrival_time"] = leg["arrival_time"]
+
+                # Realtime = the value already produced by the delay-
+                # adjusted router (i.e. board_dep / arr_secs as-is).
+                leg["realtime_departure_time"] = _time_str(board_dep) if board_dep is not None else leg["departure_time"]
+                leg["realtime_arrival_time"] = _time_str(arr_secs) if arr_secs < math.inf else leg["arrival_time"]
             else:
+                # No delay or unknown — scheduled == realtime
+                leg["departure_time"] = _time_str(board_dep)
+                leg["arrival_time"] = _time_str(arr_secs) if arr_secs < math.inf else leg.get("arrival_time")
+                leg["scheduled_departure_time"] = leg["departure_time"]
+                leg["scheduled_arrival_time"] = leg["arrival_time"]
                 leg["delay_seconds"] = 0 if delay_s == 0 else None
                 leg["status"] = "On time" if delay_s is not None else None
                 leg["realtime_departure_time"] = leg["departure_time"]
                 leg["realtime_arrival_time"] = leg["arrival_time"]
+
+            dur_start = board_dep if board_dep else prev_info["arrival_time"]
+            if (arr_secs < math.inf and dur_start < math.inf):
+                leg["duration_seconds"] = int(arr_secs - dur_start)
+            else:
+                leg["duration_seconds"] = None
 
         legs.append(leg)
 
@@ -2407,7 +2425,11 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "color": "#888888",
         })
 
-    # Compute the total real-time delay from all bus legs
+    # Compute the total real-time delay from all bus legs.
+    # Because the router already used delay-adjusted journey_times,
+    # total_arrival already includes the cumulative delay.
+    #   scheduled total = total_arrival - total_delay
+    #   realtime  total = total_arrival  (as-is)
     total_delay_s = 0
     has_any_delay = False
     for leg in legs:
@@ -2416,9 +2438,13 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             total_delay_s += ds
             has_any_delay = True
 
+    scheduled_total = None
     rt_total_arrival = None
     if total_arrival is not None and has_any_delay:
-        rt_total_arrival = _time_str(int(total_arrival + total_delay_s))
+        scheduled_total = _time_str(int(total_arrival - total_delay_s))
+        rt_total_arrival = _time_str(int(total_arrival))
+    elif total_arrival is not None:
+        scheduled_total = _time_str(int(total_arrival))
 
     return {
         "success": True,
@@ -2426,7 +2452,7 @@ def build_journey_plan_response(route_result, merged, stop_coords):
         "meta": {
             "start_walk_seconds": start_walk,
             "end_walk_seconds": end_walk,
-            "total_arrival": _time_str(total_arrival),
+            "total_arrival": scheduled_total,
             "realtime_total_arrival": rt_total_arrival,
             "total_delay_seconds": total_delay_s if has_any_delay else None,
             "start_point": list(start_point) if start_point else None,
