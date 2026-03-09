@@ -1185,17 +1185,25 @@ def _haversine_m(lat1, lon1, lat2, lon2):
 def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
     """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
 
-    Smart algorithm:
-    1. Find candidate journeys by line name / destination.
-    2. For each candidate, project the vehicle onto the route track polyline
-       (from <Mapping><track> in the TransXChange XMLs) to measure how far
-       along the route the bus is.
-    3. Skip candidates where the bus is not near the track (wrong route).
-    4. Skip candidates where the bus hasn't started yet (near start, before
-       departure) or has already finished (near end, after last arrival).
-    5. Interpolate the expected scheduled time from the vehicle's progress
-       fraction and the journey's stop timetable, then compute
-       delay = now - expected_time.
+    Stable algorithm – designed to return consistent results across
+    consecutive calls even when GPS coordinates jitter by a few metres:
+
+    1.  Collect candidate journeys matching line/destination.
+    2.  For each, project the vehicle onto the route track polyline using
+        **edge interpolation** (not just vertex snapping) so that tiny
+        GPS changes produce smooth, monotonic progress changes.
+    3.  Apply time-window and spatial guards to reject implausible matches.
+    4.  Interpolate expected_time from the stop-progress curve.
+    5.  Score candidates with ``(dist_m, abs(delay), j_id)``.  The key
+        insight: when multiple journeys share the same route, ``dist_m``
+        is identical — so the best match is the journey whose
+        interpolated expected_time is closest to *now* (smallest
+        ``|delay|``).  ``j_id`` provides final determinism.
+    6.  Sanity-clamp: reject any match whose |delay| exceeds
+        ``max(journey_duration * 0.5, 1200)`` – a bus more than 20 min
+        late (or half its journey duration) is almost certainly a
+        mismatch against the wrong departure.
+
     Returns int seconds or None when no confident match is found.
     """
     try:
@@ -1223,57 +1231,102 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
 
     # ── helper: cumulative distance along a polyline ──
     def _cum_distances(track):
-        """Return list of cumulative distances (metres) for each point."""
         dists = [0.0]
         for i in range(1, len(track)):
             dists.append(dists[-1] + _hav(track[i - 1][0], track[i - 1][1],
                                            track[i][0], track[i][1]))
         return dists
 
-    # ── helper: project a point onto a polyline ──
+    # ── helper: project a point onto a polyline (edge-interpolated) ──
     def _project_onto_track(plat, plon, track, cum_dists):
-        """Find the closest point on the polyline to (plat, plon).
+        """Project (plat, plon) onto the nearest point on the polyline.
 
-        Returns (min_dist_m, progress_fraction) where progress_fraction
-        is 0.0 at the start and 1.0 at the end.
+        Uses proper edge-interpolation so that a point between two track
+        vertices gets a smoothly-varying progress fraction, eliminating
+        the vertex-snap instability that caused flicker.
+
+        Returns (min_dist_m, progress_fraction  0..1).
         """
         if not track:
             return (1e9, 0.0)
         total_len = cum_dists[-1] if cum_dists[-1] > 0 else 1.0
         best_dist = 1e9
-        best_progress = 0.0
+        best_along = 0.0  # cumulative metres along track of closest point
+
+        for i in range(len(track) - 1):
+            ax, ay = track[i]
+            bx, by = track[i + 1]
+            # Vector AB and AP (in approximate local metres)
+            cos_lat = math.cos(math.radians((ax + bx) / 2))
+            abx = (by - ay) * cos_lat * 111320.0
+            aby = (bx - ax) * 111320.0
+            apx = (plon - ay) * cos_lat * 111320.0
+            apy = (plat - ax) * 111320.0
+            ab2 = abx * abx + aby * aby
+            if ab2 < 1e-9:
+                t = 0.0
+            else:
+                t = (apx * abx + apy * aby) / ab2
+                t = max(0.0, min(1.0, t))
+            # Closest point on segment
+            cx = ax + t * (bx - ax)
+            cy = ay + t * (by - ay)
+            d = _hav(plat, plon, cx, cy)
+            if d < best_dist:
+                best_dist = d
+                seg_len = cum_dists[i + 1] - cum_dists[i]
+                best_along = cum_dists[i] + t * seg_len
+
+        # Also check all vertices (handles single-point tracks, endpoints)
         for i in range(len(track)):
             d = _hav(plat, plon, track[i][0], track[i][1])
             if d < best_dist:
                 best_dist = d
-                best_progress = cum_dists[i] / total_len
-        return (best_dist, best_progress)
+                best_along = cum_dists[i]
+
+        return (best_dist, best_along / total_len)
 
     # ── helper: compute stop progress fractions along a track ──
-    def _stop_progress_on_track(jt, walking, track, cum_dists):
-        """For each stop in a journey's timetable, find its progress fraction
-        along the track.
-
-        Returns list of (progress_frac, sched_time) sorted by progress.
-        """
+    def _stop_progress_on_track(jt, walking_mod, track, cum_dists):
         total_len = cum_dists[-1] if cum_dists[-1] > 0 else 1.0
         result = []
         for sid, atime, dtime in jt:
             try:
-                slat, slon = walking.get_loc_coords(sid)
+                slat, slon = walking_mod.get_loc_coords(sid)
             except Exception:
                 continue
-            # find closest track point to this stop
+            # Project stop onto track (edge-interpolated for consistency)
             best_d = 1e9
-            best_p = 0.0
+            best_along = 0.0
+            for i in range(len(track) - 1):
+                ax, ay = track[i]
+                bx, by = track[i + 1]
+                cos_lat = math.cos(math.radians((ax + bx) / 2))
+                abx = (by - ay) * cos_lat * 111320.0
+                aby = (bx - ax) * 111320.0
+                apx = (slon - ay) * cos_lat * 111320.0
+                apy = (slat - ax) * 111320.0
+                ab2 = abx * abx + aby * aby
+                if ab2 < 1e-9:
+                    t = 0.0
+                else:
+                    t = (apx * abx + apy * aby) / ab2
+                    t = max(0.0, min(1.0, t))
+                cx = ax + t * (bx - ax)
+                cy = ay + t * (by - ay)
+                d = _hav(slat, slon, cx, cy)
+                if d < best_d:
+                    best_d = d
+                    seg_len = cum_dists[i + 1] - cum_dists[i]
+                    best_along = cum_dists[i] + t * seg_len
             for i in range(len(track)):
                 d = _hav(slat, slon, track[i][0], track[i][1])
                 if d < best_d:
                     best_d = d
-                    best_p = cum_dists[i] / total_len
+                    best_along = cum_dists[i]
             sched = atime if atime is not None else dtime
             if sched is not None:
-                result.append((best_p, sched))
+                result.append((best_along / total_len, sched))
         result.sort(key=lambda x: x[0])
         return result
 
@@ -1284,10 +1337,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
             continue
         line_name = jmeta.get("line_name") or ""
         simple_line = line_name.split(":")[-1] if line_name else ""
-        if line_q:
-            # Exact match on the short line name to avoid e.g. '1' matching 'N1' or '1A'
-            if simple_line != line_q:
-                continue
+        if line_q and simple_line != line_q:
+            continue
         dest_display = (jmeta.get("destination_display") or "").lower()
         if dest_q and dest_q not in dest_display:
             continue
@@ -1296,21 +1347,18 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
             if not jt:
                 continue
             start_dep = jt[0][2]   # departure time of first stop
-            end_arr   = jt[-1][1]  # arrival time of last stop
+            # Safe end_arr: prefer arrival, fallback to departure
+            end_arr = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
         except Exception:
             continue
 
-        # Guard: ensure this journey actually operates on the current
-        # calendar day (the merged data may include yesterday/tomorrow
-        # depending on AM/PM bucket). We allow journeys that cross
-        # midnight into today (i.e. end_arr >= 0) but skip journeys
-        # that are entirely before today (end_arr < 0) or entirely
-        # after today (start_dep >= 86400).
+        # Day guard: skip journeys entirely outside today
         try:
+            if end_arr is None or start_dep is None:
+                continue
             if end_arr < 0 or start_dep >= 86400:
                 continue
         except Exception:
-            # If times are malformed, conservatively skip candidate
             continue
 
         r_int = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else -1
@@ -1322,19 +1370,17 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
     if not candidates:
         return None
 
-    # ── 2. score each candidate using track matching ──
+    # ── 2. score each candidate ──
     best_delay = None
-    best_score = None   # lower = better (distance to track)
+    best_score = None
 
-    # Cache track data per route to avoid recomputation
     _track_cache = {}
 
     for j_id, start_dep, end_arr, r_int in candidates:
-        # Get or compute track + cumulative distances for this route
+        # Get or compute track + cumulative distances
         if r_int not in _track_cache:
             track = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
             if not track:
-                # Fallback: build a pseudo-track from the stop coordinates
                 route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
                 track = []
                 for sid in route_stops:
@@ -1354,40 +1400,27 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
                 continue
             track, cum = cached
 
-        # Project vehicle onto track
+        # Project vehicle onto track (edge-interpolated)
         dist_m, progress = _project_onto_track(lat_v, lon_v, track, cum)
 
-        # Load journey timetable for spatial-origin checks
-        try:
-            jt = merged.journey_times[j_id]
-        except Exception:
-            jt = None
-
-        # Skip if vehicle is too far from this route's track (> 800m)
+        # ── spatial gate: must be within 800 m of track ──
         if dist_m > 800:
             continue
 
-        # If the vehicle is near the start of the route, prefer an
-        # ATCO-code based match to be more robust: find the nearest
-        # reachable stops from the vehicle and accept candidates whose
-        # declared first-stop ATCO matches the nearest stop. If that
-        # information isn't available, fall back to a simple coordinate
-        # proximity check (within 300m).
+        # ── origin check when vehicle appears near route start ──
+        try:
+            jt = merged.journey_times[j_id]
+        except Exception:
+            continue
         if progress < 0.15 and jt:
             try:
                 first_stop_int = jt[0][0]
                 first_atco = merged.get_atco_code(first_stop_int)
-                # Ask walking for reachable stops from the vehicle location
                 nearby = walking.reachable_stops((lat_v, lon_v))
                 if nearby:
                     nearest_stop_int, walk_secs = nearby[0]
                     nearest_atco = merged.get_atco_code(nearest_stop_int)
-                    if first_atco and nearest_atco and first_atco == nearest_atco:
-                        # ATCO codes match — accept candidate
-                        pass
-                    else:
-                        # Fallback to coordinate proximity when ATCO info
-                        # is missing or does not match.
+                    if first_atco and nearest_atco and first_atco != nearest_atco:
                         try:
                             fs_lat, fs_lon = walking.get_loc_coords(first_stop_int)
                             if _hav(lat_v, lon_v, fs_lat, fs_lon) > 300:
@@ -1395,7 +1428,6 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
                         except Exception:
                             pass
                 else:
-                    # No nearby stops found by walking; fall back to coords
                     try:
                         fs_lat, fs_lon = walking.get_loc_coords(first_stop_int)
                         if _hav(lat_v, lon_v, fs_lat, fs_lon) > 300:
@@ -1403,92 +1435,73 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
                     except Exception:
                         pass
             except Exception:
-                # If anything fails, be conservative and do not reject.
                 pass
 
-        # Skip if journey hasn't started yet: bus near start but before departure
+        # ── temporal gates ──
+        journey_dur = max(end_arr - start_dep, 1)
+
+        # Bus near start but journey hasn't departed yet
         if progress < 0.05 and now_seconds < start_dep - 300:
             continue
 
-        # Skip if journey is finished: bus near end and well past last arrival
+        # Bus near end and well past last arrival
         if progress > 0.95 and now_seconds > end_arr + 300:
             continue
 
-        # Skip if the journey is over and bus is NOT near the end — it can't
-        # be this journey (e.g. bus is at a terminus that happens to be near
-        # the start of a different, already-completed journey).
+        # Journey finished and bus isn't near the end
         if now_seconds > end_arr + 300 and progress < 0.85:
             continue
 
-        # Skip if journey is too far in time (> 2 hours from current window)
+        # Too far in time (> 2 hours from window)
         if now_seconds < start_dep - 7200 or now_seconds > end_arr + 7200:
             continue
 
-        # Skip if the journey duration has fully elapsed and bus isn't
-        # near the final stop — avoids matching short-distance routes
-        # whose terminus is near the bus's current position.
-        journey_dur = end_arr - start_dep
+        # Journey fully elapsed and not near terminus
         if journey_dur > 0 and now_seconds > end_arr + max(600, journey_dur * 0.5):
             continue
 
-        # ── 3. Interpolate expected scheduled time from progress ──
-        jt = merged.journey_times[j_id]
+        # ── 3. interpolate expected_time ──
         stop_progs = _stop_progress_on_track(jt, walking, track, cum)
-
         if not stop_progs:
             continue
 
-        # Prefer per-stop scheduled time when the vehicle is closest to a
-        # specific stop: ask the walking helper for the nearest reachable
-        # stop from the vehicle location and, if that stop appears in the
-        # journey's stop index, use its scheduled arrival (or departure)
-        # as the expected time. This avoids interpolation errors when the
-        # vehicle is clearly at or next to a particular stop.
-        expected_time = None
-        try:
-            nearby = walking.reachable_stops((lat_v, lon_v))
-            if nearby:
-                nearest_stop_int, nearest_walk_secs = nearby[0]
-                jsi = merged.journey_stop_index[j_id] if j_id < len(merged.journey_stop_index) else {}
-                if nearest_stop_int in jsi and nearest_walk_secs <= 300:
-                    pos = jsi[nearest_stop_int]
-                    # jt entries are (stop_int, arrival, departure)
-                    sched = jt[pos][1] if jt[pos][1] is not None else jt[pos][2]
-                    if sched is not None:
-                        expected_time = sched
-        except Exception:
-            # Fall back to interpolation below on any error
+        if progress <= stop_progs[0][0]:
+            expected_time = stop_progs[0][1]
+        elif progress >= stop_progs[-1][0]:
+            expected_time = stop_progs[-1][1]
+        else:
             expected_time = None
-
-        # If per-stop lookup didn't yield an expected_time, fall back to
-        # interpolation between bounding stops along the track.
-        if expected_time is None:
-            if progress <= stop_progs[0][0]:
-                # Before/at first stop
-                expected_time = stop_progs[0][1]
-            elif progress >= stop_progs[-1][0]:
-                # At/past last stop
-                expected_time = stop_progs[-1][1]
-            else:
-                # Interpolate between two surrounding stops
-                for k in range(len(stop_progs) - 1):
-                    p0, t0 = stop_progs[k]
-                    p1, t1 = stop_progs[k + 1]
-                    if p0 <= progress <= p1:
-                        seg = p1 - p0
-                        frac = (progress - p0) / seg if seg > 0 else 0.0
-                        expected_time = t0 + frac * (t1 - t0)
-                        break
+            for k in range(len(stop_progs) - 1):
+                p0, t0 = stop_progs[k]
+                p1, t1 = stop_progs[k + 1]
+                if p0 <= progress <= p1:
+                    seg = p1 - p0
+                    frac = (progress - p0) / seg if seg > 0 else 0.0
+                    expected_time = t0 + frac * (t1 - t0)
+                    break
 
         if expected_time is None:
             continue
 
         delay = int(now_seconds - expected_time)
 
-        # Score: prefer the candidate whose track is closest to the vehicle
-        # and whose timing window best matches now
-        time_gap = abs(now_seconds - (start_dep + end_arr) / 2)
-        score = dist_m + time_gap * 0.01  # distance-dominant scoring
+        # ── sanity clamp: reject absurd delays ──
+        # For a 60-min journey, allow at most 30 min delay (or 20 min
+        # minimum).  The old threshold of max(dur*1.5, 3600) was far too
+        # generous and let 60+ min "delays" through.
+        max_plausible = max(int(journey_dur * 0.5), 1200)
+        if abs(delay) > max_plausible:
+            continue
+
+        # ── deterministic, time-stable scoring ──
+        # Primary: distance to track (lower = better).
+        # Secondary: absolute delay – the best match is the journey whose
+        #   interpolated expected_time is closest to now.  This is critical
+        #   when multiple journeys share the same route (same dist_m): the
+        #   old j_id tiebreaker picked the *earliest* departure, producing
+        #   huge phantom delays.
+        # Tertiary: j_id for absolute determinism when everything ties.
+        score = (dist_m, abs(delay), j_id)
 
         if best_score is None or score < best_score:
             best_score = score
