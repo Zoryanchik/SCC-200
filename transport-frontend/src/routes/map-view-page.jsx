@@ -7,9 +7,12 @@ import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import Skeleton from "@mui/material/Skeleton";
-import { MapPin, Bus, Train } from "lucide-react";
+import Autocomplete from "@mui/material/Autocomplete";
+import TextField from "@mui/material/TextField";
+import InputAdornment from "@mui/material/InputAdornment";
+import { MapPin, Bus, Train, Search } from "lucide-react";
 import { lazy, Suspense, useMemo, useState, useEffect, useCallback } from "react";
-import { useLiveBusLocations, useLiveDepartures, useLiveUpdates } from "../hooks/useTransportData";
+import { useLiveBusLocations, useLiveDepartures, useLiveUpdates, useStopSearch } from "../hooks/useTransportData";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
@@ -43,6 +46,22 @@ const [userLocation, setUserLocation] = useState(null);
 const [locationStatus, setLocationStatus] = useState('idle');
 const [locationError, setLocationError] = useState(null);
 const [mapInstance, setMapInstance] = useState(null);
+
+// Search bar state
+const [searchQuery, setSearchQuery] = useState('');
+const [searchValue, setSearchValue] = useState(null);
+const { results: searchResults, loading: searchLoading } = useStopSearch(searchQuery, 300);
+
+const handleSearchSelect = useCallback((option) => {
+  if (!option || !mapInstance) return;
+  const lat = option.lat ?? option.latitude;
+  const lon = option.lon ?? option.longitude;
+  if (typeof lat === 'number' && typeof lon === 'number') {
+    mapInstance.flyTo([lat, lon], Math.max(mapInstance.getZoom(), 15), { duration: 1.2 });
+  }
+  setSearchValue(null);
+  setSearchQuery('');
+}, [mapInstance]);
 
 // Track current map center for dynamic bus-live queries
 const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
@@ -284,6 +303,49 @@ border: '1px solid',
 borderColor: 'divider'
 }}>
 <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} mb={2} flexWrap="wrap" alignItems={{ xs: "stretch", sm: "center" }}>
+{/* Location search bar */}
+<Autocomplete
+  sx={{ flex: 1, minWidth: 220 }}
+  freeSolo
+  filterOptions={(x) => x}
+  options={searchResults || []}
+  getOptionLabel={(option) => typeof option === 'string' ? option : (option.display_name || option.name || '')}
+  value={searchValue}
+  inputValue={searchQuery}
+  onInputChange={(_, val) => setSearchQuery(val)}
+  onChange={(_, option) => {
+    if (option && typeof option === 'object') {
+      setSearchValue(option);
+      handleSearchSelect(option);
+    }
+  }}
+  loading={searchLoading}
+  renderOption={(props, option) => (
+    <Box component="li" {...props} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+      <MapPin size={14} />
+      <Typography variant="body2">{option.display_name || option.name}</Typography>
+    </Box>
+  )}
+  renderInput={(params) => (
+    <TextField
+      {...params}
+      size="small"
+      placeholder="Search stops or places…"
+      InputProps={{
+        ...params.InputProps,
+        startAdornment: (
+          <InputAdornment position="start">
+            <Search size={16} />
+          </InputAdornment>
+        ),
+        endAdornment: searchLoading
+          ? <CircularProgress size={16} />
+          : params.InputProps.endAdornment,
+      }}
+      sx={{ '& .MuiOutlinedInput-root': { borderRadius: '10px' } }}
+    />
+  )}
+/>
 <Box
 onClick={() => setFilters(f => ({ ...f, showBuses: !f.showBuses }))}
 sx={{
