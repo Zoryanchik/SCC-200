@@ -851,6 +851,17 @@ async def search_stops(
             location_results = geocode_locations(q, limit)
         except Exception as exc:
             logger.warning("Geocoding lookup failed: %s", exc)
+            location_results = []
+
+        # If we found neither stop DB results nor geocoded locations, try
+        # a global geocode lookup (no Lancashire county filter). This helps
+        # queries for streets or places outside Lancashire (e.g. "Abingdon
+        # Street") where the default county bias would filter out results.
+        if not (stop_results or location_results):
+            try:
+                location_results = geocode_locations(q, limit, county=None)
+            except Exception:
+                location_results = []
 
         # Backfill missing coordinates for stop_results when possible.
         # First try the ATCO/NaPTAN `stop_coords` table via atco_loader.
