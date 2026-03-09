@@ -55,6 +55,13 @@ export function useRouteLine() {
 
   const isActive = useCallback((line) => activeRef.current.has(line), []);
 
+  /** Remove all active route overlays at once. */
+  const clearRoutes = useCallback(() => {
+    if (activeRef.current.size === 0) return;
+    activeRef.current.clear();
+    bump();
+  }, [bump]);
+
   // Only rebuild the Map snapshot when tick changes (i.e. after toggleRoute)
   const activeRoutes = useMemo(
     () => new Map(activeRef.current),
@@ -62,5 +69,5 @@ export function useRouteLine() {
     [tick],
   );
 
-  return { activeRoutes, toggleRoute, isActive };
+  return { activeRoutes, toggleRoute, isActive, clearRoutes };
 }
