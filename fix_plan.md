@@ -38,12 +38,12 @@ Updated: 2026-03-05
 - [ ] Implement station selection via map interaction (tap stop → select as origin/destination)
 - [ ] Implement display of estimated arrival times at stations
 - [x] Implement pricing display for routes and ticket types (frontend)
-- [ ] Implement `/pricing` endpoint (distance-based stub ok) *(not implemented)*
+- [x] Implement `/pricing` endpoint (distance-based stub)
 - [ ] Implement frequently / recently used routes feature
 - [ ] UI refinement for desktop and mobile layouts
 - [ ] Implement accessibility features (contrast, scaling, map clarity)
-- [ ] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5075) *(not implemented — still hardcoded in api.py)*
-- [ ] Implement `/alerts` endpoint *(not implemented)*
+- [x] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5075)
+- [x] Implement `/alerts` endpoint *(stub — returns empty list)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
 - [x] Implement `GET /bus/arrivals/{stopCode}` endpoint *(implemented)*
 
@@ -83,7 +83,7 @@ Updated: 2026-03-05
 ## Low Priority
 - [ ] Harden production config (CORS, auth, rate limits) *(not implemented — no auth, no rate limits, CORS hardcoded)*
 - [ ] Add analytics and frequent routes endpoint *(not implemented)*
-- [ ] **P7:** Remove or wrap legacy `POST /api/route` — leaks raw internal RAPTOR dict *(still exists unwrapped in api.py)*
+- [x] **P7:** Remove or wrap legacy `POST /api/route` — now delegates to `build_journey_plan_response`
 - [ ] Add developer docs and Docker compose *(READMEs and Dockerfile exist; docker-compose.yml still missing)*
 
 ---
@@ -96,20 +96,20 @@ The frontend calls these endpoints, but `api.py` does not define them. They will
 | Frontend function        | Missing endpoint                | Status | Owner |
 |--------------------------|----------------------------------|--------|-------|
 | `fetchRailDepartures()`  | `GET /rail/departures/{station}` | ✅ done | John  |
-| `fetchServiceAlerts()`   | `GET /alerts`                    | ❌ 404 | John  |
-| `fetchPricing()`         | `GET /pricing?from=&to=`         | ❌ 404 | John  |
+| `fetchServiceAlerts()`   | `GET /alerts`                    | ✅ stub | John  |
+| `fetchPricing()`         | `GET /pricing?from=&to=`         | ✅ stub | John  |
 | `fetchBusTimes()`        | `GET /bus/times/{stopCode}`      | ❌ 404 | John  |
 | `fetchBusArrivals()`     | `GET /bus/arrivals/{stopCode}`   | ✅ done | John  |
 
 ### P6 — No environment-based CORS configuration
 - **File:** `transport-backend/api.py`
 - **Problem:** `allow_origins` is hardcoded to `localhost:3000` and `localhost:5075`. Production or other dev ports will be blocked.
-- **Fix:** Read origins from an env variable (e.g., `CORS_ORIGINS`).
+- **Fix:** Read origins from an env variable (e.g., `CORS_ORIGINS`). ✅ Done — falls back to localhost defaults.
 
 ### P7 — `POST /api/route` (legacy) returns raw RAPTOR dict
 - The legacy `/api/route` endpoint returns the raw internal `route_result` dict, which exposes internal stop indices and data structures.
 - **Risk:** Not a security issue for local dev, but should not be deployed publicly.
-- **Fix:** Either remove the endpoint or wrap it with `build_journey_plan_response()`.
+- **Fix:** Either remove the endpoint or wrap it with `build_journey_plan_response()`. ✅ Done — now wraps correctly.
 
 ---
 
