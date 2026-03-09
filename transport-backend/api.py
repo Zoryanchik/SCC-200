@@ -146,14 +146,20 @@ app = FastAPI(title="Transport API", lifespan=lifespan)
 app.add_api_websocket_route("/ws/live", ws_live_endpoint)
 
 # -- CORS ------------------------------------------------------------------
+# Read allowed origins from the CORS_ORIGINS env var (comma-separated).
+# Falls back to localhost dev ports so local development works out of the box.
+_default_origins = (
+    "http://localhost:3000,http://localhost:5075,"
+    "http://127.0.0.1:3000,http://127.0.0.1:5075"
+)
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5075",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5075",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
