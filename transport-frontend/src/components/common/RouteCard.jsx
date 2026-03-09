@@ -13,7 +13,7 @@ import IconButton from "@mui/material/IconButton";
 import { memo } from "react";
 import { Bus, Train, MapPin, Heart } from "lucide-react";
 
-export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false }) {
+export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false, fullHeight = false }) {
   const parseDurationToMinutes = (value) => {
     if (!value) return 0;
     if (typeof value === 'number') return value;
@@ -31,13 +31,24 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
     if (typeof route.walkTime === 'string') return parseDurationToMinutes(route.walkTime);
     if (!Array.isArray(route.steps)) return 0;
     return route.steps
-      .filter((step) => step.type === 'walk')
-      .reduce((sum, step) => sum + parseDurationToMinutes(step.duration), 0);
+      .filter((s) => s.type === 'walk')
+      .reduce((sum, s) => sum + parseDurationToMinutes(s.duration), 0);
   })();
 
   return (
-    <Paper variant="outlined" sx={{ p: 2, transition: 'all 0.3s', '&:hover': { elevation: 2 } }}>
-      <Stack spacing={1.5}>
+    <Paper
+      variant="outlined"
+      sx={{
+        p: 2,
+        transition: 'all 0.3s',
+        height: fullHeight ? '100%' : 360,
+        minHeight: 160,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      {/* Header (fixed) */}
+      <Stack spacing={1.5} sx={{ flex: '0 0 auto' }}>
         <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
           <Stack spacing={0.5}>
             <Typography fontWeight={700} color="primary">
@@ -74,11 +85,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               </>
             )}
             {onSave && (
-              <IconButton
-                size="small"
-                onClick={() => onSave(route)}
-                color={isSaved ? "error" : "default"}
-              >
+              <IconButton size="small" onClick={() => onSave(route)} color={isSaved ? "error" : "default"}>
                 <Heart size={18} fill={isSaved ? "currentColor" : "none"} />
               </IconButton>
             )}
@@ -86,7 +93,10 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
         </Stack>
 
         <Divider sx={{ my: 0.5 }} />
+      </Stack>
 
+      {/* Steps container — scrollable area (fixed height) */}
+      <Box sx={{ overflowY: 'auto', maxHeight: 220, pr: 1, flex: '1 1 auto' }}>
         <Stack spacing={1}>
           {route.steps?.map((step, idx) => (
             <Stack key={idx} direction="row" spacing={1.5} alignItems="flex-start">
@@ -108,23 +118,20 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   </Typography>
                 </Stack>
 
-                {/* From → To */}
                 {(step.from || step.to) && (
                   <Typography variant="body2" sx={{ mt: 0.25 }}>
-                    {step.from ? <>{step.from}</> : null}
+                    {step.from ? step.from : null}
                     {step.from && step.to ? " → " : ""}
-                    {step.to ? <>{step.to}</> : null}
+                    {step.to ? step.to : null}
                   </Typography>
                 )}
 
-                {/* Service origin → destination (for transit legs) */}
                 {(step.journey_origin || step.journey_destination) && (
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
                     Service: {step.journey_origin || "?"} → {step.journey_destination || "?"}
                   </Typography>
                 )}
 
-                {/* Departure / Arrival times — scheduled (planned) */}
                 {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
                   <Typography variant="caption" fontWeight={500} color={step.delay_seconds > 0 ? "text.disabled" : "text.secondary"} data-testid={`step-time-${idx}`} sx={{ display: "block", mt: 0.25, textDecoration: step.delay_seconds > 0 ? "line-through" : "none" }}>
                     {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ""}
@@ -134,7 +141,6 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   </Typography>
                 )}
 
-                {/* Real-time departure / arrival (when delay data exists) */}
                 {step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset) && (
                   <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.25 }}>
                     {step.realtime_departure_time_with_offset ? `Dep ${step.realtime_departure_time_with_offset}` : ""}
@@ -144,7 +150,6 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   </Typography>
                 )}
 
-                {/* Delay status badge */}
                 {step.status && step.status !== "On time" && (
                   <Typography variant="caption" fontWeight={700} color="error.main" data-testid={`step-delay-${idx}`} sx={{ display: "inline-block", mt: 0.25, px: 0.75, py: 0.15, borderRadius: 1, bgcolor: "error.50" }}>
                     ⚠ {step.status}
@@ -154,7 +159,8 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
             </Stack>
           ))}
         </Stack>
-      </Stack>
+      </Box>
+
     </Paper>
   );
 });
