@@ -522,7 +522,7 @@ class BusLoader:
                             cum = min_time
                     journey_times_rows.append((jkey, to_stop, cum))
 
-        # --- Determine a file-level RevisionNumber if present ---
+    # --- Determine a file-level RevisionNumber if present ---
         # Some TXC payloads put RevisionNumber attributes on elements
         # (e.g. VehicleJourney). We take the maximum RevisionNumber seen
         # as a coarse file-level revision. If none present, revision=None.
@@ -537,16 +537,27 @@ class BusLoader:
                 except Exception:
                     pass
 
+        # Prefer the TXC-provided FileName attribute (if present) as the
+        # canonical source filename. This value is set by providers and is
+        # more stable than the local filesystem name; callers (load_folder)
+        # may use it for namespacing to avoid collisions across ingest
+        # copies. We return it alongside the usual tuple.
+        file_provided_name = root.attrib.get('FileName') or None
+
         return (route_stops_rows, journey_routes_rows, journey_times_rows,
                 stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-                route_track_rows, file_rev)
+                route_track_rows, file_rev, file_provided_name)
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
         rows = self._parse_file(file_path)
         if not rows:
             return
-        *data_rows, file_rev = rows
+        *data_rows, file_rev, file_provided_name = rows
+        # When loading a single file directly we don't apply per-file
+        # namespacing here (load_folder handles namespacing for batch
+        # imports). Still pass the file-level revision through to
+        # populate so revision-aware behaviour works.
         self.populate(*data_rows, revision=file_rev)
 
     def load_folder(self, folder_path, tag=None):
@@ -572,6 +583,11 @@ class BusLoader:
         # into small groups so we call populate() per-operator rather than
         # per-file, reducing the number of DB transactions while still
         # keeping datasets logically separated.
+        #
+        # Change: apply per-file namespacing here so every parsed route_id
+        # and journey_id is prefixed with the source filename. This prevents
+        # collisions across files and makes identifiers server-authoritative
+        # at the file level.
         buckets = {}
         counts = 0
         for idx, fname in enumerate(files):
@@ -580,7 +596,53 @@ class BusLoader:
                 r = self._parse_file(fpath)
                 if not r:
                     continue
-                route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev = r
+                route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev, file_provided_name = r
+
+                # Per-file namespacing: prefer the TXC-provided FileName
+                # attribute (stripped of extension) when present; fall back to
+                # the local filesystem basename. Using the provider's FileName
+                # avoids collisions when the same logical dataset is stored
+                # under different local filenames.
+                if file_provided_name:
+                    try:
+                        file_prefix = os.path.splitext(os.path.basename(file_provided_name.strip()))[0]
+                    except Exception:
+                        file_prefix = os.path.splitext(fname)[0]
+                else:
+                    file_prefix = os.path.splitext(fname)[0]
+
+                # Normalize the prefix: replace spaces with underscores so
+                # generated route/journey ids do not contain literal spaces.
+                # This is a conservative change to avoid downstream issues
+                # in identifiers while preserving the provider's filename
+                # semantics.
+                try:
+                    file_prefix = file_prefix.replace(' ', '_')
+                except Exception:
+                    pass
+
+                def _pref_file_route_stops(rs_list):
+                    return [ (f"{file_prefix}::{rid}", atco, so) for (rid, atco, so) in (rs_list or []) ]
+
+                def _pref_file_journey_routes(jr_list):
+                    return [ (f"{file_prefix}::{jid}", f"{file_prefix}::{rid}", ln, dd) for (jid, rid, ln, dd) in (jr_list or []) ]
+
+                def _pref_file_journey_times(jt_list):
+                    return [ (f"{file_prefix}::{jid}", atco, at) for (jid, atco, at) in (jt_list or []) ]
+
+                def _pref_file_journey_ops(jop_list):
+                    return [ (f"{file_prefix}::{jid}", svc, dow, s, e, org, orgw) for (jid, svc, dow, s, e, org, orgw) in (jop_list or []) ]
+
+                def _pref_file_route_tracks(rt_list):
+                    return [ (f"{file_prefix}::{rid}", seq, lat, lon) for (rid, seq, lat, lon) in (rt_list or []) ]
+
+                # Apply per-file prefixing now; these prefixed rows are safe
+                # to accumulate into operator buckets without further tagging.
+                route_stops = _pref_file_route_stops(route_stops)
+                journey_routes = _pref_file_journey_routes(journey_routes)
+                journey_times = _pref_file_journey_times(journey_times)
+                journey_ops = _pref_file_journey_ops(journey_ops)
+                route_tracks = _pref_file_route_tracks(route_tracks)
 
                 # infer operator key from filename (safe fallback to 'DEFAULT')
                 op = fname.split('_', 1)[0] if '_' in fname else 'DEFAULT'
@@ -614,12 +676,15 @@ class BusLoader:
         # Now populate per-operator bucket so inserts are chunked into
         # fewer transactions. Use the bucket-level max revision.
         for op, b in sorted(buckets.items()):
-            sub_tag = f"{tag}:{op}" if tag else op
+            # We already applied per-file namespacing above using the
+            # provider-supplied FileName (normalized). Do not add an
+            # additional outer dataset/operator tag here — keeping the
+            # file-level prefix as the canonical namespace is preferred.
             try:
                 self.populate(
                     b['route_stops'], b['journey_routes'], b['journey_times'],
                     b['stop_names'], b['service_ops'], b['serviced_orgs'], b['journey_ops'],
-                    b['route_tracks'], revision=b['revision'], tag=sub_tag,
+                    b['route_tracks'], revision=b['revision'], tag=None,
                 )
             except Exception as e:
                 print(f'  [bus] {prefix}ERR during populate for bucket {op}: {e}')
