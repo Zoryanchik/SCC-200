@@ -29,6 +29,9 @@ from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
 from modes import name_to_int, all_transit_modes
+import copy
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +115,28 @@ async def lifespan(app: FastAPI):
         await ws_broker.start_polling()
     except Exception as exc:  # pragma: no cover
         logger.warning("WebSocket broker startup failed: %s", exc)
+    # Start background delay updater thread (today-only updates)
+    stop_event = threading.Event()
+    delay_thread = threading.Thread(target=_delay_updater_loop, args=(stop_event,), daemon=True)
+    delay_thread.start()
+    # Expose so shutdown can stop it
+    globals()['_delay_updater_stop_event'] = stop_event
+    globals()['_delay_updater_thread'] = delay_thread
     yield  # — server is running
     # Shutdown: stop the live-updates poll loop
     try:
         await ws_broker.stop_polling()
     except Exception:  # pragma: no cover
+        pass
+    # Stop the delay updater thread
+    try:
+        ev = globals().get('_delay_updater_stop_event')
+        th = globals().get('_delay_updater_thread')
+        if ev:
+            ev.set()
+        if th and isinstance(th, threading.Thread):
+            th.join(timeout=2.0)
+    except Exception:
         pass
     
 
@@ -1182,7 +1202,7 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
-def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False):
     """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
 
     Stable algorithm – designed to return consistent results across
@@ -1213,7 +1233,11 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         today = datetime.now().date().isoformat()
         now = datetime.now()
         now_seconds = now.hour * 3600 + now.minute * 60 + now.second
-        merged, router, walking = get_router_for_date(today, start_time=now_seconds)
+
+        # When computing delays we must avoid recursive application of
+        # already-applied delays. Request the raw merged/router/walking
+        # without applying the delay-adjusted timetable.
+        merged, router, walking = get_router_for_date(today, start_time=now_seconds, apply_delay=False)
     except Exception:
         return None
 
@@ -1373,6 +1397,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
     # ── 2. score each candidate ──
     best_delay = None
     best_score = None
+    best_jid = None
 
     _track_cache = {}
 
@@ -1506,7 +1531,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         if best_score is None or score < best_score:
             best_score = score
             best_delay = delay
+            best_jid = j_id
 
+    if return_jid:
+        return (best_delay, best_jid)
     return best_delay
 
 
@@ -1734,7 +1762,78 @@ _router_cache = {}
 _router_cache_lock = threading.Lock()
 _base_cache = None
 
-def get_router_for_date(date_str, start_time=None):
+# Real-time delay map: {journey_id: delay_seconds}
+_journey_delay_map: Dict[int, int] = {}
+_journey_delay_lock = threading.Lock()
+_delay_map_ts: float = 0.0
+_delay_map_version: int = 0
+# Update interval in seconds (default 180s == 3min)
+_DELAY_UPDATE_INTERVAL = int(os.environ.get('DELAY_UPDATE_INTERVAL', '180'))
+
+
+def _recompute_journey_delay_map_once() -> None:
+    """Compute the per-journey delay map from live feeds.
+
+    Uses feed-supplied delay when present; otherwise falls back to
+    timetable matching. Results are written atomically to
+    `_journey_delay_map` and bump `_delay_map_version`.
+    """
+    global _journey_delay_map, _delay_map_ts, _delay_map_version
+    try:
+        buses = _fetch_all_live_buses()
+    except Exception:
+        return
+
+    temp_map: Dict[int, int] = {}
+    # We will need raw merged/router data to match vehicles; request
+    # the unadjusted timetable to avoid recursion.
+    today = datetime.now().date().isoformat()
+    now = datetime.now()
+    now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+    try:
+        merged, router, walking = get_router_for_date(today, start_time=now_seconds, apply_delay=False)
+    except Exception:
+        merged = None
+
+    for line_ref, dest, lat_v, lon_v, _op, feed_delay in buses:
+        try:
+            # Ask the matching function for both delay and journey id
+            matched = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid=True)
+            if not matched:
+                continue
+            computed_delay, j_id = matched
+            if j_id is None:
+                continue
+            final_delay = feed_delay if feed_delay is not None else computed_delay
+            if final_delay is None:
+                continue
+            # Store integer seconds
+            temp_map[int(j_id)] = int(final_delay)
+        except Exception:
+            continue
+
+    with _journey_delay_lock:
+        _journey_delay_map = temp_map
+        _delay_map_ts = time.time()
+        _delay_map_version += 1
+
+
+def _delay_updater_loop(stop_event: threading.Event):
+    """Background loop to periodically refresh the delay map."""
+    # Run once immediately, then sleep interval
+    while not stop_event.is_set():
+        try:
+            _recompute_journey_delay_map_once()
+        except Exception:
+            pass
+        # Sleep in small increments so we can exit promptly
+        sleep_for = _DELAY_UPDATE_INTERVAL
+        for _ in range(int(max(1, sleep_for))):
+            if stop_event.is_set():
+                break
+            time.sleep(1)
+
+def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
     """Return (merged, router, walking) for a given date and time bucket.
 
     The cache key includes the AM/PM bucket so morning and afternoon
@@ -1742,7 +1841,14 @@ def get_router_for_date(date_str, start_time=None):
     """
     global _base_cache, _router_cache
     bucket = "AM" if (start_time is not None and start_time < 43200) else "PM"
-    cache_key = (date_str, bucket)
+    # When apply_delay is requested for today's date, include the
+    # current delay-map version in the cache key so we rebuild the
+    # router when the delay map changes.
+    today_str = datetime.now().date().isoformat()
+    if apply_delay and date_str == today_str:
+        cache_key = (date_str, bucket, _delay_map_version)
+    else:
+        cache_key = (date_str, bucket)
     with _router_cache_lock:
         if cache_key in _router_cache:
             return _router_cache[cache_key]
@@ -1762,6 +1868,31 @@ def get_router_for_date(date_str, start_time=None):
         merged, router, walking = build_for_date(
             loader, walking_raw, date_str, start_time=start_time,
             atco_loader=al)
+        # If we're asked to apply today's delay map, modify a deep copy
+        # of the merged timetable by adding per-journey delays and then
+        # rebuild the router from that adjusted merged object.
+        if apply_delay and date_str == today_str and _journey_delay_map:
+            try:
+                from raptor_router import RaptorRouter
+                adj_merged = copy.deepcopy(merged)
+                # Apply delays (per journey index) to every scheduled time
+                for j_idx, delta in list(_journey_delay_map.items()):
+                    if 0 <= j_idx < len(adj_merged.journey_times):
+                        jt = adj_merged.journey_times[j_idx]
+                        new_jt = []
+                        for sid, atime, dtime in jt:
+                            at = atime + delta if atime is not None else None
+                            dt = dtime + delta if dtime is not None else None
+                            new_jt.append((sid, at, dt))
+                        adj_merged.journey_times[j_idx] = new_jt
+                router = RaptorRouter(adj_merged)
+                _router_cache[cache_key] = (adj_merged, router, walking)
+                return adj_merged, router, walking
+            except Exception:
+                # Fall back to unadjusted merged/router on any failure
+                _router_cache[cache_key] = (merged, router, walking)
+                return merged, router, walking
+
         _router_cache[cache_key] = (merged, router, walking)
         return merged, router, walking
 
