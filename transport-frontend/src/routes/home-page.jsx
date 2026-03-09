@@ -74,24 +74,18 @@ function journeyToRouteCard(journey) {
     .filter((l) => (l.mode || "").toLowerCase() === "walking")
     .reduce((sum, l) => sum + Math.round((l.duration_seconds ?? 0) / 60), 0);
 
-  // Overall duration from meta
+  // Overall duration from meta — prefer the canonical total_duration
+  // string when the backend provides it (arrival − departure start).
   const meta = journey.meta || {};
-  const totalArrival = meta.total_arrival; // "HH:MM:SS"
   let duration = "";
-  if (totalArrival && legs[0]?.arrival_time) {
-    // Derive total duration from first leg arrival minus walk to that leg
-    // Simpler: use first leg departure → last arrival
-    const startWalk = meta.start_walk_seconds ?? 0;
-    const endWalk = meta.end_walk_seconds ?? 0;
-    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0) + startWalk;
+  if (meta.total_duration) {
+    duration = meta.total_duration;
+  } else {
+    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
     const totalMin = Math.round(totalSec / 60);
     duration = totalMin >= 60
       ? `${Math.floor(totalMin / 60)}h ${totalMin % 60} mins`
       : `${totalMin} mins`;
-  } else {
-    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
-    const totalMin = Math.round(totalSec / 60);
-    duration = `${totalMin} mins`;
   }
 
   return {

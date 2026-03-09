@@ -580,7 +580,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     await search('test');
 
     const url = fetch.mock.calls[0][0];
-    expect(url).toBe('http://localhost:5050/search/stops?q=test');
+    expect(url).toBe('http://localhost:5050/search/stops?q=test&limit=5');
   });
 
   test('defaults to http://localhost:5050 when VITE_API_BASE_URL is undefined', async () => {
@@ -605,7 +605,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     await search('test');
 
     const url = fetch.mock.calls[0][0];
-    expect(url).toBe('https://custom-api.example.com/search/stops?q=test');
+    expect(url).toBe('https://custom-api.example.com/search/stops?q=test&limit=5');
   });
 
   test('uses production URL when VITE_API_BASE_URL points to external host', async () => {
@@ -617,7 +617,7 @@ describe('API_BASE_URL — VITE_API_BASE_URL env variable (P1)', () => {
     await search('test');
 
     const url = fetch.mock.calls[0][0];
-    expect(url).toBe('https://transport.scc.lancs.ac.uk/search/stops?q=test');
+    expect(url).toBe('https://transport.scc.lancs.ac.uk/search/stops?q=test&limit=5');
   });
 
   test('all API functions use the configured base URL', async () => {
