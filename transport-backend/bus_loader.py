@@ -74,14 +74,14 @@ class BusLoader:
         datasets = []
         for src in sources:
             try:
-                resp = _ur.urlopen(src, context=ctx)
+                resp = _ur.urlopen(src, context=ctx, timeout=30)
             except _ue.HTTPError as he:
                 # Treat HTTP errors (403/401 etc) as non-fatal for startup —
                 # warn and skip this source so initialization can continue.
                 print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
                 continue
-            except _ue.URLError as ue:
-                print(f"  [bus] ⚠ Skipping source {src}: URL error {ue}")
+            except (_ue.URLError, TimeoutError) as ue:
+                print(f"  [bus] ⚠ Skipping source {src}: {ue}")
                 continue
             try:
                 data = json.loads(resp.read())
@@ -102,12 +102,12 @@ class BusLoader:
 
         for src, desc in desc_sources:
             try:
-                resp = _ur.urlopen(src, context=ctx)
+                resp = _ur.urlopen(src, context=ctx, timeout=30)
             except _ue.HTTPError as he:
                 print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
                 continue
-            except _ue.URLError as ue:
-                print(f"  [bus] ⚠ Skipping source {src}: URL error {ue}")
+            except (_ue.URLError, TimeoutError) as ue:
+                print(f"  [bus] ⚠ Skipping source {src}: {ue}")
                 continue
             try:
                 data = json.loads(resp.read())
@@ -757,7 +757,7 @@ class BusLoader:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        resp = urllib.request.urlopen(url, context=ctx)
+        resp = urllib.request.urlopen(url, context=ctx, timeout=180)
         data = resp.read()
         print(f'  [bus] [{label}] Downloaded {len(data) / 1024 / 1024:.1f} MB')
 
