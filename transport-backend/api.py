@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
+import asyncio
 from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
@@ -451,12 +452,11 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
         params["countrycodes"] = "gb"
 
     url = f"https://nominatim.openstreetmap.org/search?{urlencode(params)}"
-    # Use requests to simplify TLS handling in developer environments.
-    # Disable verification here for developer convenience when system CA
-    # bundles are missing. In production consider enabling verification.
+    # Use requests (which bundles certifi) so TLS verification works in
+    # virtualenvs and containers. Do not disable verification.
     import requests
     headers = {"User-Agent": "transport-backend/1.0"}
-    resp = requests.get(url, headers=headers, timeout=5, verify=False)
+    resp = requests.get(url, headers=headers, timeout=5)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -606,6 +606,58 @@ async def search_stops(
             location_results = geocode_locations(q, limit)
         except Exception as exc:
             logger.warning("Geocoding lookup failed: %s", exc)
+
+        # Backfill missing coordinates for stop_results when possible.
+        # First try the ATCO/NaPTAN `stop_coords` table via atco_loader.
+        try:
+            missing_atcos = [s.get("atco_code") for s in (stop_results or []) if s.get("atco_code") and (s.get("lat") is None or s.get("lon") is None)]
+            if missing_atcos:
+                atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+                if atco_loader:
+                    try:
+                        conn = atco_loader._connect()
+                        cur = conn.cursor()
+                        # Query only the atcos we need
+                        placeholders = ','.join(['%s'] * len(missing_atcos))
+                        cur.execute(f"SELECT atco_code, lat, lon FROM stop_coords WHERE atco_code IN ({placeholders})", tuple(missing_atcos))
+                        rows = cur.fetchall()
+                        conn.close()
+                        lookup = {r[0]: (r[1], r[2]) for r in rows}
+                        for stop in (stop_results or []):
+                            atco = stop.get('atco_code')
+                            if atco and (stop.get('lat') is None or stop.get('lon') is None):
+                                coords = lookup.get(atco)
+                                if coords:
+                                    stop['lat'], stop['lon'] = coords[0], coords[1]
+                    except Exception:
+                        # non-fatal — continue to other fallbacks
+                        logger.debug('ATCO coords lookup failed for missing atcos')
+
+            # Secondary fallback: for any still-missing coords, consult Nominatim
+            # on a per-stop basis but cap the number of external requests to avoid rate-limits.
+            STILL_MISSING = [s for s in (stop_results or []) if s.get('atco_code') and (s.get('lat') is None or s.get('lon') is None)]
+            NOMINATIM_FALLBACK_CAP = 5
+            fallback_calls = 0
+            for stop in STILL_MISSING:
+                if fallback_calls >= NOMINATIM_FALLBACK_CAP:
+                    break
+                name = stop.get('name') or ''
+                display = stop.get('display_name') or ''
+                # Use display name or name as the geocode query, prefer including town if present
+                query_text = display or name
+                try:
+                    candidates = geocode_locations(query_text, 1)
+                    if candidates:
+                        c = candidates[0]
+                        stop['lat'] = c.get('lat')
+                        stop['lon'] = c.get('lon')
+                        fallback_calls += 1
+                except Exception:
+                    # ignore and continue
+                    logger.debug('Per-stop geocode fallback failed for %s', query_text)
+                    continue
+        except Exception as exc:
+            logger.debug('Backfilling stop coords failed: %s', exc)
 
         # Basic de-duplication by lower-cased name to avoid duplicates
         combined = []
@@ -2559,6 +2611,84 @@ async def journey_plan(request: JourneyPlanRequest):
     except Exception as exc:
         return {"success": False, "error": str(exc),
                 "legs": None, "meta": None, "routeGeometries": None}
+
+
+@app.post("/journey/compare")
+async def compare_routers(request: JourneyPlanRequest):
+    """Run the main RAPTOR router and the ECO router concurrently and
+    return both results for comparison.
+
+    Accepts the same payload as `/journey/plan` and returns a JSON
+    object containing `main` and `eco` keys with sanitized routes,
+    human-readable summaries and timings in seconds.
+    """
+    try:
+        start_point = (request.fromStop.lat, request.fromStop.lon)
+        destination = (request.toStop.lat, request.toStop.lon)
+        date_str = request.date
+        time_str = request.departureTime
+        max_transfers = request.maxTransfers
+        mode = request.mode
+        allowed_modes = ({mode} if mode in ("bus", "train")
+                         else {"bus", "train"})
+        start_seconds = seconds_since_midnight(time_str)
+
+        # Build / fetch merged data + main router + walking helper
+        merged, main_router, walking = get_router_for_date(
+            date_str, start_time=start_seconds)
+
+        # Lazy construct ECO router around the same merged data
+        try:
+            from eco_router import RaptorRouter as EcoRaptor
+            eco_router = EcoRaptor(merged)
+        except Exception:
+            eco_router = None
+
+        # Helper wrapper to call router.route with timing
+        def _run_router(rtr):
+            import time as _t
+            t0 = _t.time()
+            res = rtr.route(
+                n_transfer_limit=max_transfers,
+                walking=walking,
+                start_time=start_seconds,
+                start_point=start_point,
+                destination=destination,
+                allowed_modes=allowed_modes,
+            )
+            t1 = _t.time()
+            return res, (t1 - t0)
+
+        # Run both routers in parallel threads (Eco optional)
+        tasks = [asyncio.to_thread(_run_router, main_router)]
+        if eco_router is not None:
+            tasks.append(asyncio.to_thread(_run_router, eco_router))
+
+        results = await asyncio.gather(*tasks)
+
+        main_res, main_time = results[0]
+        eco_res = None
+        eco_time = None
+        if len(results) > 1:
+            eco_res, eco_time = results[1]
+
+        stop_coords = getattr(walking, "_coords", {})
+
+        return {
+            "success": True,
+            "main": {
+                "route": _sanitize_route(main_res),
+                "route_text": format_route_text(main_res, merged),
+                "time_seconds": main_time,
+            },
+            "eco": {
+                "route": _sanitize_route(eco_res) if eco_res is not None else None,
+                "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
+                "time_seconds": eco_time,
+            },
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "main": None, "eco": None}
 
 @app.post("/api/route")
 async def get_route(request: RouteRequest):

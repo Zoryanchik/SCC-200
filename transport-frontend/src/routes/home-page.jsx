@@ -488,6 +488,23 @@ export default function HomePage() {
     return { from: fromResults, to: toResults };
   }, [fromLoading, toLoading, fromStopResults, toStopResults]);
 
+  // Debug: log Autocomplete options to help diagnose missing stop entries
+  useEffect(() => {
+    try {
+      // Print concise option summaries to the console for debugging in dev
+      const summarize = (arr) => (Array.isArray(arr) ? arr.map((o) => {
+        if (typeof o === 'string') return { type: 'string', label: o };
+        return { type: o.type || 'stop', label: o.display_name || o.name || o.atco_code || '' };
+      }) : []);
+      // eslint-disable-next-line no-console
+      console.log('DEBUG autocomplete FROM options:', summarize(allStops.from));
+      // eslint-disable-next-line no-console
+      console.log('DEBUG autocomplete TO options:', summarize(allStops.to));
+    } catch (e) {
+      // ignore during production or tests
+    }
+  }, [allStops.from, allStops.to]);
+
   const handleSearch = async () => {
     if (!fromCoords || !toCoords) return;
     setShowSuggested(true);
