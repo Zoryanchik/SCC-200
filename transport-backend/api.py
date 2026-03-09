@@ -186,6 +186,55 @@ async def get_alerts():
     return []
 
 
+@app.get("/pricing")
+async def get_pricing(
+    fromLat: float,
+    fromLon: float,
+    toLat: float,
+    toLon: float,
+):
+    """Estimate a single-journey public-transport fare.
+
+    Uses Haversine distance between origin and destination with simple
+    England fare bands as a stub.  Distance in km; fares in GBP.
+
+    Fare bands (approximate, single ticket):
+        < 3 km   →  £1.80  (short hop)
+        3–10 km  →  £2.10  (standard single — England bus fare cap)
+        10–30 km →  £3.50  (regional)
+        ≥ 30 km  →  £5.00  (long-distance)
+    """
+    import math
+
+    dlat = math.radians(toLat - fromLat)
+    dlon = math.radians(toLon - fromLon)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(fromLat)) * math.cos(math.radians(toLat))
+         * math.sin(dlon / 2) ** 2)
+    km = 6371 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    if km < 3:
+        price, band = 1.80, "short-hop"
+    elif km < 10:
+        price, band = 2.10, "standard"
+    elif km < 30:
+        price, band = 3.50, "regional"
+    else:
+        price, band = 5.00, "long-distance"
+
+    return {
+        "price": price,
+        "currency": "GBP",
+        "distanceKm": round(km, 2),
+        "band": band,
+        "fares": [
+            {"type": "single", "price": price},
+            {"type": "return", "price": round(price * 1.8, 2)},
+            {"type": "day",    "price": round(price * 2.5, 2)},
+        ],
+    }
+
+
 @app.get("/status")
 async def status():
     """Return background precompute status (walking)."""
