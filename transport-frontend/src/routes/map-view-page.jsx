@@ -274,20 +274,6 @@ const MapFallback = () => (
 
 return (
 <Stack spacing={2} sx={{ height: '100%', mb: 2 }}>
-<Paper elevation={0} sx={{ 
-p: 3.5, 
-background: 'linear-gradient(135deg, #6366F1 0%, #EC4899 100%)',
-color: 'white',
-borderRadius: '16px'
-}}>
-    <Stack direction="row" spacing={1.5} alignItems="center">
-    {/* Map header - icon removed */}
-    </Stack>
-<Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.95)', mt: 1.5, fontWeight: 500 }}>
-Real-time bus and train locations across Lancashire
-</Typography>
-</Paper>
-
 {apiError && (
 <Alert severity="warning" sx={{ borderRadius: '12px' }}>
 <Typography variant="body2">
