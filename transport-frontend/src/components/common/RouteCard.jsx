@@ -113,7 +113,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ""}
                     {step.departure_time_with_offset && step.arrival_time_with_offset ? "  •  " : ""}
                     {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ""}
-                    {" (planned)"}
+                    {step.type !== 'walk' ? " (planned)" : ""}
                   </Typography>
                 )}
 
