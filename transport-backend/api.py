@@ -830,6 +830,21 @@ async def search_stops(
                         })
                 except Exception as exc:
                     logger.warning("ATCO stop lookup failed: %s", exc)
+                # If ATCO/NaPTAN lookup returned no results, fall back to
+                # the legacy bus_stop_names index so queries like "Abingdon
+                # Street" that exist only in the bus index are still
+                # surfaced to callers.
+                if atco_loader and not stop_results:
+                    try:
+                        loader = _base_cache.get("loader") if _base_cache else None
+                        if loader:
+                            temp = loader.search_stops(q, stop_first_limit)
+                            stop_results = temp[:stop_first_limit]
+                            for stop in stop_results:
+                                stop["type"] = "stop"
+                    except Exception:
+                        # non-fatal — we'll fall back to geocoding later
+                        pass
             else:
                 # Fallback to legacy loader when ATCO loader unavailable
                 loader = _base_cache.get("loader") if _base_cache else None
