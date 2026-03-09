@@ -564,17 +564,210 @@ async def search_stops(
             # available — this ensures canonical stop names/types are used
             # instead of the bus-specific stop names table.
             atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+            # Ensure the API always surfaces a small number of canonical
+            # stop-type results first (best UX for autocomplete). We fetch
+            # up to STOP_FIRST results from the stop_coords table and then
+            # append geocoded locations; the final combined list is sliced
+            # to the caller's `limit`.
+            # Make STOP_FIRST configurable via env var for easy tuning.
+            try:
+                STOP_FIRST = int(os.environ.get("STOP_FIRST", "5"))
+            except Exception:
+                STOP_FIRST = 5
+            # Request STOP_FIRST candidates from the DB regardless of the
+            # caller's `limit` so we can choose the best stop-type
+            # suggestions before appending location matches. We'll still
+            # respect the requested `limit` when returning the final list.
+            stop_first_limit = STOP_FIRST
             if atco_loader:
                 try:
                     # Use the atco_loader's DB to search stop_coords by name
                     conn = atco_loader._connect()
                     cur = conn.cursor()
-                    cur.execute(
-                        "SELECT atco_code, name, town, lat, lon FROM stop_coords "
-                        "WHERE LOWER(name) LIKE LOWER(%s) LIMIT %s",
-                        (f"%{q}%", limit),
-                    )
-                    rows = cur.fetchall()
+                    # Match by name, town, or the combined display (name, town)
+                    # so queries that include a town (e.g. "George Street Lancaster")
+                    # will match the intended stop.
+                    # Normalize the incoming query and form a name_guess so
+                    # punctuation and commas won't prevent matches. We also
+                    # use a Postgres-side regexp_replace on the stored name
+                    # + town when comparing to allow robust matching.
+                    import re as _re
+                    def _norm(s: str) -> str:
+                        if not s:
+                            return ""
+                        t = _re.sub(r"[^0-9a-zA-Z ]+", " ", s)
+                        t = _re.sub(r"\s+", " ", t).strip().lower()
+                        return t
+
+                    norm_q = _norm(q)
+                    if " " in q:
+                        name_guess_raw = q.rsplit(" ", 1)[0].strip()
+                    else:
+                        name_guess_raw = q
+                    norm_name_guess = _norm(name_guess_raw)
+
+                    # If the query looks like "<name> <town>", try an
+                    # explicit name+town pre-query first so stops in that
+                    # town are guaranteed to be included in the candidate
+                    # pool (helps queries like "George Street Lancaster").
+                    pre_rows = []
+                    if " " in q:
+                        parts = q.rsplit(" ", 1)
+                        name_guess = parts[0].strip()
+                        town_guess = parts[1].strip()
+                        if name_guess and town_guess:
+                            try:
+                                cur.execute(
+                                    "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                                    "WHERE LOWER(name) LIKE LOWER(%s) AND LOWER(town) LIKE LOWER(%s) LIMIT %s",
+                                    (f"%{name_guess}%", f"%{town_guess}%", stop_first_limit),
+                                )
+                                pre_rows = cur.fetchall()
+                            except Exception:
+                                pre_rows = []
+
+                    # Determine name/town guesses for relevance scoring
+                    if " " in q:
+                        _parts = q.rsplit(" ", 1)
+                        _name_g = _parts[0].strip()
+                        _town_g = _parts[1].strip()
+                    else:
+                        _name_g = q
+                        _town_g = ""
+
+                    # Primary query: use regexp_replace for punctuation-
+                    # insensitive matching, ORDER BY relevance when pg_trgm
+                    # is available (exactness bonus + trigram similarity).
+                    try:
+                        cur.execute(
+                            "SELECT atco_code, name, town, lat, lon, "
+                            "  CASE "
+                            "    WHEN LOWER(name) LIKE LOWER(%s) AND LOWER(COALESCE(town,'')) LIKE LOWER(%s) THEN 10 "
+                            "    WHEN LOWER(name) LIKE LOWER(%s) THEN 5 "
+                            "    ELSE 0 "
+                            "  END "
+                            "  + similarity(LOWER(COALESCE(name,'')), LOWER(%s)) "
+                            "  + similarity(LOWER(COALESCE(town,'')), LOWER(%s)) AS score "
+                            "FROM stop_coords "
+                            "WHERE regexp_replace(LOWER(COALESCE(name,'') || ' ' || COALESCE(town,'')), '[^a-z0-9 ]', '', 'g') LIKE %s "
+                            "   OR regexp_replace(LOWER(COALESCE(name,'')), '[^a-z0-9 ]', '', 'g') LIKE %s "
+                            "ORDER BY score DESC "
+                            "LIMIT %s",
+                            (
+                                f"%{_name_g}%", f"%{_town_g}%" if _town_g else "%",
+                                f"%{_name_g}%",
+                                _name_g, _town_g if _town_g else q,
+                                f"%{norm_q}%", f"%{norm_name_guess}%",
+                                stop_first_limit,
+                            ),
+                        )
+                        rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
+                    except Exception:
+                        # pg_trgm not available — fall back to regexp_replace
+                        # with a manual exactness ORDER BY (no similarity).
+                        try:
+                            cur.execute(
+                                "SELECT atco_code, name, town, lat, lon, "
+                                "  CASE "
+                                "    WHEN LOWER(name) LIKE LOWER(%s) AND LOWER(COALESCE(town,'')) LIKE LOWER(%s) THEN 10 "
+                                "    WHEN LOWER(name) LIKE LOWER(%s) THEN 5 "
+                                "    ELSE 0 "
+                                "  END AS score "
+                                "FROM stop_coords "
+                                "WHERE regexp_replace(LOWER(COALESCE(name,'') || ' ' || COALESCE(town,'')), '[^a-z0-9 ]', '', 'g') LIKE %s "
+                                "   OR regexp_replace(LOWER(COALESCE(name,'')), '[^a-z0-9 ]', '', 'g') LIKE %s "
+                                "ORDER BY score DESC "
+                                "LIMIT %s",
+                                (
+                                    f"%{_name_g}%", f"%{_town_g}%" if _town_g else "%",
+                                    f"%{_name_g}%",
+                                    f"%{norm_q}%", f"%{norm_name_guess}%",
+                                    stop_first_limit,
+                                ),
+                            )
+                            rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
+                        except Exception:
+                            # Final fallback: simple LIKE, no ordering
+                            cur.execute(
+                                "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                                "WHERE LOWER(name) LIKE LOWER(%s) OR LOWER(name) LIKE LOWER(%s) LIMIT %s",
+                                (f"%{q}%", f"%{name_guess_raw}%", stop_first_limit),
+                            )
+                            rows = cur.fetchall()
+
+                    # Prepend any explicit pre_rows (unique) so they are
+                    # considered first when selecting stop-type results.
+                    if pre_rows:
+                        seen_atco = {r[0] for r in pre_rows}
+                        rows = list(pre_rows) + [r for r in rows if r[0] not in seen_atco]
+
+                    # Always try to find town-specific stops when the
+                    # query contains a space (e.g. "George Street Lancaster"
+                    # or even "George Street Lancaseter"). This runs
+                    # regardless of how many LIKE rows we already have, and
+                    # *prepends* town-matching stops so they rank first.
+                    if " " in q:
+                        parts = q.rsplit(" ", 1)
+                        name_guess = parts[0].strip()
+                        town_guess = parts[1].strip()
+                        if name_guess and town_guess:
+                            town_rows = []
+                            # 1) Exact name+town LIKE
+                            try:
+                                cur.execute(
+                                    "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                                    "WHERE LOWER(name) LIKE LOWER(%s) AND LOWER(town) LIKE LOWER(%s) LIMIT %s",
+                                    (f"%{name_guess}%", f"%{town_guess}%", stop_first_limit),
+                                )
+                                town_rows = cur.fetchall()
+                            except Exception:
+                                pass
+                            # 2) Trigram fuzzy name+town (handles typos)
+                            if len(town_rows) < 2:
+                                try:
+                                    cur.execute(
+                                        "SELECT atco_code, name, town, lat, lon, "
+                                        "similarity(LOWER(name), LOWER(%s)) + "
+                                        "similarity(LOWER(COALESCE(town,'')), LOWER(%s)) AS score "
+                                        "FROM stop_coords "
+                                        "WHERE similarity(LOWER(name), LOWER(%s)) > 0.2 "
+                                        "AND similarity(LOWER(COALESCE(town,'')), LOWER(%s)) > 0.2 "
+                                        "ORDER BY score DESC LIMIT %s",
+                                        (name_guess, town_guess, name_guess, town_guess, stop_first_limit),
+                                    )
+                                    more = cur.fetchall()
+                                    seen_t = {r[0] for r in town_rows}
+                                    for r in more:
+                                        if r[0] not in seen_t:
+                                            town_rows.append((r[0], r[1], r[2], r[3], r[4]))
+                                except Exception:
+                                    # 3) Python difflib fallback for town matching
+                                    try:
+                                        from difflib import SequenceMatcher
+                                        cur.execute(
+                                            "SELECT atco_code, name, town, lat, lon FROM stop_coords "
+                                            "WHERE LOWER(name) LIKE LOWER(%s)",
+                                            (f"%{name_guess}%",),
+                                        )
+                                        candidates = cur.fetchall()
+                                        scored = []
+                                        for atco_c, nm, tn, la, lo in candidates:
+                                            if not tn:
+                                                continue
+                                            ratio = SequenceMatcher(None, town_guess.lower(), tn.lower()).ratio()
+                                            if ratio > 0.5:
+                                                scored.append((ratio, atco_c, nm, tn, la, lo))
+                                        scored.sort(key=lambda t: t[0], reverse=True)
+                                        seen_t = {r[0] for r in town_rows}
+                                        for _, atco_c, nm, tn, la, lo in scored[:stop_first_limit]:
+                                            if atco_c not in seen_t:
+                                                town_rows.append((atco_c, nm, tn, la, lo))
+                                    except Exception:
+                                        pass
+                            # Prepend town-matching rows ahead of generic rows
+                            if town_rows:
+                                seen_town_atcos = {r[0] for r in town_rows}
+                                rows = list(town_rows) + [r for r in rows if r[0] not in seen_town_atcos]
                     conn.close()
                     stop_results = []
                     for i, (atco, name, town, lat, lon) in enumerate(rows):
@@ -596,7 +789,14 @@ async def search_stops(
                 # Fallback to legacy loader when ATCO loader unavailable
                 loader = _base_cache.get("loader") if _base_cache else None
                 if loader:
-                    stop_results = loader.search_stops(q, limit)
+                    # Ask the legacy loader for candidates but only keep
+                    # up to `stop_first_limit` so we continue to guarantee
+                    # a small set of stop-type results first.
+                    # Ask the legacy loader for STOP_FIRST candidates so we
+                    # have a larger pool to pick from (don't cap by request
+                    # `limit` here).
+                    temp = loader.search_stops(q, stop_first_limit)
+                    stop_results = temp[:stop_first_limit]
                     for stop in stop_results:
                         stop["type"] = "stop"
         except Exception as exc:
@@ -2226,7 +2426,7 @@ def format_route_text(route_result, merged):
     return "\n".join(out)
 
 
-def build_journey_plan_response(route_result, merged, stop_coords):
+def build_journey_plan_response(route_result, merged, stop_coords, request_start_seconds=None):
     """Convert raw RAPTOR router result into a structured journey plan.
 
     Args:
@@ -2286,6 +2486,17 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "color": "#888888",
         }] if coords else [])
 
+        # Compute a human-friendly duration for the walking-only route
+        walk_dur_secs = total_walk
+        if request_start_seconds is not None and total_arrival is not None:
+            walk_dur_secs = int(total_arrival - int(request_start_seconds))
+        if walk_dur_secs >= 3600:
+            _wh = walk_dur_secs // 3600
+            _wm = (walk_dur_secs % 3600) // 60
+            walk_dur_str = f"{_wh}h {_wm} mins" if _wm > 0 else f"{_wh}h"
+        else:
+            walk_dur_str = f"{round(walk_dur_secs / 60)} mins"
+
         return {
             "success": True,
             "legs": legs,
@@ -2294,6 +2505,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
                 "end_walk_seconds": meta.get("end_walk_seconds", 0),
                 "total_arrival": (seconds_to_time(int(total_arrival))
                                   if total_arrival else None),
+                "total_duration_seconds": walk_dur_secs,
+                "total_duration": walk_dur_str,
             },
             "routeGeometries": geometries,
         }
@@ -2538,26 +2751,62 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "color": "#888888",
         })
 
-    # Compute the total real-time delay from all bus legs.
-    # Because the router already used delay-adjusted journey_times,
-    # total_arrival already includes the cumulative delay.
-    #   scheduled total = total_arrival - total_delay
-    #   realtime  total = total_arrival  (as-is)
-    total_delay_s = 0
+    # Compute the total real-time delay for the route.
+    # The router already used delay-adjusted journey_times, so
+    # total_arrival already includes the cumulative delay. When
+    # computing the scheduled total we must subtract each unique
+    # per-journey delay once. Previously we summed per-leg
+    # delays which double-counted delays when a single vehicle
+    # (journey) produced multiple legs — fix by summing unique
+    # journey delays only.
+    seen_journey_delays: dict = {}
     has_any_delay = False
-    for leg in legs:
-        ds = leg.get("delay_seconds")
+    # During leg construction we may not have stored the journey id
+    # on the leg itself, so iterate the route_data (ordered) to find
+    # unique journey ids and their delay_seconds where present.
+    for idx, (stop_int, info) in enumerate(ordered):
+        j_id = info.get('journey')
+        if j_id is None:
+            continue
+        # Delay per-journey is stored in _journey_delay_map keyed by journey id
+        ds = _journey_delay_map.get(j_id)
         if ds is not None and ds != 0:
-            total_delay_s += ds
+            seen_journey_delays[j_id] = ds
             has_any_delay = True
 
+    total_delay_s = sum(seen_journey_delays.values()) if seen_journey_delays else 0
     scheduled_total = None
     rt_total_arrival = None
-    if total_arrival is not None and has_any_delay:
-        scheduled_total = _time_str(int(total_arrival - total_delay_s))
+
+    # New total-time calculation: if the caller provided the request start
+    # time (seconds since midnight) compute the total travel duration as
+    # final arrival minus start time.  This is simpler and avoids
+    # aggregating delays across legs.  If request_start_seconds is not
+    # provided fall back to the previous behaviour (subtract unique
+    # per-journey delays to compute a scheduled arrival time).
+    # Compute total_duration_seconds (arrival − request start) and a
+    # human-friendly total_duration string.  These are the canonical
+    # "how long does this journey take" fields for the frontend.
+    total_duration_secs = None
+    total_duration_str = None
+
+    if total_arrival is not None and request_start_seconds is not None:
+        total_duration_secs = int(total_arrival - int(request_start_seconds))
+        # Human-friendly duration string (e.g. "14 mins" or "1h 10 mins")
+        if total_duration_secs >= 3600:
+            hrs = total_duration_secs // 3600
+            mins = (total_duration_secs % 3600) // 60
+            total_duration_str = f"{hrs}h {mins} mins" if mins > 0 else f"{hrs}h"
+        else:
+            total_duration_str = f"{round(total_duration_secs / 60)} mins"
         rt_total_arrival = _time_str(int(total_arrival))
-    elif total_arrival is not None:
         scheduled_total = _time_str(int(total_arrival))
+    else:
+        if total_arrival is not None and has_any_delay:
+            scheduled_total = _time_str(int(total_arrival - total_delay_s))
+            rt_total_arrival = _time_str(int(total_arrival))
+        elif total_arrival is not None:
+            scheduled_total = _time_str(int(total_arrival))
 
     return {
         "success": True,
@@ -2568,6 +2817,8 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             "total_arrival": scheduled_total,
             "realtime_total_arrival": rt_total_arrival,
             "total_delay_seconds": total_delay_s if has_any_delay else None,
+            "total_duration_seconds": total_duration_secs,
+            "total_duration": total_duration_str,
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
@@ -2607,7 +2858,7 @@ async def journey_plan(request: JourneyPlanRequest):
         )
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(
-            result, merged, stop_coords)
+            result, merged, stop_coords, request_start_seconds=start_seconds)
     except Exception as exc:
         return {"success": False, "error": str(exc),
                 "legs": None, "meta": None, "routeGeometries": None}
@@ -2718,7 +2969,7 @@ async def get_route(request: RouteRequest):
             allowed_modes=allowed_modes,
         )
         stop_coords = getattr(walking, "_coords", {})
-        return build_journey_plan_response(result, merged, stop_coords)
+        return build_journey_plan_response(result, merged, stop_coords, request_start_seconds=start_seconds)
     except Exception as e:
         return {"success": False, "error": str(e),
                 "legs": None, "meta": None, "routeGeometries": None}
