@@ -586,8 +586,6 @@ export default function HomePage() {
           </Stack>
         ) : routeOptions.length > 0 ? (
           <Stack spacing={2}>
-            {routes.map((route) => (
-              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} fullHeight={routes.length === 1} />
             {routeOptions.map((opt, idx) => (
               <Box
                 key={opt.id}
@@ -621,7 +619,7 @@ export default function HomePage() {
                     transition: 'outline 0.15s',
                   }}
                 >
-                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} />
+                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} fullHeight={routeOptions.length === 1} />
                 </Box>
               </Box>
             ))}
