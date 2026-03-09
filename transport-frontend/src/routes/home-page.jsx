@@ -586,8 +586,6 @@ export default function HomePage() {
           </Stack>
         ) : routeOptions.length > 0 ? (
           <Stack spacing={2}>
-            {routes.map((route) => (
-              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} fullHeight={routes.length === 1} />
             {routeOptions.map((opt, idx) => (
               <Box
                 key={opt.id}
