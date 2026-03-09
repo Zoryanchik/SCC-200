@@ -13,6 +13,7 @@ import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
 import Grid from "@mui/material/Grid";
+import { useAccessibility } from "../../contexts/AccessibilityContext";
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -265,6 +266,16 @@ export default function MapViewMap({
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
 	const { activeRoutes, toggleRoute, isActive, clearRoutes } = useRouteLine();
+	const { highContrast } = useAccessibility();
+
+	// High-contrast mode → CartoDB Positron (clean, light, high-legibility labels)
+	// Normal mode        → standard OpenStreetMap
+	const tileUrl = highContrast
+		? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+		: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+	const tileAttribution = highContrast
+		? '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+		: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 	return (
 	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
@@ -371,8 +382,8 @@ export default function MapViewMap({
 						className="leaflet-container-custom"
 					>
 					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />				<MapClickClearHandler onClear={clearRoutes} />					<TileLayer
-						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-						url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+						attribution={tileAttribution}
+						url={tileUrl}
 					/>				{/* Clear-routes button — floated bottom-left, only when routes are active */}
 				{activeRoutes.size > 0 && (
 					<Box
