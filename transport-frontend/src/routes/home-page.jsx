@@ -498,9 +498,9 @@ export default function HomePage() {
       const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
       const apiMode = transportMode === 'all' ? 'combined' : transportMode;
 
-      // Generate alternatives by varying transfer limit.
-      // Try 0, 1, 2, 3, and the user's setting (deduplicated, ascending).
-      const transferVariants = [...new Set([0, 1, 2, 3, maxTransfers])].sort((a, b) => a - b);
+      // Generate alternatives by varying transfer limit up to the user's cap.
+      // Never exceed maxTransfers — e.g. if limit is 0, only try 0 transfers.
+      const transferVariants = [...new Set([0, 1, 2, 3, maxTransfers])].filter(t => t <= maxTransfers).sort((a, b) => a - b);
 
       const results = await Promise.allSettled(
         transferVariants.map((t) =>
