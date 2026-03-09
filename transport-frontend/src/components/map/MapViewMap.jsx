@@ -2,7 +2,7 @@ import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
-import { MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, Marker, Popup, Polyline, CircleMarker, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
@@ -13,6 +13,7 @@ import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
 import Grid from "@mui/material/Grid";
+import { useAccessibility } from "../../contexts/AccessibilityContext";
 
 // Fix Leaflet marker icons issue with Vite
 
@@ -34,29 +35,47 @@ L.Marker.prototype.options.icon = DefaultIcon;
  * @param {string|null} [label] - for bus markers, the route/line number to display on the icon
  */
 const createCustomIcon = (type, color, label = null) => {
+	const size = 28;
+	const c = size / 2; // 14
+	const r = c - 1.5; // 12.5
+
 	let innerSvg;
+	let bgFill, strokeColor, strokeWidth;
+
 	if (type === 'bus' && label) {
-		// Show route number prominently inside the circle
-		const text = String(label).substring(0, 4); // cap at 4 chars
-		const fontSize = text.length >= 4 ? 9 : text.length === 3 ? 11 : 13;
-		innerSvg = `<text x="20" y="25" text-anchor="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="${color}">${text}</text>`;
+		// Solid coloured badge with white route number — easy to read at a glance
+		bgFill = color;
+		strokeColor = 'white';
+		strokeWidth = 1.5;
+		const text = String(label).substring(0, 4);
+		const fontSize = text.length >= 4 ? 7 : text.length === 3 ? 8.5 : 10;
+		innerSvg = `<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${text}</text>`;
 	} else if (type === 'bus') {
-		innerSvg = '<path d="M12 14h16v8H12z" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="24" r="2" fill="' + color + '"/><circle cx="24" cy="24" r="2" fill="' + color + '"/>';
+		bgFill = 'white';
+		strokeColor = color;
+		strokeWidth = 2;
+		innerSvg = `<path d="M8 10h12v5H8z" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>` +
+			`<circle cx="10.5" cy="17" r="1.5" fill="${color}"/>` +
+			`<circle cx="17.5" cy="17" r="1.5" fill="${color}"/>`;
 	} else {
-		innerSvg = '<path d="M20 12l-6 4v8h12v-8z" fill="none" stroke="' + color + '" stroke-width="2"/><line x1="14" y1="24" x2="26" y2="24" stroke="' + color + '" stroke-width="2"/>';
+		bgFill = 'white';
+		strokeColor = color;
+		strokeWidth = 2;
+		innerSvg = `<path d="M14 8l-5 3v7h10v-7z" fill="none" stroke="${color}" stroke-width="1.5"/>` +
+			`<line x1="9" y1="18" x2="19" y2="18" stroke="${color}" stroke-width="1.5"/>`;
 	}
 
-	const svg = `<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-		<circle cx="20" cy="20" r="18" fill="white" stroke="${color}" stroke-width="3"/>
+	const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+		<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>
 		${innerSvg}
 	</svg>`;
 
 	return L.divIcon({
 		html: svg,
 		className: 'custom-marker-icon',
-		iconSize: [40, 40],
-		iconAnchor: [20, 20],
-		popupAnchor: [0, -20]
+		iconSize: [size, size],
+		iconAnchor: [c, c],
+		popupAnchor: [0, -c]
 	});
 };
 
@@ -95,6 +114,76 @@ const USER_ICON = createUserIcon();
  * onMoveEnd is called with { lat, lon } whenever the user finishes
  * panning/zooming (Leaflet "moveend" event).
  */
+/** Clears all active route overlays when the user clicks the map background. */
+const MapClickClearHandler = ({ onClear }) => {
+	useMapEvents({ click: () => onClear() });
+	return null;
+};
+
+/**
+ * Renders journey-plan route geometry on the map and fits bounds to show
+ * the full journey.  Each segment in `segments` has:
+ *   { id, name, coords: [[lat,lon],...], color }
+ */
+const JourneyRouteLayer = ({ segments }) => {
+	const map = useMap();
+
+	useEffect(() => {
+		if (!segments || segments.length === 0) return;
+		const allCoords = segments.flatMap((s) => s.coords || []);
+		if (allCoords.length < 2) return;
+		try {
+			map.fitBounds(allCoords, { padding: [40, 40], maxZoom: 15 });
+		} catch (e) {
+			// ignore if map not ready
+		}
+	}, [map, segments]);
+
+	if (!segments || segments.length === 0) return null;
+
+	return (
+		<>
+			{segments.map((seg) => {
+				if (!seg.coords || seg.coords.length < 2) return null;
+				const isWalk = seg.color === '#888888' || (seg.id && seg.id.startsWith('walk'));
+				return (
+					<Polyline
+						key={seg.id}
+						positions={seg.coords}
+						pathOptions={{
+							color: seg.color || '#1a73e8',
+							weight: isWalk ? 3 : 5,
+							opacity: isWalk ? 0.6 : 0.85,
+							dashArray: isWalk ? '6 8' : undefined,
+						}}
+					/>
+				);
+			})}
+			{/* Origin dot */}
+			{segments[0]?.coords?.[0] && (
+				<CircleMarker
+					center={segments[0].coords[0]}
+					radius={7}
+					pathOptions={{ color: '#fff', weight: 2, fillColor: '#10B981', fillOpacity: 1 }}
+				/>
+			)}
+			{/* Destination dot */}
+			{(() => {
+				const last = segments[segments.length - 1];
+				const pt = last?.coords?.[last.coords.length - 1];
+				if (!pt) return null;
+				return (
+					<CircleMarker
+						center={pt}
+						radius={7}
+						pathOptions={{ color: '#fff', weight: 2, fillColor: '#d32f2f', fillOpacity: 1 }}
+					/>
+				);
+			})()}
+		</>
+	);
+};
+
 const MapController = ({ onReady, onMoveEnd }) => {
 	const map = useMap();
 
@@ -170,11 +259,23 @@ export default function MapViewMap({
  		onMoveEnd,
  		sideContent,
  		showSideOverlay = true,
+	/** Route geometry from journey planner. Array of {id, name, coords, color} */
+	journeyRoute = null,
 }) {
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
-	const { activeRoutes, toggleRoute, isActive } = useRouteLine();
+	const { activeRoutes, toggleRoute, isActive, clearRoutes } = useRouteLine();
+	const { highContrast } = useAccessibility();
+
+	// High-contrast mode → CartoDB Positron (clean, light, high-legibility labels)
+	// Normal mode        → standard OpenStreetMap
+	const tileUrl = highContrast
+		? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+		: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+	const tileAttribution = highContrast
+		? '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+		: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 	return (
 	<Stack direction={{ xs: "column", md: "row" }} spacing={3} sx={{ height: { xs: 'auto', md: 700 } }}>
@@ -280,14 +381,41 @@ export default function MapViewMap({
 						style={{ height: "100%", width: "100%" }}
 						className="leaflet-container-custom"
 					>
-					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />
-					<TileLayer
-						attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-						url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-					/>
-					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
+					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />				<MapClickClearHandler onClear={clearRoutes} />					<TileLayer
+						attribution={tileAttribution}
+						url={tileUrl}
+					/>				{/* Clear-routes button — floated bottom-left, only when routes are active */}
+				{activeRoutes.size > 0 && (
+					<Box
+						component="button"
+						onClick={(e) => { e.stopPropagation(); clearRoutes(); }}
+						className="leaflet-control"
+						style={{
+							position: 'absolute',
+							bottom: 28,
+							left: 12,
+							zIndex: 1001,
+							display: 'flex',
+							alignItems: 'center',
+							gap: '6px',
+							padding: '6px 14px',
+							borderRadius: '20px',
+							border: '1.5px solid #d32f2f',
+							backgroundColor: 'white',
+							color: '#d32f2f',
+							fontSize: '13px',
+							fontWeight: 700,
+							cursor: 'pointer',
+							boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
+						}}
+					>
+						✕ Clear routes ({activeRoutes.size})
+					</Box>
+				)}					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
 					<BusStopLayer onToggleRoute={toggleRoute} isRouteActive={isActive} />
 					<RouteLineLayer activeRoutes={activeRoutes} />
+				{/* Journey-plan route overlay */}
+				<JourneyRouteLayer segments={journeyRoute} />
 					{filteredMarkers.map((marker) => (
 						<Marker
 							key={marker.id}

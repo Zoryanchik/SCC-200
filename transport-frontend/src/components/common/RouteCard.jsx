@@ -64,9 +64,26 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
             )}
           </Stack>
           <Stack alignItems="flex-end" spacing={0.5}>
-            <Typography fontWeight={700} color="success.main">
-              {route.price}
-            </Typography>
+            {route.price && (
+              <>
+                <Typography fontWeight={700} color="success.main" sx={{ lineHeight: 1.2 }}>
+                  {route.price}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                  approx. cost
+                </Typography>
+                {route.busLegs > 1 && (
+                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                    {route.busLegs} × £2.10 single
+                  </Typography>
+                )}
+                {route.busLegs === 1 && (
+                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                    bus single ticket
+                  </Typography>
+                )}
+              </>
+            )}
             {onSave && (
               <IconButton size="small" onClick={() => onSave(route)} color={isSaved ? "error" : "default"}>
                 <Heart size={18} fill={isSaved ? "currentColor" : "none"} />

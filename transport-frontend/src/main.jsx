@@ -7,6 +7,7 @@ import {
 import App from "./app";
 import ErrorPage from './error-page';
 import AppLayout from './layout';
+import { AccessibilityProvider } from './contexts/AccessibilityContext';
 import './styles.css';
 
 // Lazy load route components for better code splitting
@@ -61,6 +62,8 @@ const router = createBrowserRouter([
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <AccessibilityProvider>
+      <RouterProvider router={router} />
+    </AccessibilityProvider>
   </StrictMode>,
 )
