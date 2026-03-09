@@ -469,7 +469,23 @@ class BusLoader:
             info = jp_map[jp_ref]
             route_ref = info['route_ref']
             destination_display = info.get('destination_display', '')
-            jkey = f"{service_code}:{vj_code}" if service_code and vj_code else (vj_code or '')
+            # Include departure seconds in journey key so multiple departures
+            # with the same VehicleJourneyCode remain distinct (prevents
+            # merging different runs into a single journey_id and large
+            # time gaps when rows are merged).
+            if vj_code:
+                if service_code:
+                    if dep_sec is not None:
+                        jkey = f"{service_code}:{vj_code}:{dep_sec}"
+                    else:
+                        jkey = f"{service_code}:{vj_code}"
+                else:
+                    if dep_sec is not None:
+                        jkey = f"{vj_code}:{dep_sec}"
+                    else:
+                        jkey = vj_code
+            else:
+                jkey = ''
             rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
             journey_routes_rows.append((jkey, rkey, line_name, destination_display))
 

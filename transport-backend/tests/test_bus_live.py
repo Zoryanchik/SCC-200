@@ -163,16 +163,16 @@ class TestBusDelayHandling:
         assert data[0]["status"] == "On time"
 
     def test_delay_within_threshold_is_on_time(self, client: TestClient):
-        """Delay < 2 min (119 s) should be reported as 'On time'."""
+        """Delay < 1 min (59 s) should be reported as 'On time'."""
         api_module.get_bus_live.return_value = [
-            ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 90),
+            ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 30),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["status"] == "On time"
-        assert data[0]["delay_minutes"] == 1.5
+        assert data[0]["delay_minutes"] == 0.5
 
     def test_delay_above_threshold_reports_delayed(self, client: TestClient):
-        """Delay >= 2 min (120 s) should report 'Delayed N min'."""
+        """Delay >= 1 min (60 s) should report 'Delayed N min'."""
         api_module.get_bus_live.return_value = [
             ("100", "Blackpool", 54.05, -2.80, "Blackpool Transport", 300),
         ]

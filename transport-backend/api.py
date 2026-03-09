@@ -1161,7 +1161,7 @@ def _bus_delay_status(delay_s: Optional[int]) -> str:
     # explicitly marking it 'Early'. Keep delay value itself unchanged.
     if delay_s is None:
         return "On time"
-    if delay_s >= 120:
+    if delay_s >= 60:
         minutes = round(delay_s / 60)
         return f"Delayed {minutes} min"
     # All negative delays are presented to callers as negative numeric
@@ -1300,6 +1300,19 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         except Exception:
             continue
 
+        # Guard: ensure this journey actually operates on the current
+        # calendar day (the merged data may include yesterday/tomorrow
+        # depending on AM/PM bucket). We allow journeys that cross
+        # midnight into today (i.e. end_arr >= 0) but skip journeys
+        # that are entirely before today (end_arr < 0) or entirely
+        # after today (start_dep >= 86400).
+        try:
+            if end_arr < 0 or start_dep >= 86400:
+                continue
+        except Exception:
+            # If times are malformed, conservatively skip candidate
+            continue
+
         r_int = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else -1
         if r_int < 0:
             continue
@@ -1344,9 +1357,54 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         # Project vehicle onto track
         dist_m, progress = _project_onto_track(lat_v, lon_v, track, cum)
 
+        # Load journey timetable for spatial-origin checks
+        try:
+            jt = merged.journey_times[j_id]
+        except Exception:
+            jt = None
+
         # Skip if vehicle is too far from this route's track (> 800m)
         if dist_m > 800:
             continue
+
+        # If the vehicle is near the start of the route, prefer an
+        # ATCO-code based match to be more robust: find the nearest
+        # reachable stops from the vehicle and accept candidates whose
+        # declared first-stop ATCO matches the nearest stop. If that
+        # information isn't available, fall back to a simple coordinate
+        # proximity check (within 300m).
+        if progress < 0.15 and jt:
+            try:
+                first_stop_int = jt[0][0]
+                first_atco = merged.get_atco_code(first_stop_int)
+                # Ask walking for reachable stops from the vehicle location
+                nearby = walking.reachable_stops((lat_v, lon_v))
+                if nearby:
+                    nearest_stop_int, walk_secs = nearby[0]
+                    nearest_atco = merged.get_atco_code(nearest_stop_int)
+                    if first_atco and nearest_atco and first_atco == nearest_atco:
+                        # ATCO codes match — accept candidate
+                        pass
+                    else:
+                        # Fallback to coordinate proximity when ATCO info
+                        # is missing or does not match.
+                        try:
+                            fs_lat, fs_lon = walking.get_loc_coords(first_stop_int)
+                            if _hav(lat_v, lon_v, fs_lat, fs_lon) > 300:
+                                continue
+                        except Exception:
+                            pass
+                else:
+                    # No nearby stops found by walking; fall back to coords
+                    try:
+                        fs_lat, fs_lon = walking.get_loc_coords(first_stop_int)
+                        if _hav(lat_v, lon_v, fs_lat, fs_lon) > 300:
+                            continue
+                    except Exception:
+                        pass
+            except Exception:
+                # If anything fails, be conservative and do not reject.
+                pass
 
         # Skip if journey hasn't started yet: bus near start but before departure
         if progress < 0.05 and now_seconds < start_dep - 300:
@@ -1380,24 +1438,47 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v):
         if not stop_progs:
             continue
 
-        # Find the two bounding stops by progress
+        # Prefer per-stop scheduled time when the vehicle is closest to a
+        # specific stop: ask the walking helper for the nearest reachable
+        # stop from the vehicle location and, if that stop appears in the
+        # journey's stop index, use its scheduled arrival (or departure)
+        # as the expected time. This avoids interpolation errors when the
+        # vehicle is clearly at or next to a particular stop.
         expected_time = None
-        if progress <= stop_progs[0][0]:
-            # Before/at first stop
-            expected_time = stop_progs[0][1]
-        elif progress >= stop_progs[-1][0]:
-            # At/past last stop
-            expected_time = stop_progs[-1][1]
-        else:
-            # Interpolate between two surrounding stops
-            for k in range(len(stop_progs) - 1):
-                p0, t0 = stop_progs[k]
-                p1, t1 = stop_progs[k + 1]
-                if p0 <= progress <= p1:
-                    seg = p1 - p0
-                    frac = (progress - p0) / seg if seg > 0 else 0.0
-                    expected_time = t0 + frac * (t1 - t0)
-                    break
+        try:
+            nearby = walking.reachable_stops((lat_v, lon_v))
+            if nearby:
+                nearest_stop_int, nearest_walk_secs = nearby[0]
+                jsi = merged.journey_stop_index[j_id] if j_id < len(merged.journey_stop_index) else {}
+                if nearest_stop_int in jsi and nearest_walk_secs <= 300:
+                    pos = jsi[nearest_stop_int]
+                    # jt entries are (stop_int, arrival, departure)
+                    sched = jt[pos][1] if jt[pos][1] is not None else jt[pos][2]
+                    if sched is not None:
+                        expected_time = sched
+        except Exception:
+            # Fall back to interpolation below on any error
+            expected_time = None
+
+        # If per-stop lookup didn't yield an expected_time, fall back to
+        # interpolation between bounding stops along the track.
+        if expected_time is None:
+            if progress <= stop_progs[0][0]:
+                # Before/at first stop
+                expected_time = stop_progs[0][1]
+            elif progress >= stop_progs[-1][0]:
+                # At/past last stop
+                expected_time = stop_progs[-1][1]
+            else:
+                # Interpolate between two surrounding stops
+                for k in range(len(stop_progs) - 1):
+                    p0, t0 = stop_progs[k]
+                    p1, t1 = stop_progs[k + 1]
+                    if p0 <= progress <= p1:
+                        seg = p1 - p0
+                        frac = (progress - p0) / seg if seg > 0 else 0.0
+                        expected_time = t0 + frac * (t1 - t0)
+                        break
 
         if expected_time is None:
             continue
@@ -1833,7 +1914,7 @@ def format_route_text(route_result, merged):
                 delay_tag = ""
                 if transport == "bus" and line_name:
                     delay_s = _get_live_delay_for_line(line_name)
-                    if delay_s is not None and delay_s >= 120:
+                    if delay_s is not None and delay_s >= 60:
                         mins = round(delay_s / 60)
                         delay_tag = f" [Delayed {mins} min]"
                         if board_dep is not None:
