@@ -32,7 +32,7 @@ DATE_STR = '2026-03-03'
 TIME_STR = '07:25:00'
 START_POINT = (54.01033, -2.78359)
 DEST_POINT = (54.05156, -2.79937)
-MAX_TRANSFERS = 5
+MAX_TRANSFERS = 3
 MODE = 'both'  # or 'bus', 'train'
 STOP_NAME_QUERY = 'Underpass'  # case-insensitive substring to match
 

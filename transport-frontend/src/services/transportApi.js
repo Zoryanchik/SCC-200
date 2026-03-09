@@ -153,7 +153,7 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
       throw new Error('fromStop and toStop must include lat/lon');
     }
     const { date, time } = normalizeDateTime(departureTime);
-    const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 5;
+  const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 3;
     const mode = typeof options.mode === 'string' ? options.mode : 'combined';
     const response = await fetch(
       `${API_BASE_URL}/journey/plan`,

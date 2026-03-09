@@ -247,7 +247,7 @@ export const useStopSearch = (query, debounceDelay = 500) => {
 /**
  * Hook for journey planning
  */
-export const useJourneyPlans = (fromStop, toStop, departureTime, maxTransfers = 5) => {
+export const useJourneyPlans = (fromStop, toStop, departureTime, maxTransfers = 3) => {
   const [routes, setRoutes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);

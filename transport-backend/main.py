@@ -618,16 +618,16 @@ def main():
         time_str = input("Departure time  (HH:MM:SS) : ").strip()
         date_str = input("Departure date  (YYYY-MM-DD) : ").strip()
 
-        # Max transfers (default 5)
-        transfers_input = input("Max transfers    (default 5) : ").strip()
+        # Max transfers (default 3)
+        transfers_input = input("Max transfers    (default 3) : ").strip()
         if transfers_input == "":
-            max_transfers = 5
+            max_transfers = 3
         else:
             try:
                 max_transfers = int(transfers_input)
             except ValueError:
-                print("✗ Invalid number. Using default (5).")
-                max_transfers = 5
+                print("✗ Invalid number. Using default (3).")
+                max_transfers = 3
 
         # Transport mode
         mode_input = input("Mode  (bus/train/both, default both) : ").strip().lower()

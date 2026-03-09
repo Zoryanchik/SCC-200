@@ -48,7 +48,7 @@ class RouteRequest(BaseModel):
     end_lon: float
     date: str
     time: str  # HH:MM:SS
-    max_transfers: int = 5
+    max_transfers: int = 3
     mode: str = "both"  # "bus", "train", or "both"
 
 class RouteResponse(BaseModel):
@@ -62,7 +62,7 @@ class AddressRouteRequest(BaseModel):
     end: str
     date: str
     time: str  # HH:MM:SS
-    max_transfers: int = 5
+    max_transfers: int = 3
     mode: str = "both"
 
 
@@ -76,7 +76,7 @@ class JourneyPlanRequest(BaseModel):
     toStop: StopLocation
     departureTime: str     # HH:MM:SS
     date: str              # YYYY-MM-DD
-    maxTransfers: int = 5
+    maxTransfers: int = 3
     mode: str = "both"     # bus | train | both
 
 # — Lifespan (startup / shutdown) ——————————————————————————
