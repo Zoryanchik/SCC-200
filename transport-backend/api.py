@@ -2562,8 +2562,14 @@ async def journey_plan(request: JourneyPlanRequest):
 
 @app.post("/api/route")
 async def get_route(request: RouteRequest):
+    """Legacy journey-planning endpoint — retained for backwards compatibility.
+
+    Prefer ``POST /journey/plan`` for new callers; it returns a richer,
+    stable response shape.  This endpoint now delegates to
+    ``build_journey_plan_response`` so it no longer leaks raw internal
+    RAPTOR data structures (fixes P7).
+    """
     try:
-        # Prepare input
         date_str = request.date
         time_str = request.time
         start_point = (request.start_lat, request.start_lon)
@@ -2571,10 +2577,8 @@ async def get_route(request: RouteRequest):
         max_transfers = request.max_transfers
         allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
         start_seconds = seconds_since_midnight(time_str)
-        # Get router
         merged, router, walking = get_router_for_date(
             date_str, start_time=start_seconds)
-        # Run routing
         result = router.route(
             n_transfer_limit=max_transfers,
             walking=walking,
@@ -2583,10 +2587,11 @@ async def get_route(request: RouteRequest):
             destination=destination,
             allowed_modes=allowed_modes,
         )
-        route_text = format_route_text(result, merged)
-        return {"success": True, "route": _sanitize_route(result), "route_text": route_text}
+        stop_coords = getattr(walking, "_coords", {})
+        return build_journey_plan_response(result, merged, stop_coords)
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e),
+                "legs": None, "meta": None, "routeGeometries": None}
 
 
 @app.post("/api/route_by_address")
