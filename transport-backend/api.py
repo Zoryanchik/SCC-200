@@ -1202,7 +1202,7 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
-def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False):
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False, origin_dep_secs: int = None):
     """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
 
     Stable algorithm – designed to return consistent results across
@@ -1213,6 +1213,11 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         **edge interpolation** (not just vertex snapping) so that tiny
         GPS changes produce smooth, monotonic progress changes.
     3.  Apply time-window and spatial guards to reject implausible matches.
+    3b. If ``origin_dep_secs`` is provided (from the feed's
+        ``<OriginAimedDepartureTime>``), **reject** any candidate whose
+        first-stop departure time does not match within a tolerance of
+        120 seconds.  This is the strongest single filter — a vehicle
+        knows which service it is running.
     4.  Interpolate expected_time from the stop-progress curve.
     5.  Score candidates with ``(dist_m, abs(delay), j_id)``.  The key
         insight: when multiple journeys share the same route, ``dist_m``
@@ -1388,6 +1393,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         r_int = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else -1
         if r_int < 0:
             continue
+
+        # ── OriginAimedDepartureTime gate ──
+        # When the live feed tells us what time the vehicle was *supposed*
+        # to depart the origin, reject any candidate journey whose first-
+        # stop departure doesn't match within a tight tolerance (120 s).
+        # This is the strongest single discriminator because a vehicle
+        # knows which service it is running.
+        if origin_dep_secs is not None:
+            if abs(start_dep - origin_dep_secs) > 120:
+                continue
 
         candidates.append((j_id, start_dep, end_arr, r_int))
 
@@ -1580,7 +1595,7 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
     line_q = line_name.strip()
     buses = _fetch_all_live_buses()
     delays: list[int] = []
-    for line_ref, dest, lat_v, lon_v, _op, delay_s in buses:
+    for line_ref, dest, lat_v, lon_v, _op, delay_s, origin_dep in buses:
         # Exact short line name match
         short = (line_ref or "").split(":")[-1].strip()
         if short != line_q:
@@ -1589,7 +1604,7 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
             delays.append(delay_s)
         else:
             try:
-                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, origin_dep_secs=origin_dep)
                 if computed is not None:
                     delays.append(computed)
             except Exception:
@@ -1638,11 +1653,11 @@ async def bus_live_operator(
         )
 
     out = []
-    for line_ref, dest, lat_v, lon_v, _operator, delay_s in results:
+    for line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep in results:
         computed = None
         if delay_s is None:
             try:
-                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v)
+                computed = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, origin_dep_secs=origin_dep)
             except Exception:
                 computed = None
         final_delay = delay_s if delay_s is not None else computed
@@ -1795,10 +1810,10 @@ def _recompute_journey_delay_map_once() -> None:
     except Exception:
         merged = None
 
-    for line_ref, dest, lat_v, lon_v, _op, feed_delay in buses:
+    for line_ref, dest, lat_v, lon_v, _op, feed_delay, origin_dep in buses:
         try:
             # Ask the matching function for both delay and journey id
-            matched = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid=True)
+            matched = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid=True, origin_dep_secs=origin_dep)
             if not matched:
                 continue
             computed_delay, j_id = matched

@@ -99,11 +99,16 @@ class BusLive:
                      lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple]:
         """Return nearby live vehicles.
 
-        Each element is a 6-tuple:
-            (line_ref, destination_name, lat, lon, operator_name, delay_seconds)
+        Each element is a 7-tuple:
+            (line_ref, destination_name, lat, lon, operator_name, delay_seconds,
+             origin_aimed_dep_secs)
 
         ``delay_seconds`` is an int (positive = late, negative = early) or
         ``None`` when no timing data is available in the feed.
+
+        ``origin_aimed_dep_secs`` is the time-of-day portion of
+        ``<OriginAimedDepartureTime>`` converted to seconds since midnight,
+        or ``None`` when the element is absent in the feed.
 
         lat, lon are the centre point; lat_tol/lon_tol define the half-widths of
         the allowed rectangle.
@@ -216,8 +221,18 @@ class BusLive:
                             delay_seconds = int(diff)
                     # --------------------------------------------------------
 
+                    # ── OriginAimedDepartureTime → seconds since midnight ──
+                    origin_dep_secs: Optional[int] = None
+                    origin_dep_raw = (self._get_text(mvj, 'originaimeddeparturetime') or
+                                      self._get_text(mvj, 'OriginAimedDepartureTime'))
+                    if origin_dep_raw:
+                        origin_dt = _parse_iso_dt(origin_dep_raw)
+                        if origin_dt is not None:
+                            origin_dep_secs = origin_dt.hour * 3600 + origin_dt.minute * 60 + origin_dt.second
+                    # --------------------------------------------------------
+
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds))
+                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs))
 
         return results
 
@@ -269,9 +284,14 @@ def main():
 
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
-    for i, (line, dest, lat, lon, operator, delay_s) in enumerate(display_results):
+    for i, (line, dest, lat, lon, operator, delay_s, origin_dep) in enumerate(display_results):
         delay_str = f", delay={delay_s}s" if delay_s is not None else ""
-        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}{delay_str}")
+        origin_str = ""
+        if origin_dep is not None:
+            hh, mm = divmod(origin_dep, 3600)
+            mm, ss = divmod(mm, 60)
+            origin_str = f", origin_dep={int(hh):02d}:{int(mm):02d}:{int(ss):02d}"
+        print(f"{i+1:2d}. line={line!r}, dest={dest!r}, lat={lat:.6f}, lon={lon:.6f}, operator={operator!r}{delay_str}{origin_str}")
 
 
 if __name__ == "__main__":

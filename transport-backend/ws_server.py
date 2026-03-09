@@ -279,7 +279,7 @@ class StompBroker:
                     "operator": operator,
                     "timestamp": time.time(),
                 }
-                for line_ref, dest, lat, lon, operator in results
+                for line_ref, dest, lat, lon, operator, *_rest in results
             ]
             await self.broadcast(
                 "/topic/BUS_MVT_ALL",

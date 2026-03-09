@@ -70,8 +70,8 @@ class TestBusLiveOperatorEndpoint:
 
     def test_returns_expected_shape(self, client: TestClient):
         api_module.get_bus_live.return_value = [
-            ("10", "City Centre", 53.48, -2.24, "Stagecoach", None),
-            ("42", "Airport", 53.35, -2.27, "Transpora", 150),
+            ("10", "City Centre", 53.48, -2.24, "Stagecoach", None, None),
+            ("42", "Airport", 53.35, -2.27, "Transpora", 150, None),
         ]
 
         response = client.get(
@@ -156,7 +156,7 @@ class TestBusDelayHandling:
     def test_no_delay_data_returns_none_and_on_time(self, client: TestClient):
         """When delay_seconds is None the response should have delay_minutes=None and status='On time'."""
         api_module.get_bus_live.return_value = [
-            ("1A", "Lancaster", 54.05, -2.80, "Stagecoach", None),
+            ("1A", "Lancaster", 54.05, -2.80, "Stagecoach", None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["delay_minutes"] is None
@@ -165,7 +165,7 @@ class TestBusDelayHandling:
     def test_delay_within_threshold_is_on_time(self, client: TestClient):
         """Delay < 1 min (59 s) should be reported as 'On time'."""
         api_module.get_bus_live.return_value = [
-            ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 30),
+            ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 30, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["status"] == "On time"
@@ -174,7 +174,7 @@ class TestBusDelayHandling:
     def test_delay_above_threshold_reports_delayed(self, client: TestClient):
         """Delay >= 1 min (60 s) should report 'Delayed N min'."""
         api_module.get_bus_live.return_value = [
-            ("100", "Blackpool", 54.05, -2.80, "Blackpool Transport", 300),
+            ("100", "Blackpool", 54.05, -2.80, "Blackpool Transport", 300, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["status"] == "Delayed 5 min"
@@ -183,7 +183,7 @@ class TestBusDelayHandling:
     def test_large_delay_rounds_correctly(self, client: TestClient):
         """630 s = 10.5 min → Python round() (banker's rounding) → 10 min."""
         api_module.get_bus_live.return_value = [
-            ("X2", "Preston", 54.05, -2.80, "Stagecoach", 630),
+            ("X2", "Preston", 54.05, -2.80, "Stagecoach", 630, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["status"] == "Delayed 10 min"
@@ -192,7 +192,7 @@ class TestBusDelayHandling:
     def test_early_bus_reports_early(self, client: TestClient):
         """Negative delay (early) should be treated as 'On time' in the status string."""
         api_module.get_bus_live.return_value = [
-            ("44", "Carnforth", 54.05, -2.80, "Stagecoach", -120),
+            ("44", "Carnforth", 54.05, -2.80, "Stagecoach", -120, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["status"] == "On time"
@@ -201,7 +201,7 @@ class TestBusDelayHandling:
     def test_delay_minutes_rounds_to_one_decimal(self, client: TestClient):
         """delay_minutes should be rounded to 1 decimal place."""
         api_module.get_bus_live.return_value = [
-            ("7", "Fylde", 54.05, -2.80, "Stagecoach", 155),
+            ("7", "Fylde", 54.05, -2.80, "Stagecoach", 155, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
         assert data[0]["delay_minutes"] == round(155 / 60, 1)
