@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import CssBaseline from "@mui/material/CssBaseline";
 import AppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
@@ -10,8 +10,9 @@ import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { Link as RouterLink, useLocation } from "react-router-dom";
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, Contrast, Type } from "lucide-react";
 import ErrorBoundary from "./components/common/ErrorBoundary";
+import { useAccessibility } from "./contexts/AccessibilityContext";
 
 /**
  * Define the outer wrapper for all pages.
@@ -23,11 +24,33 @@ import ErrorBoundary from "./components/common/ErrorBoundary";
 export default function AppLayout({ children }) {
 	const { pathname } = useLocation();
 	const [mode, setMode] = useState("dark");
+	const { highContrast, setHighContrast, fontSize, setFontSize } = useAccessibility();
+
+	// Apply font-size scale to HTML root so rem-based layouts respond
+	const fontSizePx = { normal: 16, large: 18, xlarge: 20 }[fontSize] ?? 16;
+	useEffect(() => {
+		document.documentElement.style.fontSize = `${fontSizePx}px`;
+	}, [fontSizePx]);
+
+	// Sync high-contrast body class for CSS rules that can't be reached by MUI theme
+	useEffect(() => {
+		document.body.classList.toggle('high-contrast', highContrast);
+	}, [highContrast]);
+
+	// Cycle: normal → large → xlarge → normal
+	const cycleFontSize = () => {
+		const next = { normal: 'large', large: 'xlarge', xlarge: 'normal' };
+		setFontSize(next[fontSize] ?? 'normal');
+	};
+
+	const hcPalette = mode === 'dark'
+		? { primary: { main: '#FFD600' }, background: { default: '#000000', paper: '#111111' }, text: { primary: '#FFFFFF', secondary: '#DDDDDD' } }
+		: { primary: { main: '#003399' }, background: { default: '#FFFFFF', paper: '#FFFFFF' }, text: { primary: '#000000', secondary: '#222222' } };
 
 	const theme = createTheme({
 		palette: {
 			mode: mode,
-			...(mode === 'light' ? {
+			...(highContrast ? hcPalette : (mode === 'light' ? {
 				primary: {
 					main: '#6366F1',
 					light: '#818CF8',
@@ -53,9 +76,10 @@ export default function AppLayout({ children }) {
 					default: '#0F172A',
 					paper: '#1E293B',
 				},
-			}),
+			})),
 		},
 		typography: {
+			htmlFontSize: fontSizePx,
 			fontFamily: '"Inter", "Segoe UI", "Roboto", sans-serif',
 			h1: { fontWeight: 700, fontSize: '2.5rem' },
 			h2: { fontWeight: 700, fontSize: '2rem' },
@@ -180,6 +204,29 @@ export default function AppLayout({ children }) {
 									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
 								>
 									{mode === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+								</IconButton>
+								{/* Text scale: cycles normal → large → xlarge */}
+								<IconButton
+									onClick={cycleFontSize}
+									color="inherit"
+									aria-label={`Text size: ${fontSize} (click to change)`}
+									title={`Text size: ${fontSize}`}
+									size="small"
+									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
+								>
+									<Type size={fontSize === 'normal' ? 16 : fontSize === 'large' ? 19 : 22} />
+								</IconButton>
+								{/* High-contrast toggle */}
+								<IconButton
+									onClick={() => setHighContrast(!highContrast)}
+									color={highContrast ? 'primary' : 'inherit'}
+									aria-label={`${highContrast ? 'Disable' : 'Enable'} high contrast`}
+									aria-pressed={highContrast}
+									title={highContrast ? 'Disable high contrast' : 'Enable high contrast'}
+									size="small"
+									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
+								>
+									<Contrast size={20} />
 								</IconButton>
 							</Stack>
 						</Stack>
