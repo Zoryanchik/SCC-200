@@ -619,7 +619,7 @@ export default function HomePage() {
                     transition: 'outline 0.15s',
                   }}
                 >
-                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} />
+                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} fullHeight={routeOptions.length === 1} />
                 </Box>
               </Box>
             ))}
