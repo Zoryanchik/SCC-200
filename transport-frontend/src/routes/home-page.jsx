@@ -100,7 +100,14 @@ function journeyToRouteCard(journey) {
     transfers,
     steps,
     walkMinutes,
-    price: null, // pricing not yet available
+    // Pricing: £2.10 per bus leg (single ticket), train legs are not priced here
+    busLegs: steps.filter((s) => s.type === 'bus').length,
+    price: (() => {
+      const n = steps.filter((s) => s.type === 'bus').length;
+      if (n === 0) return null;
+      const total = (n * 2.10).toFixed(2);
+      return `£${total}`;
+    })(),
   };
 }
 
@@ -136,8 +143,13 @@ export default function HomePage() {
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
-  const [routes, setRoutes] = useState([]);
+  // Array of { card, routeGeometries } — one entry per alternative route
+  const [routeOptions, setRouteOptions] = useState([]);
+  // Index of the card the user has clicked / selected (controls map geometry)
+  const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
   const [showSuggested, setShowSuggested] = useState(false);
+  // Geometry drawn on the map: derived from the selected option
+  const journeyRoute = routeOptions[selectedRouteIdx]?.routeGeometries ?? null;
 
   // ---- Map + live-bus state (merged from map-view-page) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
@@ -468,8 +480,7 @@ export default function HomePage() {
         else if (r && r.type === "location") locations.push(r);
         else stops.push(r);
       }
-      // Limit to 3 stops to keep the dropdown focused
-      return [...strings, ...stops.slice(0, 3), ...locations];
+      return [...strings, ...stops, ...locations];
     };
 
     const fromResults = fromLoading ? [] : buildOptions(fromStopResults);
@@ -479,20 +490,49 @@ export default function HomePage() {
 
   const handleSearch = async () => {
     if (!fromCoords || !toCoords) return;
-    // show the suggested routes overlay when a search starts
     setShowSuggested(true);
     setIsSearching(true);
+    setRouteOptions([]);
+    setSelectedRouteIdx(0);
     try {
-      // Build ISO datetime from user-selected date + clock (local)
       const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
-  // Map UI transportMode -> API mode: 'all' -> 'combined'
-  const apiMode = transportMode === 'all' ? 'combined' : transportMode;
-  const journey = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers, mode: apiMode });
-      const card = journeyToRouteCard(journey);
-      setRoutes(card ? [card] : []);
+      const apiMode = transportMode === 'all' ? 'combined' : transportMode;
+
+      // Generate alternatives by varying transfer limit.
+      // Try 0, 1, 2, 3, and the user's setting (deduplicated, ascending).
+      const transferVariants = [...new Set([0, 1, 2, 3, maxTransfers])].sort((a, b) => a - b);
+
+      const results = await Promise.allSettled(
+        transferVariants.map((t) =>
+          getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers: t, mode: apiMode })
+        )
+      );
+
+      // Build option list, deduplicating by the sequence of leg line names
+      const seen = new Set();
+      const options = [];
+      results.forEach((res, idx) => {
+        if (res.status !== 'fulfilled') return;
+        const journey = res.value;
+        const card = journeyToRouteCard(journey);
+        if (!card) return;
+        // Fingerprint: join of per-leg "mode:line" strings to detect duplicates
+        const fingerprint = (journey.legs || []).map((l) => `${l.mode}:${l.line_name || ''}`).join('|');
+        if (seen.has(fingerprint)) return;
+        seen.add(fingerprint);
+        options.push({
+          id: options.length + 1,
+          card: { ...card, id: options.length + 1 },
+          routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
+          label: idx === 0 ? 'Direct' : `Option ${options.length + 1}`,
+        });
+      });
+
+      setRouteOptions(options);
+      setSelectedRouteIdx(0);
     } catch (error) {
-      console.error("Journey search error:", error);
-      setRoutes([]);
+      console.error('Journey search error:', error);
+      setRouteOptions([]);
     } finally {
       setIsSearching(false);
     }
@@ -512,6 +552,10 @@ export default function HomePage() {
     return favorites.some(
       (fav) => fav.from === selectedFromStop?.code && fav.to === selectedToStop?.code && fav.id === route.id
     );
+  };
+
+  const handleSelectRoute = (idx) => {
+    setSelectedRouteIdx(idx);
   };
 
   const MapFallback = () => (
@@ -536,10 +580,44 @@ export default function HomePage() {
               <Skeleton key={i} height={120} variant="rounded" />
             ))}
           </Stack>
-        ) : routes.length > 0 ? (
+        ) : routeOptions.length > 0 ? (
           <Stack spacing={2}>
-            {routes.map((route) => (
-              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
+            {routeOptions.map((opt, idx) => (
+              <Box
+                key={opt.id}
+                onClick={() => handleSelectRoute(idx)}
+                sx={{ cursor: 'pointer' }}
+              >
+                {/* Option label + selected indicator */}
+                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+                  <Box
+                    sx={{
+                      width: 22, height: 22, borderRadius: '50%',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 12, fontWeight: 700,
+                      backgroundColor: idx === selectedRouteIdx ? 'primary.main' : 'grey.300',
+                      color: idx === selectedRouteIdx ? 'white' : 'text.secondary',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {idx + 1}
+                  </Box>
+                  <Typography variant="caption" fontWeight={700} color={idx === selectedRouteIdx ? 'primary.main' : 'text.secondary'}>
+                    {opt.label}
+                    {idx === selectedRouteIdx ? ' — shown on map' : ''}
+                  </Typography>
+                </Stack>
+                <Box
+                  sx={{
+                    outline: idx === selectedRouteIdx ? '2px solid' : '1px solid',
+                    outlineColor: idx === selectedRouteIdx ? 'primary.main' : 'divider',
+                    borderRadius: 2,
+                    transition: 'outline 0.15s',
+                  }}
+                >
+                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} />
+                </Box>
+              </Box>
             ))}
           </Stack>
         ) : (
@@ -1012,6 +1090,7 @@ export default function HomePage() {
             onMoveEnd={handleMoveEnd}
             sideContent={suggestedRoutesPanel}
             showSideOverlay={showSuggested}
+            journeyRoute={journeyRoute}
           />
         </Suspense>
       </Paper>
