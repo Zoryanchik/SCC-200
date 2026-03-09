@@ -2060,15 +2060,11 @@ def format_route_text(route_result, merged):
                 j_dest = info.get("journey_destination", "")
                 board_dep = info.get("board_departure")
 
-                # Look up live delay for bus legs so we can display
-                # both scheduled and real-time departure.
-                # board_dep already contains delay (from the delay-
-                # adjusted router), so:
-                #   scheduled = board_dep - delay_s
-                #   realtime  = board_dep
-                delay_s = None
-                if transport == "bus" and line_name:
-                    delay_s = _get_live_delay_for_line(line_name)
+                # Use the same per-journey delay that the delay-
+                # adjusted router applied so we can recover the
+                # original scheduled time exactly.
+                j_id = info.get("journey")
+                delay_s = _journey_delay_map.get(j_id) if j_id is not None else None
 
                 desc_parts = []
                 if transport:
@@ -2322,17 +2318,15 @@ def build_journey_plan_response(route_result, merged, stop_coords):
             board_dep = curr_info.get("board_departure")
             arr_secs = curr_info["arrival_time"]
 
-            # ── Real-time delay annotation for bus legs ──────────
-            # When the router was built with apply_delay=True the
-            # journey_times were shifted by the per-journey delay,
-            # so board_dep and arr_secs already include the delay.
-            # To avoid double-counting we derive:
-            #   scheduled = raw_value - delay   (original timetable)
-            #   realtime  = raw_value           (already shifted)
-            if transport == "bus" and line_name:
-                delay_s = _get_live_delay_for_line(line_name)
-            else:
-                delay_s = None
+            # ── Real-time delay annotation ───────────────────────
+            # The router was built with apply_delay=True so
+            # board_dep and arr_secs already include the per-journey
+            # delay from _journey_delay_map.  To recover the correct
+            # scheduled vs realtime split we must use the SAME delay
+            # value that was applied (per-journey), NOT a line-level
+            # median which may differ.
+            j_id = curr_info.get("journey")
+            delay_s = _journey_delay_map.get(j_id) if j_id is not None else None
 
             if delay_s is not None and delay_s != 0:
                 # Scheduled = undo the shift that the delay-adjusted
