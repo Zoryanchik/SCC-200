@@ -158,9 +158,16 @@ class BusLoader:
             return False
 
         print(f"  {len(changed)} dataset(s) changed — reloading...")
+        loaded, failed = 0, 0
         for ds in changed:
-            self.download_and_load(ds['download_url'])
-            # save the new timestamp
+            tag = ds['source_url'].rstrip('/').split('/')[-1]
+            try:
+                self.download_and_load(ds['download_url'], tag=tag)
+            except Exception as exc:
+                failed += 1
+                print(f"  ⚠ Failed to download/load {tag} ({ds['download_url']}): {exc}")
+                continue  # skip meta update so it's retried next startup
+            # save the new timestamp only on success
             conn = self._connect(self.db_path)
             cur = conn.cursor()
             cur.execute(
@@ -170,9 +177,12 @@ class BusLoader:
             )
             conn.commit()
             conn.close()
+            loaded += 1
 
-        print(f"  ✓ Reloaded {len(changed)} dataset(s)")
-        return True
+        if failed:
+            print(f"  ⚠ {failed} dataset(s) failed — will retry next startup")
+        print(f"  ✓ Reloaded {loaded}/{len(changed)} dataset(s)")
+        return loaded > 0
 
     def ensure_db( self ):
         # Create the database file if it doesn't exist
