@@ -174,6 +174,18 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/alerts")
+async def get_alerts():
+    """Return active service disruption alerts.
+
+    Currently returns an empty list — a real implementation would query
+    a live feed (e.g. Traveline or Bods Disruptions API) and cache the
+    results.  The response shape is intentionally stable so the frontend
+    ``fetchServiceAlerts()`` hook can use it without changes.
+    """
+    return []
+
+
 @app.get("/status")
 async def status():
     """Return background precompute status (walking)."""
