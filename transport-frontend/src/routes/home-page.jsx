@@ -520,8 +520,8 @@ export default function HomePage() {
 
   // Build the suggested routes panel so it can be injected into the map side column
   const suggestedRoutesPanel = (
-    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050 }}>
-      <Stack spacing={2}>
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050, height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <Stack spacing={2} sx={{ flex: '0 0 auto' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 1051 }}>
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
@@ -530,6 +530,10 @@ export default function HomePage() {
             <X size={14} />
           </IconButton>
         </Box>
+      </Stack>
+
+      {/* Make the list area scrollable and fill remaining height */}
+      <Box sx={{ flex: '1 1 auto', overflowY: 'auto', pr: 1, mt: 1 }}>
         {isSearching ? (
           <Stack spacing={2}>
             {[1, 2, 3].map((i) => (
@@ -539,7 +543,7 @@ export default function HomePage() {
         ) : routes.length > 0 ? (
           <Stack spacing={2}>
             {routes.map((route) => (
-              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} />
+              <RouteCard key={route.id} route={route} onSave={handleSaveRoute} isSaved={isFavorited(route)} fullHeight={routes.length === 1} />
             ))}
           </Stack>
         ) : (
@@ -547,7 +551,7 @@ export default function HomePage() {
             No routes found. Try adjusting your search.
           </Typography>
         )}
-      </Stack>
+      </Box>
     </Paper>
   );
 

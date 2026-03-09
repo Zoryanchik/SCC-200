@@ -422,6 +422,7 @@ export default function MapViewMap({
 						position: 'absolute',
 						top: 16,
 						right: 16,
+						bottom: 16,
 						// Keep the suggested routes under the AppBar header
 						zIndex: 1050,
 						display: { xs: 'none', md: 'block' },
