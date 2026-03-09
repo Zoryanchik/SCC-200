@@ -54,6 +54,10 @@ class BusLoader:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+        # Local import to avoid adding a top-level dependency name clash
+        import urllib.error as _ue
+        import urllib.request as _ur
+
         sources = [
             'https://transport.scc.lancs.ac.uk/bus/times/ARCT',
             'https://transport.scc.lancs.ac.uk/bus/times/BLAC',
@@ -69,8 +73,21 @@ class BusLoader:
 
         datasets = []
         for src in sources:
-            resp = urllib.request.urlopen(src, context=ctx)
-            data = json.loads(resp.read())
+            try:
+                resp = _ur.urlopen(src, context=ctx)
+            except _ue.HTTPError as he:
+                # Treat HTTP errors (403/401 etc) as non-fatal for startup —
+                # warn and skip this source so initialization can continue.
+                print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
+                continue
+            except _ue.URLError as ue:
+                print(f"  [bus] ⚠ Skipping source {src}: URL error {ue}")
+                continue
+            try:
+                data = json.loads(resp.read())
+            except Exception as e:
+                print(f"  [bus] ⚠ Failed to parse JSON from {src}: {e}")
+                continue
             results = data.get('results', [])
             if not results:
                 continue
@@ -84,8 +101,19 @@ class BusLoader:
                 })
 
         for src, desc in desc_sources:
-            resp = urllib.request.urlopen(src, context=ctx)
-            data = json.loads(resp.read())
+            try:
+                resp = _ur.urlopen(src, context=ctx)
+            except _ue.HTTPError as he:
+                print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
+                continue
+            except _ue.URLError as ue:
+                print(f"  [bus] ⚠ Skipping source {src}: URL error {ue}")
+                continue
+            try:
+                data = json.loads(resp.read())
+            except Exception as e:
+                print(f"  [bus] ⚠ Failed to parse JSON from {src}: {e}")
+                continue
             results = data.get('results', [])
             matched = [r for r in results if r.get('description') == desc]
             if not matched:

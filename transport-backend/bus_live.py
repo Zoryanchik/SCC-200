@@ -1,6 +1,8 @@
 ﻿import re
 import ssl
 import urllib.request
+import socket
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Tuple, Iterable, Optional
@@ -116,6 +118,18 @@ class BusLive:
 
         for url in urls_to_use:
             try:
+                # Quick pre-check: skip feeds whose host/port cannot be reached
+                try:
+                    u = urlparse(url)
+                    host = u.hostname
+                    port = u.port or (443 if u.scheme == 'https' else 80)
+                    # short timeout for pre-check to avoid blocking startup
+                    conn = socket.create_connection((host, port), timeout=2)
+                    conn.close()
+                except Exception:
+                    # skip unreachable feed URL
+                    continue
+
                 root = self._fetch_xml(url)
             except Exception:
                 # ignore failures for individual feeds
