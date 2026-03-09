@@ -595,13 +595,51 @@ async def search_stops(
                     def _norm(s: str) -> str:
                         if not s:
                             return ""
+                        # Remove punctuation, collapse spaces and lowercase
                         t = _re.sub(r"[^0-9a-zA-Z ]+", " ", s)
                         t = _re.sub(r"\s+", " ", t).strip().lower()
-                        return t
+                        # Canonicalise common street tokens so variations like
+                        # 'Street' vs 'St' or 'Road' vs 'Rd' match consistently
+                        token_map = {
+                            'street': 'st', 'st': 'st',
+                            'road': 'rd', 'rd': 'rd',
+                            'avenue': 'ave', 'ave': 'ave',
+                            'lane': 'ln', 'ln': 'ln',
+                            'drive': 'dr', 'dr': 'dr',
+                            'boulevard': 'blvd', 'blvd': 'blvd',
+                            'court': 'ct', 'ct': 'ct',
+                            'crescent': 'cres', 'cres': 'cres',
+                        }
+                        parts = [p for p in t.split(" ") if p]
+                        norm_parts = []
+                        for p in parts:
+                            if p in token_map:
+                                norm_parts.append(token_map[p])
+                            else:
+                                # Strip trailing dots (e.g. 'St.' → 'st')
+                                p2 = p.rstrip('.')
+                                if p2 in token_map:
+                                    norm_parts.append(token_map[p2])
+                                else:
+                                    norm_parts.append(p)
+                        return " ".join(norm_parts)
 
                     norm_q = _norm(q)
                     if " " in q:
-                        name_guess_raw = q.rsplit(" ", 1)[0].strip()
+                        # If the final token looks like a street (e.g. "Street", "St",
+                        # "Road") then don't treat it as a town — keep the full
+                        # query as the name guess. This prevents queries like
+                        # "Abingdon Street" being split into name="Abingdon",
+                        # town="Street" which would incorrectly bias town
+                        # matching.
+                        tail = q.rsplit(" ", 1)[1].strip()
+                        try:
+                            if _looks_like_street(tail):
+                                name_guess_raw = q
+                            else:
+                                name_guess_raw = q.rsplit(" ", 1)[0].strip()
+                        except Exception:
+                            name_guess_raw = q.rsplit(" ", 1)[0].strip()
                     else:
                         name_guess_raw = q
                     norm_name_guess = _norm(name_guess_raw)
@@ -615,7 +653,14 @@ async def search_stops(
                         parts = q.rsplit(" ", 1)
                         name_guess = parts[0].strip()
                         town_guess = parts[1].strip()
-                        if name_guess and town_guess:
+                        # Only treat the trailing token as a town if it
+                        # doesn't look like a street/address (e.g. 'St',
+                        # 'Street', 'Road'). If it looks like a street then
+                        # skip town-specific matching.
+                        if not name_guess or not town_guess or _looks_like_street(town_guess):
+                            name_guess = None
+                            town_guess = None
+                        else:
                             try:
                                 cur.execute(
                                     "SELECT atco_code, name, town, lat, lon FROM stop_coords "
