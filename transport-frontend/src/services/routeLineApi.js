@@ -96,10 +96,23 @@ export async function fetchRouteLine(line) {
  * @returns {Promise<{ line: string, variants: Array }>}
  */
 export async function fetchRouteLineWithFallback(line) {
+  // Try the real backend but don't block the UI forever — use a 5s
+  // timeout. Only after the timeout or an explicit network failure do
+  // we fall back to the mock data. This avoids instant fallback that
+  // masks transient backend availability during startup.
+  const controller = new AbortController();
+  const timeoutMs = 5000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchRouteLine(line);
+    const res = await fetch(`${API_BASE}/routes/line/${encodeURIComponent(line)}`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
   } catch (err) {
-    console.warn(`Route line API unavailable for "${line}", using mock data:`, err.message);
+    // If fetch failed or timed out, fall back to mock data but log the cause.
+    const msg = err && err.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err && err.message) ? err.message : String(err);
+    // eslint-disable-next-line no-console
+    console.warn(`Route line API unavailable for "${line}" (${msg}), using mock data`);
     return MOCK_ROUTES[line] ?? { line, variants: [] };
   }
 }

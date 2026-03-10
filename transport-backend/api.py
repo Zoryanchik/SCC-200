@@ -1783,6 +1783,56 @@ async def routes_for_line(line: str):
             unique = unique[:3]
 
     result = {"line": line, "variants": unique}
+    # Attach stored route tracks (if present) as a 'geometry' field so
+    # frontend consumers (RouteLineLayer) can draw road-following polylines
+    # immediately instead of straight stop-to-stop lines. Use the existing
+    # helper _fetch_route_tracks which returns [[lat, lon], ...].
+    try:
+        osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+        for v in result.get('variants', []):
+            rid = v.get('route_id')
+            if not rid:
+                continue
+            try:
+                # 1) prefer stored route tracks
+                tracks = _fetch_route_tracks(rid)
+                if tracks and isinstance(tracks, list) and len(tracks) >= 2:
+                    v['geometry'] = tracks
+                    v['geometry_source'] = 'track'
+                    continue
+
+                # 2) if no stored tracks, attempt OSRM reconstruction from the
+                #    variant's stop sequence (if present). This yields a road-
+                #    following geometry that the frontend can render immediately.
+                stops = v.get('stops') or []
+                coords_lonlat = []
+                for s in stops:
+                    lat = s.get('lat')
+                    lon = s.get('lon')
+                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                        coords_lonlat.append(f"{lon},{lat}")
+                # dedupe while preserving order
+                seen = set()
+                dedup = []
+                for s in coords_lonlat:
+                    if s not in seen:
+                        seen.add(s)
+                        dedup.append(s)
+                if len(dedup) >= 2:
+                    try:
+                        coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
+                        if coords_from_osrm and len(coords_from_osrm) >= 2:
+                            v['geometry'] = coords_from_osrm
+                            v['geometry_source'] = 'osrm'
+                    except Exception:
+                        # ignore per-variant OSRM failures
+                        pass
+            except Exception:
+                # ignore per-variant failures — don't break the whole response
+                continue
+    except Exception:
+        # defensive: if anything goes wrong attaching geometries, ignore
+        pass
     # Only cache positive results. Caching empty variant lists can cause
     # stale-empty responses when the router/atco caches are built later
     # (for example shortly after server start). Allow empty results to be
