@@ -210,7 +210,7 @@ export const useBusArrivals = (stopCode, refreshInterval = 20000) => {
 /**
  * Hook for searching stops
  */
-export const useStopSearch = (query, debounceDelay = 500) => {
+export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -228,7 +228,61 @@ export const useStopSearch = (query, debounceDelay = 500) => {
           () => searchStops(query),
           { retries: 1, baseDelay: 400 }
         );
-        setResults(result);
+        // Normalize coordinate fields (support lat/lon or latitude/longitude)
+        let normalized = Array.isArray(result) ? result.map((r) => {
+          if (!r || typeof r !== 'object') return r;
+          const lat = (typeof r.lat === 'number') ? r.lat : (typeof r.latitude === 'number' ? r.latitude : undefined);
+          const lon = (typeof r.lon === 'number') ? r.lon : (typeof r.longitude === 'number' ? r.longitude : undefined);
+          return { ...r, lat, lon };
+        }) : result;
+
+        // Filter out stop-type results that lack numeric coordinates: those
+        // can't be used for map-centred actions (flyTo) so we don't surface
+        // them in the autocomplete prompts.
+        let filteredResult = normalized;
+        try {
+          filteredResult = (filteredResult || []).filter((r) => {
+            if (!r) return false;
+            if (r.type === 'stop') {
+              // require numeric lat/lon for stop suggestions
+              return typeof r.lat === 'number' && typeof r.lon === 'number';
+            }
+            return true;
+          });
+        } catch (e) {
+          // if filtering fails, fall back to original normalized list
+          filteredResult = normalized;
+        }
+
+        // If a map centre is provided, keep stop-type results first
+        // (they come from the backend) and sort location-type results
+        // by proximity to the map centre so autocomplete prompts favour
+        // nearby POIs.
+        if (mapCenter && Array.isArray(filteredResult) && filteredResult.length > 0) {
+          try {
+            const { lat: cLat, lon: cLon } = mapCenter;
+            const haversine = (la, lo) => {
+              if (typeof la !== 'number' || typeof lo !== 'number') return Number.POSITIVE_INFINITY;
+              const toRad = (v) => (v * Math.PI) / 180;
+              const R = 6371000; // metres
+              const dLat = toRad(la - cLat);
+              const dLon = toRad(lo - cLon);
+              const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(cLat)) * Math.cos(toRad(la)) * Math.sin(dLon / 2) ** 2;
+              const d = 2 * R * Math.asin(Math.sqrt(a));
+              return d;
+            };
+            let stops = filteredResult.filter((r) => r && r.type === 'stop');
+            const locs = filteredResult.filter((r) => r && r.type === 'location');
+            // Sort both stops and locations by proximity to map center
+            stops.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
+            locs.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
+            setResults([...stops, ...locs]);
+          } catch (e) {
+            setResults(filteredResult);
+          }
+        } else {
+          setResults(filteredResult);
+        }
         setError(null);
       } catch (err) {
         setError(err);

@@ -174,6 +174,35 @@ export default function HomePage() {
     'COSY': 'No Transfer Within Same Mode',
     'LAZY': 'Shorter Walks — Fewer Transfers',
   };
+  // Colour map used for label chips — keep in sync with the chip rendering
+  const LABEL_COLORS = {
+    'E·A': '#FFF8E1',
+    'E·D': '#E0BBE4',
+    'FASTEST': '#87CEEB',
+    'ECO': '#C6F6D5',
+    'GREEDY': '#FF7F50',
+    'COSY': '#9DC183',
+    'LAZY': '#FFF59D',
+  };
+
+  const _hexToRgb = (hex) => {
+    if (!hex) return null;
+    const h = hex.replace('#', '');
+    if (h.length === 3) {
+      return [parseInt(h[0] + h[0], 16), parseInt(h[1] + h[1], 16), parseInt(h[2] + h[2], 16)];
+    }
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  };
+
+  // Pick white or black text depending on background luminance for legibility
+  const textColorForBg = (hex) => {
+    const rgb = _hexToRgb(hex || '#000000');
+    if (!rgb) return '#000000';
+    const [r, g, b] = rgb.map((v) => v / 255);
+    // Perceived luminance formula
+    const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return L > 0.65 ? '#000000' : '#ffffff';
+  };
   const [fromLocation, setFromLocation] = useState("");
   const [toLocation, setToLocation] = useState("");
   const [selectedFromStop, setSelectedFromStop] = useState(null);
@@ -191,8 +220,20 @@ export default function HomePage() {
   // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
   const [transportMode, setTransportMode] = useState('all');
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
-  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 800);
-  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 800);
+  // ---- Map + live-bus state (needed for stop search proximity) ----
+  const [markers, setMarkers] = useState(MOCK_MARKERS);
+  const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
+  const [openPopupId, setOpenPopupId] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [geoError, setGeoError] = useState(null);
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationStatus, setLocationStatus] = useState('idle');
+  const [locationError, setLocationError] = useState(null);
+  const [autoLocated, setAutoLocated] = useState(false);
+  
+  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 800, mapCenter);
+  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 800, mapCenter);
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
@@ -208,17 +249,7 @@ export default function HomePage() {
   // State for showing router/label details when a label chip is clicked
   const [labelDetail, setLabelDetail] = useState({ open: false, label: '', content: null });
 
-  // ---- Map + live-bus state (merged from map-view-page) ----
-  const [markers, setMarkers] = useState(MOCK_MARKERS);
-  const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
-  const [openPopupId, setOpenPopupId] = useState(null);
-  const [mapInstance, setMapInstance] = useState(null);
-  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
-  const [geoError, setGeoError] = useState(null);
-  const [userLocation, setUserLocation] = useState(null);
-  const [locationStatus, setLocationStatus] = useState('idle');
-  const [locationError, setLocationError] = useState(null);
-  const [autoLocated, setAutoLocated] = useState(false);
+  
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
   const handleMoveEnd = useCallback(({ lat, lon }) => {
@@ -876,8 +907,21 @@ export default function HomePage() {
         }
       }
 
+      // Filter out placeholder/no-route cards (routers that returned no route)
+      const hasSteps = (o) => o && o.card && Array.isArray(o.card.steps) && o.card.steps.length > 0;
+      const displayOptions = options.filter(hasSteps);
+
+      // If none of the routers returned an actual route, show the single "No routes found" message
+      // by clearing routeOptions (the JSX below already shows a message when routeOptions.length === 0).
+      if (displayOptions.length === 0) {
+        setRouteOptions([]);
+        setSelectedRouteIdx(0);
+        setIsSearching(false);
+        return;
+      }
+
       // Show routes ordered by the number of labels (more labels first), then by fastest totalSeconds
-      const sortedOptions = options.slice().sort((a, b) => {
+      const sortedOptions = displayOptions.slice().sort((a, b) => {
         const la = Array.isArray(a.labels) ? a.labels.length : (a.label ? 1 : 0);
         const lb = Array.isArray(b.labels) ? b.labels.length : (b.label ? 1 : 0);
         if (lb !== la) return lb - la;
@@ -942,9 +986,24 @@ export default function HomePage() {
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
           </Typography>
-          <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
-            <X size={14} />
-          </IconButton>
+          <Button
+            size="small"
+            variant="contained"
+            onClick={() => setShowSuggested(false)}
+            aria-label="Close suggested routes"
+            startIcon={<X size={16} />}
+            sx={{
+              textTransform: 'none',
+              fontWeight: 700,
+              backgroundColor: '#00BCD4',
+              color: '#ffffff',
+              '&:hover': {
+                backgroundColor: '#00acc1',
+              },
+            }}
+          >
+            Close
+          </Button>
         </Box>
       </Stack>
 
@@ -1608,13 +1667,27 @@ export default function HomePage() {
         anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
         transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         disableRestoreFocus
-        PaperProps={{ elevation: 0, sx: { backgroundColor: '#00BCD4', boxShadow: 'none', border: 'none', borderRadius: '10px' } }}
+        PaperProps={{
+          elevation: 0,
+          sx: (() => {
+            const lab = String(labelDetail.label || '').toUpperCase();
+            const bg = LABEL_COLORS[lab] || '#00BCD4';
+            return { backgroundColor: bg, boxShadow: 'none', border: 'none', borderRadius: '10px' };
+          })(),
+        }}
       >
-        <Box sx={{ p: '8px 12px', minWidth: 140, backgroundColor: 'transparent', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
-          <Typography variant="body2" sx={{ color: 'white', fontWeight: 700 }}>
-            {LABEL_DESCRIPTIONS[String(labelDetail.label || '').toUpperCase()] || String(labelDetail.label || '').toUpperCase()}
-          </Typography>
-        </Box>
+        {(() => {
+          const lab = String(labelDetail.label || '').toUpperCase();
+          const bg = LABEL_COLORS[lab] || '#00BCD4';
+          const fg = textColorForBg(bg);
+          return (
+            <Box sx={{ p: '8px 12px', minWidth: 140, backgroundColor: 'transparent', color: fg, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+              <Typography variant="body2" sx={{ color: fg, fontWeight: 700 }}>
+                {LABEL_DESCRIPTIONS[lab] || lab}
+              </Typography>
+            </Box>
+          );
+        })()}
       </Popover>
     </>
   );
