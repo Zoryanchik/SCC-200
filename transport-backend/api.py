@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Nominatim rate-limiting: ensure we do at most 1 request per second
+NOMINATIM_LOCK = threading.Lock()
+_NOMINATIM_LAST_CALL = 0.0
+_NOMINATIM_MIN_INTERVAL = 1.0
+
 
 # Routing request/response models
 class RouteRequest(BaseModel):
@@ -456,7 +461,21 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
     # virtualenvs and containers. Do not disable verification.
     import requests
     headers = {"User-Agent": "transport-backend/1.0"}
-    resp = requests.get(url, headers=headers, timeout=5)
+
+    # Rate-limit access to Nominatim to 1 request per second. We acquire
+    # a module-level lock and sleep as necessary before making the call.
+    # The HTTP request is performed while holding the lock so concurrent
+    # callers are serialized and spacing between requests is preserved.
+    global _NOMINATIM_LAST_CALL
+    with NOMINATIM_LOCK:
+        now = time.monotonic()
+        elapsed = now - _NOMINATIM_LAST_CALL
+        wait = _NOMINATIM_MIN_INTERVAL - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        # mark last call timestamp immediately before the request
+        _NOMINATIM_LAST_CALL = time.monotonic()
+        resp = requests.get(url, headers=headers, timeout=5)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -2959,12 +2978,25 @@ async def compare_routers(request: JourneyPlanRequest):
         merged, main_router, walking = get_router_for_date(
             date_str, start_time=start_seconds)
 
-        # Lazy construct ECO router around the same merged data
+        # Lazily construct optional routers (eco, lazy, greedy).
+        eco_router = None
+        lazy_router = None
+        greedy_router = None
         try:
             from eco_router import RaptorRouter as EcoRaptor
             eco_router = EcoRaptor(merged)
         except Exception:
             eco_router = None
+        try:
+            from lazy_router import RaptorRouter as LazyRaptor
+            lazy_router = LazyRaptor(merged)
+        except Exception:
+            lazy_router = None
+        try:
+            from greedy_router import RaptorRouter as GreedyRaptor
+            greedy_router = GreedyRaptor(merged)
+        except Exception:
+            greedy_router = None
 
         # Helper wrapper to call router.route with timing
         def _run_router(rtr):
@@ -2981,32 +3013,57 @@ async def compare_routers(request: JourneyPlanRequest):
             t1 = _t.time()
             return res, (t1 - t0)
 
-        # Run both routers in parallel threads (Eco optional)
-        tasks = [asyncio.to_thread(_run_router, main_router)]
+        # Run routers in parallel threads. Build a list of (name, router)
+        routers = [("main", main_router)]
         if eco_router is not None:
-            tasks.append(asyncio.to_thread(_run_router, eco_router))
+            routers.append(("eco", eco_router))
+        if lazy_router is not None:
+            routers.append(("lazy", lazy_router))
+        if greedy_router is not None:
+            routers.append(("greedy", greedy_router))
 
+        tasks = [asyncio.to_thread(_run_router, rtr) for (_name, rtr) in routers]
         results = await asyncio.gather(*tasks)
 
-        main_res, main_time = results[0]
-        eco_res = None
-        eco_time = None
-        if len(results) > 1:
-            eco_res, eco_time = results[1]
+        # Map names to (result, time)
+        router_results = {}
+        for (name, _), (res, timing) in zip(routers, results):
+            router_results[name] = (res, timing)
+
+        main_res, main_time = router_results.get("main", (None, None))
+        eco_res, eco_time = router_results.get("eco", (None, None))
+        lazy_res, lazy_time = router_results.get("lazy", (None, None))
+        greedy_res, greedy_time = router_results.get("greedy", (None, None))
 
         stop_coords = getattr(walking, "_coords", {})
+
+        # Build full journey-plan responses (same shape as /journey/plan)
+        main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds) if main_res is not None else None
+        eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds) if eco_res is not None else None
+        lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds) if lazy_res is not None else None
+        greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds) if greedy_res is not None else None
 
         return {
             "success": True,
             "main": {
-                "route": _sanitize_route(main_res),
-                "route_text": format_route_text(main_res, merged),
+                "route": main_plan,
+                "route_text": format_route_text(main_res, merged) if main_res is not None else None,
                 "time_seconds": main_time,
             },
             "eco": {
-                "route": _sanitize_route(eco_res) if eco_res is not None else None,
+                "route": eco_plan,
                 "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
                 "time_seconds": eco_time,
+            },
+            "lazy": {
+                "route": lazy_plan,
+                "route_text": format_route_text(lazy_res, merged) if lazy_res is not None else None,
+                "time_seconds": lazy_time,
+            },
+            "greedy": {
+                "route": greedy_plan,
+                "route_text": format_route_text(greedy_res, merged) if greedy_res is not None else None,
+                "time_seconds": greedy_time,
             },
         }
     except Exception as exc:

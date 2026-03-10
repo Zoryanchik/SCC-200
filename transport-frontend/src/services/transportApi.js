@@ -25,6 +25,72 @@ const normalizeDateTime = (input) => {
   return { date, time };
 };
 
+// Augment a backend journey-plan response with user-friendly display fields
+// (departure_time_with_offset, arrival_time_with_offset, realtime_*/scheduled_* with offsets,
+// and ISO datetimes). This mirrors the augmentation done in getJourneyPlans so
+// compareRouters responses are consumable by the UI.
+const _makeWithOffset = (timeStr, dayOffset) => {
+  if (!timeStr) return null;
+  const offset = Number.isFinite(dayOffset) && dayOffset > 0 ? ` (+${dayOffset}d)` : "";
+  return `${timeStr}${offset}`;
+};
+
+const augmentJourneyResponse = (resp, requestDate) => {
+  if (!resp || !Array.isArray(resp.legs)) return resp;
+  try {
+    resp.legs = (resp.legs || []).map((leg) => {
+      const copy = { ...leg };
+
+      copy.departure_time_with_offset = _makeWithOffset(copy.departure_time, copy.departure_day_offset);
+      copy.arrival_time_with_offset = _makeWithOffset(copy.arrival_time, copy.arrival_day_offset);
+
+      if (copy.realtime_departure_time) {
+        copy.realtime_departure_time_with_offset = _makeWithOffset(copy.realtime_departure_time, copy.departure_day_offset);
+      }
+      if (copy.realtime_arrival_time) {
+        copy.realtime_arrival_time_with_offset = _makeWithOffset(copy.realtime_arrival_time, copy.arrival_day_offset);
+      }
+
+      // ISO datetimes
+      if (copy.arrival_time) {
+        try {
+          const [h, m, s] = copy.arrival_time.split(':').map((n) => parseInt(n, 10));
+          if (!Number.isNaN(h) && !Number.isNaN(m) && !Number.isNaN(s)) {
+            const dt = new Date(`${requestDate}T${copy.arrival_time}Z`);
+            if (copy.arrival_day_offset && Number.isFinite(copy.arrival_day_offset) && copy.arrival_day_offset > 0) {
+              dt.setUTCDate(dt.getUTCDate() + copy.arrival_day_offset);
+            }
+            copy.arrival_datetime_iso = dt.toISOString();
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+      if (copy.departure_time) {
+        try {
+          const dt2 = new Date(`${requestDate}T${copy.departure_time}Z`);
+          if (copy.departure_day_offset && Number.isFinite(copy.departure_day_offset) && copy.departure_day_offset > 0) {
+            dt2.setUTCDate(dt2.getUTCDate() + copy.departure_day_offset);
+          }
+          copy.departure_datetime_iso = dt2.toISOString();
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      // Normalise mode -> type for UI compatibility
+      if (copy.mode !== undefined && copy.type === undefined) {
+        copy.type = copy.mode === 'walking' ? 'walk' : copy.mode;
+      }
+
+      return copy;
+    });
+  } catch (e) {
+    // ignore augmentation failures
+  }
+  return resp;
+};
+
 /**
  * Fetch bus times for a specific stop
  * @param {string} stopCode - The stop code (e.g., '2800S12345')
@@ -176,6 +242,26 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
       throw new Error(`HTTP error! status: ${response.status}`);
     }
     const responseJson = await response.json();
+    // Optionally preserve the raw backend response for debugging
+    if (options.includeRaw) {
+      try {
+        // Prefer structuredClone when available because it's safer and
+        // won't invoke toJSON/getters in the same way as JSON.stringify.
+        if (typeof structuredClone === 'function') {
+          responseJson._raw = structuredClone(responseJson);
+        } else {
+          responseJson._raw = JSON.parse(JSON.stringify(responseJson));
+        }
+      } catch (e) {
+        // Fall back to a shallow copy if deep cloning fails (avoids
+        // attempting to access problematic getters that may throw).
+        try {
+          responseJson._raw = Array.isArray(responseJson) ? responseJson.slice() : Object.assign({}, responseJson);
+        } catch (e2) {
+          responseJson._raw = null;
+        }
+      }
+    }
     // Ensure that legs, meta, and routeGeometrics !== null | undefined
     responseJson.legs ??= [];
     responseJson.meta ??= {};
@@ -260,9 +346,56 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
       console.warn('Failed to augment journey legs with day-offset display fields', e);
     }
 
-    return responseJson;
+  return responseJson;
   } catch (error) {
     console.error('Error getting journey plans:', error);
+    throw error;
+  }
+};
+
+/**
+ * Compare multiple router implementations (main, eco, lazy, greedy)
+ * Returns an object with keys 'main','eco','lazy','greedy' each containing
+ * the same journey-plan response shape as /journey/plan.
+ */
+export const compareRouters = async (fromStop, toStop, departureTime, options = {}) => {
+  try {
+    const from = normalizeStopLocation(fromStop);
+    const to = normalizeStopLocation(toStop);
+    if (!from || !to) {
+      throw new Error('fromStop and toStop must include lat/lon');
+    }
+    const { date, time } = normalizeDateTime(departureTime);
+    const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 3;
+    const mode = typeof options.mode === 'string' ? options.mode : 'combined';
+    const response = await fetch(
+      `${API_BASE_URL}/journey/compare`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromStop: from, toStop: to, departureTime: time, date, maxTransfers, mode }),
+      }
+    );
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    const responseJson = await response.json();
+    if (options.includeRaw) {
+      try {
+        if (typeof structuredClone === 'function') {
+          responseJson._raw = structuredClone(responseJson);
+        } else {
+          responseJson._raw = JSON.parse(JSON.stringify(responseJson));
+        }
+      } catch (e) {
+        try {
+          responseJson._raw = Array.isArray(responseJson) ? responseJson.slice() : Object.assign({}, responseJson);
+        } catch (e2) {
+          responseJson._raw = null;
+        }
+      }
+    }
+    return responseJson;
+  } catch (error) {
+    console.error('Error comparing routers:', error);
     throw error;
   }
 };

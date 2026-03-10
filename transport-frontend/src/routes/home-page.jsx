@@ -16,7 +16,7 @@ import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Crosshair, Train, Heart, X } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
-import { getJourneyPlans } from "../services/transportApi";
+import { getJourneyPlans, compareRouters } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 import WeatherWidget from "../components/common/WeatherWidget";
@@ -53,13 +53,14 @@ function journeyToRouteCard(journey) {
       journey_origin: leg.journey_origin || null,
       journey_destination: leg.journey_destination || null,
       // keep original times for the time display row in RouteCard
-      departure_time_with_offset: leg.departure_time_with_offset ?? null,
-      arrival_time_with_offset: leg.arrival_time_with_offset ?? null,
+      // Prefer the _with_offset display fields, but fall back to raw times
+      departure_time_with_offset: leg.departure_time_with_offset ?? leg.departure_time ?? null,
+      arrival_time_with_offset: leg.arrival_time_with_offset ?? leg.arrival_time ?? null,
       // Real-time delay info for bus/train legs
-      scheduled_departure_time: leg.scheduled_departure_time ?? null,
-      scheduled_arrival_time: leg.scheduled_arrival_time ?? null,
-      realtime_departure_time_with_offset: leg.realtime_departure_time_with_offset ?? null,
-      realtime_arrival_time_with_offset: leg.realtime_arrival_time_with_offset ?? null,
+      scheduled_departure_time: leg.scheduled_departure_time ?? leg.departure_time ?? null,
+      scheduled_arrival_time: leg.scheduled_arrival_time ?? leg.arrival_time ?? null,
+      realtime_departure_time_with_offset: leg.realtime_departure_time_with_offset ?? leg.realtime_departure_time ?? null,
+      realtime_arrival_time_with_offset: leg.realtime_arrival_time_with_offset ?? leg.realtime_arrival_time ?? null,
       delay_seconds: leg.delay_seconds ?? null,
       status: leg.status ?? null,
     };
@@ -142,6 +143,7 @@ export default function HomePage() {
   // Index of the card the user has clicked / selected (controls map geometry)
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
   const [showSuggested, setShowSuggested] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
   // Geometry drawn on the map: derived from the selected option
   const journeyRoute = routeOptions[selectedRouteIdx]?.routeGeometries ?? null;
 
@@ -509,35 +511,83 @@ export default function HomePage() {
       const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
       const apiMode = transportMode === 'all' ? 'combined' : transportMode;
 
-      // Generate alternatives by varying transfer limit up to the user's cap.
-      // Never exceed maxTransfers — e.g. if limit is 0, only try 0 transfers.
-      const transferVariants = [...new Set([0, 1, 2, 3, maxTransfers])].filter(t => t <= maxTransfers).sort((a, b) => a - b);
+      // Instead of running multiple transfer-variant requests, call the
+      // /journey/compare endpoint once. That returns results from multiple
+      // router implementations (main/original, eco, lazy, greedy). We'll
+      // display those results (one slot per router) and label them accordingly.
+  const compareResp = await compareRouters(fromCoords, toCoords, isoString, { maxTransfers: maxTransfers, mode: apiMode, includeRaw: true });
+  // Debug: log raw backend compare response for inspection
+  // eslint-disable-next-line no-console
+  console.debug('RAW /journey/compare response:', compareResp._raw ?? compareResp);
 
-      const results = await Promise.allSettled(
-        transferVariants.map((t) =>
-          getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers: t, mode: apiMode })
-        )
-      );
+      // Desired display order (human-friendly)
+      const routerOrder = [
+        { key: 'main', label: 'Original' },
+        { key: 'eco', label: 'Eco' },
+        { key: 'lazy', label: 'Lazy' },
+        { key: 'greedy', label: 'Greedy' },
+      ];
 
-      // Build option list, deduplicating by the sequence of leg line names
-      const seen = new Set();
-      const options = [];
-      results.forEach((res, idx) => {
-        if (res.status !== 'fulfilled') return;
-        const journey = res.value;
-        const card = journeyToRouteCard(journey);
-        if (!card) return;
-        // Fingerprint: join of per-leg "mode:line" strings to detect duplicates
-        const fingerprint = (journey.legs || []).map((l) => `${l.mode}:${l.line_name || ''}`).join('|');
-        if (seen.has(fingerprint)) return;
-        seen.add(fingerprint);
-        options.push({
-          id: options.length + 1,
-          card: { ...card, id: options.length + 1 },
-          routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
-          label: idx === 0 ? 'Direct' : `Option ${options.length + 1}`,
+      const options = routerOrder.reduce((acc, item, idx) => {
+        const res = compareResp[item.key];
+        if (res && res.route) {
+          // Some compare responses wrap route under `route`/`route_text` etc.
+          const journey = res.route || res; // tolerate both shapes
+          const card = journeyToRouteCard(journey);
+          if (card) {
+            acc.push({
+              id: acc.length + 1,
+              card: { ...card, id: acc.length + 1 },
+              routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
+              label: item.label,
+              // Preserve raw backend payload for debugging (may be null)
+              raw: journey._raw ?? journey,
+            });
+            return acc;
+          }
+        }
+        // No route returned for this router — placeholder
+        acc.push({
+          id: acc.length + 1,
+          card: {
+            id: acc.length + 1,
+            duration: 'No route found',
+            transfers: maxTransfers,
+            steps: [],
+            walkMinutes: 0,
+          },
+          routeGeometries: [],
+          label: item.label,
+          raw: null,
         });
-      });
+        return acc;
+      }, []);
+
+      // If compare returned no routes for any router, fall back to a single
+      // main /journey/plan call so the user still sees results when compare
+      // failed to produce routes.
+      const anyFound = options.some((o) => o.card && Array.isArray(o.card.steps) && o.card.steps.length > 0);
+      if (!anyFound) {
+        try {
+          const mainJourney = await getJourneyPlans(fromCoords, toCoords, isoString, { maxTransfers: maxTransfers, mode: apiMode, includeRaw: true });
+          // eslint-disable-next-line no-console
+          console.debug('RAW /journey/plan response:', mainJourney._raw ?? mainJourney);
+          const mainCard = journeyToRouteCard(mainJourney);
+          if (mainCard) {
+            setRouteOptions([{
+              id: 1,
+              card: { ...mainCard, id: 1 },
+              routeGeometries: Array.isArray(mainJourney.routeGeometries) ? mainJourney.routeGeometries : [],
+              label: 'Original',
+            }]);
+            setSelectedRouteIdx(0);
+            setIsSearching(false);
+            return;
+          }
+        } catch (e) {
+          // ignore and fall back to showing placeholders below
+        }
+      }
 
       setRouteOptions(options);
       setSelectedRouteIdx(0);
@@ -581,9 +631,14 @@ export default function HomePage() {
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
           </Typography>
-          <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
-            <X size={14} />
-          </IconButton>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Button size="small" variant="outlined" onClick={() => setShowRaw((s) => !s)}>
+              {showRaw ? 'Hide raw' : 'Show raw'}
+            </Button>
+            <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
+              <X size={14} />
+            </IconButton>
+          </Stack>
         </Box>
       </Stack>
 
@@ -641,6 +696,15 @@ export default function HomePage() {
           </Typography>
         )}
       </Box>
+      {/* Raw debug panel — shows the selected option's raw legs JSON when enabled */}
+      {showRaw && routeOptions.length > 0 && (
+        <Box sx={{ mt: 1, p: 1, backgroundColor: '#f7fafc', borderTop: '1px solid', borderColor: 'divider', maxHeight: '30vh', overflow: 'auto' }}>
+          <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>Raw legs for selected route (read-only):</Typography>
+          <Box component="pre" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.75rem', m: 0 }}>
+            {JSON.stringify(routeOptions[selectedRouteIdx]?.raw?.legs ?? routeOptions[selectedRouteIdx]?.raw ?? {}, null, 2)}
+          </Box>
+        </Box>
+      )}
     </Paper>
   );
 
