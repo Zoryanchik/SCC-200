@@ -3,13 +3,19 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Ensure common utilities are available (curl is used at runtime)
+# Ensure common utilities are available (curl is used at runtime).
+# Also install native build/development libraries needed to build lxml
+# when a prebuilt wheel isn't available on the platform.
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends \
-	   curl \
-	   build-essential \
-	   python3-dev \
-	&& rm -rf /var/lib/apt/lists/*
+	 && apt-get install -y --no-install-recommends \
+		 curl \
+		 build-essential \
+		 python3-dev \
+		 libxml2-dev \
+		 libxslt1-dev \
+		 zlib1g-dev \
+		 pkg-config \
+	 && rm -rf /var/lib/apt/lists/*
 
 # Copy and install requirements first for better layer caching
 COPY requirements.txt /app/requirements.txt

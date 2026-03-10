@@ -128,6 +128,23 @@ Notes and troubleshooting
 	number of candidate stops or use an alternative approach (nearest-N
 	prefiltering) to avoid oversized queries.
 
+System dependencies for XML parsing (lxml)
+----------------------------------------
+
+The backend prefers the `lxml` XML parser for performance and robustness. The
+project's `requirements.txt` already lists `lxml`, but on some platforms `pip`
+may need native development libraries to build it. If you run into install
+errors when installing requirements, make sure these packages are present on
+your system (Debian/Ubuntu names shown):
+
+```sh
+sudo apt-get install -y libxml2-dev libxslt1-dev zlib1g-dev pkg-config
+```
+
+If you're using the provided Dockerfile or `run_backend.sh`, the Docker image
+already installs these packages so `lxml` will be available in the container.
+You only need to install the system libs manually when running locally.
+
 If you want, I can add a short dev note to the top-level README describing
 this workflow as well.
 
