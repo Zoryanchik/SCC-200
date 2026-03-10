@@ -17,6 +17,7 @@ Performance notes
 
 import math
 import bisect
+import uuid
 from typing import List, Any, Set, Optional, Tuple
 from walking import Walking
 from modes import WALKING, BUS, TRAIN, int_to_name, all_transit_modes, name_to_int
@@ -217,6 +218,124 @@ class RaptorRouter:
             'start_point': start_point,
             'destination': destination,
         }
+
+        # --- Log the chosen journey(s) for precise matching later ---
+        try:
+            # Build ordered stop list from origin -> destination
+            route_entries = {k: v for k, v in fastest_route.items() if k != '_meta'}
+            # Find the terminal destination (stop not referenced as prev_stop)
+            all_prevs = {info['prev_stop'] for info in route_entries.values() if info['prev_stop'] is not None}
+            destinations = [s for s in route_entries if s not in all_prevs]
+            if not destinations:
+                destinations = list(route_entries.keys())
+            # Trace back to build ordered stops
+            ordered = []
+            stop = destinations[0]
+            visited = set()
+            while stop is not None and stop not in visited:
+                visited.add(stop)
+                ordered.append((stop, route_entries[stop]))
+                stop = route_entries[stop]['prev_stop']
+            ordered = list(reversed(ordered))  # now origin -> destination
+
+            # Extract contiguous transit legs (where 'journey' is not None)
+            legs = []
+            cur_leg = None
+            for stop_int, info in ordered:
+                j_id = info.get('journey')
+                if j_id is None:
+                    # walking or undefined — close any current leg
+                    if cur_leg is not None:
+                        legs.append(cur_leg)
+                        cur_leg = None
+                    continue
+                if cur_leg is None or cur_leg['journey_id'] != j_id:
+                    if cur_leg is not None:
+                        legs.append(cur_leg)
+                    cur_leg = {'journey_id': j_id, 'stops': [stop_int]}
+                else:
+                    cur_leg['stops'].append(stop_int)
+            if cur_leg is not None:
+                legs.append(cur_leg)
+
+            # Build a compact logged_journey structure
+            lj = {
+                'id': uuid.uuid4().hex,
+                'created_at': None,
+                'start_point': start_point,
+                'destination_point': destination,
+                'total_arrival': arrival_time,
+                'legs': [],
+            }
+            for leg in legs:
+                j_id = leg['journey_id']
+                try:
+                    jsi = net.journey_stop_index[j_id]
+                    jt = net.journey_times[j_id]
+                except Exception:
+                    jsi = {}
+                    jt = []
+                # determine start/end positions within jt if possible
+                leg_stops = leg['stops']
+                start_pos = jsi.get(leg_stops[0]) if jsi else None
+                end_pos = jsi.get(leg_stops[-1]) if jsi else None
+                stops_slice = []
+                if start_pos is not None and end_pos is not None and start_pos <= end_pos:
+                    for sid, atime, dtime in jt[start_pos:end_pos + 1]:
+                        stops_slice.append({'stop': sid, 'arrival': atime, 'departure': dtime})
+                else:
+                    # fallback: just record stop ints
+                    stops_slice = [{'stop': s} for s in leg_stops]
+                leg_meta = {
+                    'journey_id': j_id,
+                    'mode': net.journey_type(j_id),
+                    'journey_metadata': (net.journey_metadata[j_id]
+                                         if j_id < len(net.journey_metadata) else None),
+                    'stops': stops_slice,
+                }
+                lj['legs'].append(leg_meta)
+
+            # store on the merged network for later lookup
+            try:
+                if hasattr(net, 'logged_journeys'):
+                    lj['created_at'] = None
+                    net.logged_journeys[lj['id']] = lj
+                    # Annotate the returned route with the logged journey id so
+                    # callers (api.build_journey_plan_response) can surface
+                    # it to clients. This keeps the logging side-effect local
+                    # but makes the id available for subsequent geometry lookups.
+                    try:
+                        fastest_route['_logged_journey_id'] = lj['id']
+                    except Exception:
+                        pass
+                    # Persist route geometries (if present) onto the logged
+                    # journey so later geometry lookups can reconstruct
+                    # a road-following polyline using OSRM when stored
+                    # route_tracks are missing.
+                    try:
+                        if isinstance(fastest_route, dict) and 'routeGeometries' in fastest_route:
+                            lj['routeGeometries'] = fastest_route.get('routeGeometries')
+                    except Exception:
+                        pass
+                    # Best-effort persist to DB if available
+                    try:
+                        import os
+                        from bus_loader import BusLoader
+                        db_dsn = os.environ.get('BUS_DB_DSN') or os.environ.get('BUS_DB_PATH')
+                        if not db_dsn:
+                            # fallback to a sensible default matching main.py
+                            db_dsn = "postgresql://pguser:pgpass@127.0.0.1:5011/transport"
+                        bl = BusLoader(db_dsn)
+                        bl.insert_logged_journey(lj)
+                    except Exception:
+                        # swallow DB persistence failures — logging already in-memory
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            # best-effort logging — do not break routing on any error
+            pass
+
         return fastest_route
 
     # ── recursive RAPTOR rounds ──────────────────────────────────

@@ -26,7 +26,6 @@ Updated: 2026-03-05
 
 ## Medium Priority
 - [x] Duplicate line shown in label when cliking on a bus, replace "line XX ->" with "To"
-- [ ] Live map "Trains xx" and "Bus xx" button on click always shows "Trains 0", "Buses 0" and does not filter right
 - [x] Refresh only map for live locations, not the whole page
 - [x] Delay handling for bus
 - [ ] Delay handling for train

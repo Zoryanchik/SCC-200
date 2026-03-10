@@ -182,6 +182,10 @@ class MergedData:
                 stop_map[s].sort()
             self.route_stop_departures.append(stop_map)
 
+        # In-memory store for logged journeys (populated by router)
+        # Keyed by a generated id (string) -> dict with journey details
+        self.logged_journeys = {}
+
     # ── Helpers ───────────────────────────────────────────────────
 
     def journey_type(self, journey_id_int: int) -> int:

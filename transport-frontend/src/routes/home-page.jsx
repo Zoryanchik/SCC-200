@@ -637,8 +637,7 @@ export default function HomePage() {
     if (!fromCoords || !toCoords) return;
     setShowSuggested(true);
     setIsSearching(true);
-    setRouteOptions([]);
-    setSelectedRouteIdx(0);
+  setRouteOptions([]);
     try {
       const isoString = new Date(`${departureDate}T${departureClock}:00`).toISOString();
       const apiMode = transportMode === 'all' ? 'combined' : transportMode;
@@ -660,6 +659,26 @@ export default function HomePage() {
 
       // Build options but merge identical journeys (same steps) and collect their labels.
       const optionsMap = new Map(); // signature -> option
+
+      // Helper: attach from/to coords from journey.legs to the returned routeGeometries
+      const attachEndpoints = (journey) => {
+        if (!journey) return [];
+        const geos = Array.isArray(journey.routeGeometries) ? journey.routeGeometries.map(g => ({ ...(g || {}) })) : [];
+        const legs = Array.isArray(journey.legs) ? journey.legs : [];
+        const n = Math.min(geos.length, legs.length);
+        for (let i = 0; i < n; i++) {
+          const geo = geos[i];
+          const leg = legs[i];
+          if (!geo) continue;
+          if (leg && leg.from_stop && typeof leg.from_stop.lat === 'number' && typeof leg.from_stop.lon === 'number') {
+            geo._from = [leg.from_stop.lat, leg.from_stop.lon];
+          }
+          if (leg && leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number') {
+            geo._to = [leg.to_stop.lat, leg.to_stop.lon];
+          }
+        }
+        return geos;
+      };
 
       const makeSignature = (card) => {
         if (!card || !Array.isArray(card.steps)) return JSON.stringify(card || {});
@@ -687,7 +706,7 @@ export default function HomePage() {
               optionsMap.set(sig, {
                 id,
                 card: { ...card, id },
-                routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
+                routeGeometries: attachEndpoints(journey),
                 labels: [item.label],
                 label: item.label,
                 sources: { [item.label]: res },
@@ -842,7 +861,7 @@ export default function HomePage() {
             const singleOpt = {
               id: 1,
               card: { ...mainCard, id: 1 },
-              routeGeometries: Array.isArray(mainJourney.routeGeometries) ? mainJourney.routeGeometries : [],
+              routeGeometries: attachEndpoints(mainJourney),
               labels: ['E·A'],
               label: 'E·A',
               sources: { 'E·A': mainJourney },
@@ -898,9 +917,101 @@ export default function HomePage() {
               return ta - tb;
             });
             setRouteOptions(sortedArr);
-            setSelectedRouteIdx(0);
-            setIsSearching(false);
-            return;
+            // Prefetch smoothed geometry for the first option before selecting it
+            try {
+              const firstOpt = sortedArr[0];
+              const firstSrc = firstOpt ? Object.values(firstOpt.sources)[0] : null;
+              const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
+              const ljid = plan?.meta?.logged_journey_id ?? null;
+              // If no logged_journey id, select immediately
+              if (!ljid) {
+                setSelectedRouteIdx(0);
+                setIsSearching(false);
+                return;
+              }
+              const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
+              const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(ljid)}`;
+              const resp = await fetch(url);
+              if (!resp.ok) {
+                setSelectedRouteIdx(0);
+                setIsSearching(false);
+                return;
+              }
+              const data = await resp.json();
+              if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
+                setSelectedRouteIdx(0);
+                setIsSearching(false);
+                return;
+              }
+              // normalize coords
+              const normalizeCoords = (raw) => {
+                if (!Array.isArray(raw)) return [];
+                const out = [];
+                for (const pt of raw) {
+                  if (!Array.isArray(pt) || pt.length < 2) continue;
+                  const a = Number(pt[0]);
+                  const b = Number(pt[1]);
+                  if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+                  if (a < -90 || a > 90) out.push([b, a]); else out.push([a, b]);
+                }
+                return out;
+              };
+              const splitCoordsIntoLegs = (coords, legs) => {
+                if (!Array.isArray(coords) || coords.length < 2) return [];
+                if (!Array.isArray(legs) || legs.length === 0) return [{ id: 'smoothed-0', name: 'Smoothed route', coords, color: '#1a73e8' }];
+                const sqDist = (a, b) => { const dlat = a[0] - b[0]; const dlon = a[1] - b[1]; return dlat * dlat + dlon * dlon; };
+                const nearestIndex = (pt) => {
+                  if (!pt) return null;
+                  let best = Infinity; let idx = null;
+                  for (let i = 0; i < coords.length; i++) {
+                    const d = sqDist(coords[i], pt);
+                    if (d < best) { best = d; idx = i; }
+                  }
+                  return idx;
+                };
+                const segments = [];
+                for (let i = 0; i < legs.length; i++) {
+                  const leg = legs[i] || {};
+                  const from = leg.from_stop && typeof leg.from_stop.lat === 'number' && typeof leg.from_stop.lon === 'number' ? [leg.from_stop.lat, leg.from_stop.lon] : null;
+                  const to = leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number' ? [leg.to_stop.lat, leg.to_stop.lon] : null;
+                  let segCoords = null;
+                  if (from && to) {
+                    const fi = nearestIndex(from);
+                    const ti = nearestIndex(to);
+                    if (fi != null && ti != null) {
+                      if (fi <= ti) segCoords = coords.slice(fi, ti + 1);
+                      else segCoords = coords.slice(ti, fi + 1);
+                    }
+                  }
+                  if (!Array.isArray(segCoords) || segCoords.length < 2) {
+                    if (from && to) segCoords = [from, to]; else continue;
+                  }
+                  segments.push({ id: `seg-${i}`, name: leg.line_name || (leg.mode ? leg.mode : `Segment ${i}`), coords: segCoords, color: (leg.mode === 'walking' || (leg && leg.mode && String(leg.mode).toLowerCase() === 'walking')) ? '#000000' : '#1a73e8', mode: (leg.mode && String(leg.mode).toLowerCase()) || (leg.line_name ? 'transit' : 'walking') });
+                }
+                if (segments.length === 0) return [{ id: 'smoothed-0', name: 'Smoothed route', coords, color: '#1a73e8' }];
+                return segments;
+              };
+              const norm = normalizeCoords(data.coords);
+              if (!Array.isArray(norm) || norm.length < 2) {
+                setSelectedRouteIdx(0);
+                setIsSearching(false);
+                return;
+              }
+              const segments = splitCoordsIntoLegs(norm, plan?.legs || []);
+              const newOptions = sortedArr.slice();
+              newOptions[0] = { ...newOptions[0], routeGeometries: segments };
+              setRouteOptions(newOptions);
+              setSelectedRouteIdx(0);
+              setIsSearching(false);
+              return;
+            } catch (e) {
+              // If anything fails, fall back to selecting immediately
+              // eslint-disable-next-line no-console
+              console.warn('Prefetch smoothed geometry failed', e);
+              setSelectedRouteIdx(0);
+              setIsSearching(false);
+              return;
+            }
           }
         } catch (e) {
           // ignore and fall back to showing placeholders below
@@ -930,7 +1041,58 @@ export default function HomePage() {
         return ta - tb;
       });
       setRouteOptions(sortedOptions);
-      setSelectedRouteIdx(0);
+      // Prefetch smoothed geometry for the first displayed option before selecting
+      try {
+        const firstOpt = sortedOptions[0];
+        const firstSrc = firstOpt ? Object.values(firstOpt.sources)[0] : null;
+        const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
+        const ljid = plan?.meta?.logged_journey_id ?? null;
+        if (!ljid) {
+          setSelectedRouteIdx(0);
+        } else {
+          const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
+          const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(ljid)}`;
+          const resp = await fetch(url);
+          if (!resp.ok) {
+            setSelectedRouteIdx(0);
+          } else {
+            const data = await resp.json();
+            if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
+              setSelectedRouteIdx(0);
+            } else {
+              const normalizeCoords = (raw) => {
+                if (!Array.isArray(raw)) return [];
+                const out = [];
+                for (const pt of raw) {
+                  if (!Array.isArray(pt) || pt.length < 2) continue;
+                  const a = Number(pt[0]);
+                  const b = Number(pt[1]);
+                  if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+                  if (a < -90 || a > 90) out.push([b, a]); else out.push([a, b]);
+                }
+                return out;
+              };
+              const norm = normalizeCoords(data.coords);
+              if (!Array.isArray(norm) || norm.length < 2) {
+                setSelectedRouteIdx(0);
+              } else {
+                const newOptions = sortedOptions.slice();
+                newOptions[0] = {
+                  ...newOptions[0],
+                  routeGeometries: [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
+                };
+                setRouteOptions(newOptions);
+                setSelectedRouteIdx(0);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Fallback: select immediately
+        // eslint-disable-next-line no-console
+        console.warn('Prefetch smoothed geometry failed', e);
+        setSelectedRouteIdx(0);
+      }
     } catch (error) {
       console.error('Journey search error:', error);
       setRouteOptions([]);
@@ -955,8 +1117,95 @@ export default function HomePage() {
     );
   };
 
-  const handleSelectRoute = (idx) => {
-    setSelectedRouteIdx((prev) => (prev === idx ? null : idx));
+  const handleSelectRoute = async (idx) => {
+    // Determine whether this click will select or deselect the route
+    const willSelect = selectedRouteIdx !== idx;
+
+    // If deselecting, just clear selection immediately
+    if (!willSelect) {
+      setSelectedRouteIdx(null);
+      return;
+    }
+
+    const opt = routeOptions?.[idx];
+    if (!opt || !opt.sources) {
+      // still select the option even if we can't fetch smoothed geometry
+      setSelectedRouteIdx(idx);
+      return;
+    }
+
+    // Sources may be either wrapper objects (compareRouters -> {route, route_text, ...})
+    // or raw journey-plan objects (when falling back to getJourneyPlans). Normalize.
+    const firstSrc = Object.values(opt.sources)[0];
+    const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
+    const ljid = plan?.meta?.logged_journey_id ?? null;
+
+    // Helper: normalize coords to [[lat, lon], ...] and coerce numbers. If an item
+    // looks like [lon, lat] (first value outside -90..90), swap order.
+    const normalizeCoords = (raw) => {
+      if (!Array.isArray(raw)) return [];
+      const out = [];
+      for (const pt of raw) {
+        if (!Array.isArray(pt) || pt.length < 2) continue;
+        const a = Number(pt[0]);
+        const b = Number(pt[1]);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+        // If first number is clearly out of latitude range, assume it's lon/lat and swap
+        if (a < -90 || a > 90) {
+          // swap
+          out.push([b, a]);
+        } else {
+          out.push([a, b]);
+        }
+      }
+      return out;
+    };
+
+    // If we don't have a logged_journey id, select without fetching
+    if (!ljid) {
+      setSelectedRouteIdx(idx);
+      return;
+    }
+
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
+      const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(ljid)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        // fallback: select without smoothed geometry
+        setSelectedRouteIdx(idx);
+        return;
+      }
+      const data = await resp.json();
+      if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
+        setSelectedRouteIdx(idx);
+        return;
+      }
+
+      const norm = normalizeCoords(data.coords);
+      if (!Array.isArray(norm) || norm.length < 2) {
+        setSelectedRouteIdx(idx);
+        return;
+      }
+
+      // Replace the option's routeGeometries with a single smoothed segment
+      const newOptions = routeOptions.slice();
+      newOptions[idx] = {
+        ...newOptions[idx],
+        routeGeometries: [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
+      };
+      // DEV-LOG: report the fetched smoothed geometry so we can verify ordering/shape
+      // eslint-disable-next-line no-console
+      console.debug('[DEBUG] fetched smoothed geometry for', ljid, { idx, coords: norm?.length, sample: norm?.slice(0,3), source: data.source || null });
+      setRouteOptions(newOptions);
+      // Now that geometry is applied, set the selected index so the map will render it
+      setSelectedRouteIdx(idx);
+    } catch (e) {
+      // best-effort only — do not block selection on geometry failures
+      // eslint-disable-next-line no-console
+      console.warn('Failed to fetch smoothed geometry for logged journey', ljid, e);
+      setSelectedRouteIdx(idx);
+    }
   };
 
   const [labelAnchorEl, setLabelAnchorEl] = useState(null);
@@ -1390,13 +1639,20 @@ export default function HomePage() {
             />
             <TextField
               label="Transfers"
-              type="number"
+              select
               size="small"
               value={maxTransfers}
-              onChange={(e) => setMaxTransfers(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
-              InputProps={{ inputProps: { min: 0, max: 10 } }}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                // clamp to 0..5 defensively
+                setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
+              }}
               sx={{ width: 110 }}
-            />
+            >
+              {[0,1,2,3,4,5].map((n) => (
+                <MenuItem key={n} value={n}>{n}</MenuItem>
+              ))}
+            </TextField>
             <TextField
               select
               size="small"
@@ -1679,7 +1935,8 @@ export default function HomePage() {
         {(() => {
           const lab = String(labelDetail.label || '').toUpperCase();
           const bg = LABEL_COLORS[lab] || '#00BCD4';
-          const fg = textColorForBg(bg);
+          // Force GREEDY popover text to black for consistent legibility
+          const fg = (lab === 'GREEDY') ? '#000000' : textColorForBg(bg);
           return (
             <Box sx={{ p: '8px 12px', minWidth: 140, backgroundColor: 'transparent', color: fg, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
               <Typography variant="body2" sx={{ color: fg, fontWeight: 700 }}>

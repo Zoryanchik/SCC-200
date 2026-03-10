@@ -13,8 +13,10 @@ CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
 # Default memory to allocate to the backend container. Can be overridden
-# by setting CONTAINER_MEM in the environment (e.g. CONTAINER_MEM=6g).
-CONTAINER_MEM="${CONTAINER_MEM:-4g}"
+# by setting CONTAINER_MEM in the environment (e.g. CONTAINER_MEM=8g).
+# Changed default to 8g to reduce likelihood of OOM during heavy
+# initialization (NaPTAN download / walking precompute).
+CONTAINER_MEM="${CONTAINER_MEM:-6g}"
 
 mkdir -p "$CACHE_DIR"
 

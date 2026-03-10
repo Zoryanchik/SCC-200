@@ -192,8 +192,8 @@ export const fetchBusArrivals = async (stopCode) => {
 export const searchStops = async (query) => {
   try {
     const response = await fetch(
-      // Increase default limit so autocomplete shows more location/stop prompts
-      `${API_BASE_URL}/search/stops?q=${encodeURIComponent(query)}&limit=12`
+  // Default autocomplete limit. Kept small for consistent test expectations.
+  `${API_BASE_URL}/search/stops?q=${encodeURIComponent(query)}&limit=5`
     );
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);

@@ -33,11 +33,16 @@ from modes import name_to_int, all_transit_modes
 import copy
 import threading
 import time
+import psycopg
+from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add minimal globals used by startup logic
+_base_cache = None
+_base_init_attempted = False
 
 # Nominatim rate-limiting: ensure we do at most 1 request per second
 NOMINATIM_LOCK = threading.Lock()
@@ -81,7 +86,7 @@ class JourneyPlanRequest(BaseModel):
     toStop: StopLocation
     departureTime: str     # HH:MM:SS
     date: str              # YYYY-MM-DD
-    maxTransfers: int = 3
+    maxTransfers: int = 5
     mode: str = "both"     # bus | train | both
 
 # — Lifespan (startup / shutdown) ——————————————————————————
@@ -109,11 +114,20 @@ async def lifespan(app: FastAPI):
                 logger.warning('BUS_AUTO_CREATE_DB requested but ensure_db_and_schema failed: %s', _e)
 
         from main import initialize_base
-        # Attempt one-time base initialization. If this raises, we record
-        # that an attempt was made so we don't repeatedly re-run expensive
-        # initialisation on every request (which caused the repeated
-        # "Initializing Transport Backend System" output seen during dev).
-        _base_cache = initialize_base()
+        # Allow skipping heavy initialization via env var for low-memory
+        # or rapid dev workflows. When BUS_SKIP_INITIALIZE=1 the server
+        # starts immediately and initialization is not performed.
+        if os.environ.get('BUS_SKIP_INITIALIZE') == '1':
+            logger.info('BUS_SKIP_INITIALIZE=1 set — skipping initialize_base()')
+            globals()['_base_cache'] = None
+            globals()['_base_init_attempted'] = True
+        else:
+            # Attempt one-time base initialization synchronously. This will
+            # block the ASGI startup until initialization completes so the
+            # server only reports "application startup complete" once all
+            # base data is ready (NaPTAN download, walking precompute,
+            # dataset loading).
+            _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "Backend initialisation failed  — endpoints requiring "
@@ -164,8 +178,8 @@ app.add_api_websocket_route("/ws/live", ws_live_endpoint)
 # Read allowed origins from the CORS_ORIGINS env var (comma-separated).
 # Falls back to localhost dev ports so local development works out of the box.
 _default_origins = (
-    "http://localhost:3000,http://localhost:5075,"
-    "http://127.0.0.1:3000,http://127.0.0.1:5075"
+    "http://localhost:3000,http://localhost:5075,http://localhost:5076,"
+    "http://127.0.0.1:3000,http://127.0.0.1:5075,http://127.0.0.1:5076"
 )
 _cors_origins = [
     o.strip()
@@ -398,6 +412,339 @@ def _looks_like_street(s: str) -> bool:
         return True
 
     return False
+
+
+# --- Geometry assembly endpoint ----------------------------------------
+@app.get("/route/geometry")
+def route_geometry(logged_journey_id: str):
+    """Return smoothed route geometry for a previously-logged journey.
+
+    Query params:
+      - logged_journey_id: the UUID id stored in `bus_journeys`.
+
+    Response:
+      {"coords": [[lat, lon], ...], "source": "osrm"|"track"}
+    """
+    # 1) Fetch logged journey from DB
+    lj = _fetch_logged_journey_from_db(logged_journey_id)
+    if not lj:
+        return {"error": "logged_journey_not_found"}
+
+    # 2) For each leg, try to determine stop ATCO sequence using external journey_id
+    coords_accum = []
+    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+    walking_coords = None
+    if globals().get('_base_cache'):
+        walking_coords = _base_cache.get('walking_raw', {}).get('coords')
+
+    for leg in lj.get('legs', []):
+        # Prefer explicit stop arrival times in the logged leg
+        ext_meta = leg.get('journey_metadata') or {}
+        ext_jid = ext_meta.get('journey_id')
+        stop_atcos = []
+        if ext_jid:
+            jt = _fetch_journey_times_external(ext_jid)
+            if jt:
+                # If logged stops include arrival times, match indices
+                logged_stops = leg.get('stops', [])
+                if logged_stops and isinstance(logged_stops[0], dict) and 'arrival' in logged_stops[0]:
+                    # find start/end by matching arrival times
+                    start_arr = logged_stops[0].get('arrival')
+                    end_arr = logged_stops[-1].get('arrival')
+                    # find closest indices in jt
+                    start_idx = next((i for i, (_a, at) in enumerate(jt) if at == start_arr), 0)
+                    end_idx = next((i for i, (_a, at) in enumerate(jt) if at == end_arr), len(jt) - 1)
+                    if start_idx > end_idx:
+                        start_idx, end_idx = end_idx, start_idx
+                    stop_atcos = [a for a, _ in jt[start_idx:end_idx + 1]]
+                else:
+                    stop_atcos = [a for a, _ in jt]
+
+        # 3) First try: extract a subsegment from stored route_tracks (best precision)
+        leg_coords = None
+        route_id = ext_meta.get('route_id')
+        if stop_atcos and route_id:
+            sub = _subsegment_from_tracks(route_id, stop_atcos, walking_coords)
+            if sub and len(sub) >= 2:
+                # sample the subsegment for OSRM to avoid too many coordinates
+                sample = _sample_coords_for_osrm(sub, max_samples=30)
+                try:
+                    leg_coords = _query_osrm_for_coords(osrm_base, sample)
+                except Exception:
+                    leg_coords = None
+                # if OSRM failed, fall back to returning the raw subsegment
+                if leg_coords is None:
+                    leg_coords = sub
+
+        # 4) Second try: if no subsegment, fall back to resolving stop coords and calling OSRM
+        if leg_coords is None:
+            coords_lonlat = []
+            if stop_atcos and walking_coords:
+                for atco in stop_atcos:
+                    c = walking_coords.get(atco)
+                    if c:
+                        coords_lonlat.append(f"{c[1]},{c[0]}")
+            if coords_lonlat and len(coords_lonlat) >= 2:
+                leg_coords = _query_osrm_for_coords(osrm_base, coords_lonlat)
+
+        # 5) Final fallback: return stored route_tracks for the whole route
+        if leg_coords is None and route_id:
+            leg_coords = _fetch_route_tracks(route_id)
+
+        # 6) Append leg_coords (if any) to accumulator
+        if leg_coords:
+            coords_accum.extend(leg_coords)
+
+    if not coords_accum:
+        # Final fallback: try to construct an OSRM route from the
+        # logged journey's stop coordinates (from/to of each leg).
+        # This helps when detailed route_tracks or external journey
+        # traces are not available but the basic stop sequence is.
+        try:
+            # 1) Try using any routeGeometries stored inside the logged journey
+            #    These are produced by the compare/plan endpoint and often
+            #    contain at least endpoint pairs for each segment. Use their
+            #    endpoints (deduped) as OSRM waypoints to reconstruct a
+            #    full road-following geometry when detailed route_tracks are
+            #    not available.
+            rg = None
+            if isinstance(lj, dict):
+                rg = lj.get('routeGeometries') or lj.get('route_geometries')
+            if rg and isinstance(rg, list):
+                coords_lonlat = []
+                for g in rg:
+                    coords = None
+                    if isinstance(g, dict):
+                        coords = g.get('coords')
+                    elif isinstance(g, list):
+                        coords = g
+                    if not coords:
+                        continue
+                    # take first and last point as representative endpoints
+                    if len(coords) >= 1:
+                        first = coords[0]
+                        last = coords[-1]
+                        if isinstance(first, (list, tuple)) and len(first) >= 2:
+                            coords_lonlat.append(f"{first[1]},{first[0]}")
+                        if isinstance(last, (list, tuple)) and len(last) >= 2:
+                            coords_lonlat.append(f"{last[1]},{last[0]}")
+                # dedupe while preserving order
+                seen = set()
+                dedup = []
+                for s in coords_lonlat:
+                    if s not in seen:
+                        seen.add(s)
+                        dedup.append(s)
+                if len(dedup) >= 2:
+                    try:
+                        coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
+                        if coords_from_osrm and len(coords_from_osrm) >= 2:
+                            return {"coords": coords_from_osrm, "source": "osrm"}
+                    except Exception:
+                        pass
+
+            # 2) Fall back to constructing waypoints from each leg's from/to
+            #    stop coordinates (existing behaviour). This keeps prior
+            #    functionality unchanged.
+            legs = lj.get('legs', []) if isinstance(lj, dict) else []
+            coords_lonlat = []
+            for leg in legs:
+                fs = leg.get('from_stop') or {}
+                ts = leg.get('to_stop') or {}
+                for p in (fs, ts):
+                    lat = p.get('lat') if isinstance(p, dict) else None
+                    lon = p.get('lon') if isinstance(p, dict) else None
+                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                        coords_lonlat.append(f"{lon},{lat}")
+            # Deduplicate while preserving order
+            seen = set()
+            dedup = []
+            for s in coords_lonlat:
+                if s not in seen:
+                    seen.add(s)
+                    dedup.append(s)
+            if len(dedup) >= 2:
+                try:
+                    coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
+                    if coords_from_osrm and len(coords_from_osrm) >= 2:
+                        return {"coords": coords_from_osrm, "source": "osrm"}
+                except Exception:
+                    # fall through to original error below
+                    pass
+                # If OSRM was unavailable or returned nothing, fall back to a
+                # simple linear interpolation between the stop points so the
+                # frontend at least gets a smooth-looking polyline.
+                try:
+                    # parse dedup into [(lat,lon), ...]
+                    pts = []
+                    for s in dedup:
+                        lon_s, lat_s = s.split(',')
+                        pts.append((float(lat_s), float(lon_s)))
+                    interp = []
+                    samples_per_leg = 8
+                    for i in range(len(pts) - 1):
+                        a = pts[i]
+                        b = pts[i + 1]
+                        for t in range(samples_per_leg):
+                            frac = t / samples_per_leg
+                            lat = a[0] + (b[0] - a[0]) * frac
+                            lon = a[1] + (b[1] - a[1]) * frac
+                            interp.append([lat, lon])
+                    # include final point
+                    interp.append([pts[-1][0], pts[-1][1]])
+                    if len(interp) >= 2:
+                        return {"coords": interp, "source": "linear"}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return {"error": "no_geometry_available"}
+    return {"coords": coords_accum, "source": "osrm"}
+
+
+# --- Geometry assembly endpoint helpers -------------------------------
+def _get_db_connection():
+    from main import BUS_DB_PATH
+    return psycopg.connect(BUS_DB_PATH)
+
+
+def _fetch_logged_journey_from_db(ljid: str):
+    """Return the JSON object stored in bus_journeys for id=ljid, or None."""
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT journey FROM bus_journeys WHERE id = %s", (ljid,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return row[0]
+    except Exception:
+        return None
+
+
+def _fetch_journey_times_external(journey_id: str):
+    """Return ordered list of (atco_code, arrival_time) for an external journey_id from bus_journey_times."""
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT atco_code, arrival_time FROM bus_journey_times WHERE journey_id = %s ORDER BY arrival_time", (journey_id,))
+        rows = cur.fetchall()
+        conn.close()
+        return [(r[0], r[1]) for r in rows]
+    except Exception:
+        return []
+
+
+def _query_osrm_for_coords(osrm_base: str, coords_lonlat: list):
+    """Call OSRM route with a list of 'lon,lat' strings; return list of [lat,lon] or None on failure."""
+    if not coords_lonlat:
+        return None
+    coords_str = ";".join(coords_lonlat)
+    url = osrm_base.rstrip('/') + f"/route/v1/driving/{coords_str}?overview=full&geometries=geojson"
+    try:
+        req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
+        with urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+        if data.get('code') != 'Ok':
+            return None
+        routes = data.get('routes') or []
+        if not routes:
+            return None
+        geom = routes[0].get('geometry')
+        if not geom:
+            return None
+        # geometry is GeoJSON LineString coords [[lon,lat],...]
+        coords = [[c[1], c[0]] for c in geom.get('coordinates', [])]
+        return coords
+    except URLError:
+        return None
+    except Exception:
+        return None
+
+
+def _fetch_route_tracks(route_id: str):
+    """Return the route track from bus_route_tracks as list of (lat, lon) or [] on failure."""
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq", (route_id,))
+        rows = cur.fetchall()
+        conn.close()
+        return [[r[0], r[1]] for r in rows]
+    except Exception:
+        return []
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dict):
+    """Return a subsegment of route_tracks for route_id that spans the stops in stop_atcos.
+
+    Strategy:
+      - Load full route track points (lat, lon).
+      - For each stop ATCO, find nearest track index using walking_coords mapping.
+      - Take min..max index range (inclusive) and return that slice.
+    Returns list of [lat, lon] or [] if not possible.
+    """
+    if not stop_atcos:
+        return []
+    tracks = _fetch_route_tracks(route_id)
+    if not tracks:
+        return []
+    # Build list of indices for each stop
+    indices = []
+    for atco in stop_atcos:
+        coord = None
+        if walking_coords:
+            coord = walking_coords.get(atco)
+        if not coord:
+            # can't map this stop
+            continue
+        lat_s, lon_s = coord[0], coord[1]
+        # find nearest track point
+        best_i = None
+        best_d = None
+        for i, (tlat, tlon) in enumerate(tracks):
+            d = _haversine(lat_s, lon_s, tlat, tlon)
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        if best_i is not None:
+            indices.append(best_i)
+
+    if not indices:
+        return []
+    start, end = min(indices), max(indices)
+    if start <= end:
+        return tracks[start:end+1]
+    else:
+        return list(reversed(tracks[end:start+1]))
+
+
+def _sample_coords_for_osrm(points, max_samples=20):
+    """Return a list of 'lon,lat' strings sampled evenly from points."""
+    if not points:
+        return []
+    n = len(points)
+    if n <= max_samples:
+        return [f"{p[1]},{p[0]}" for p in points]
+    step = max(1, n // max_samples)
+    sampled = [points[i] for i in range(0, n, step)]
+    # ensure last point included
+    if sampled[-1] != points[-1]:
+        sampled.append(points[-1])
+    return [f"{p[1]},{p[0]}" for p in sampled]
+
 
 
 def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
@@ -2309,6 +2656,11 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         # initialise_base to prevent noisy repeated initialisation logs
         # and excessive work.
         global _base_init_attempted
+        # If initialization is already running in the background, do not
+        # attempt a duplicate synchronous initialize_base() here — return
+        # an error so callers can respond with 503. This avoids the
+        # "Initializing Transport Backend System" header being printed
+        # multiple times and prevents concurrent heavy work.
         if _base_cache is None and not _base_init_attempted:
             from main import initialize_base
             try:
@@ -2328,8 +2680,20 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
             finally:
                 _base_init_attempted = True
         elif _base_cache is None and _base_init_attempted:
-            # A previous attempt failed — don't retry here.
-            raise RuntimeError("Backend base initialisation previously failed")
+            # A previous attempt failed. Try a single re-attempt if
+            # `main.initialize_base` is available at runtime (tests may
+            # patch it). If this re-attempt fails, raise a RuntimeError
+            # to preserve the original behaviour.
+            try:
+                from main import initialize_base
+                if callable(initialize_base):
+                    _base_cache = initialize_base()
+                    if _base_cache and "prebuilt_cache" in _base_cache:
+                        _router_cache.update(_base_cache["prebuilt_cache"])
+                    if cache_key in _router_cache:
+                        return _router_cache[cache_key]
+            except Exception:
+                raise RuntimeError("Backend base initialisation previously failed")
         loader = _base_cache["loader"]
         walking_raw = _base_cache["walking_raw"]
         al = _base_cache.get("atco_loader")
@@ -2437,9 +2801,13 @@ def format_route_text(route_result, merged):
     start_point = meta.get("start_point", ())
     destination = meta.get("destination", ())
 
-    route_data = {k: v for k, v in route_result.items() if k != "_meta"}
-    all_prevs = {info["prev_stop"] for info in route_data.values()
-                 if info["prev_stop"] is not None}
+    # Defensive: only consider entries whose values are dicts. Some router
+    # implementations may include unexpected non-dict items which would make
+    # indexing like info["prev_stop"] raise TypeError.
+    route_data = {k: v for k, v in route_result.items()
+                  if k != "_meta" and isinstance(v, dict)}
+    all_prevs = {info.get("prev_stop") for info in route_data.values()
+                 if isinstance(info, dict) and info.get("prev_stop") is not None}
     destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
         destinations = list(route_data.keys())
@@ -2647,10 +3015,15 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         }
 
     # --- Multi-stop transit route ---
-    route_data = {k: v for k, v in route_result.items() if k != "_meta"}
+    # Be defensive: router implementations should return a dict mapping
+    # stop-index -> info-dict, but some implementations or edge-cases
+    # may include unexpected non-dict values. Only process entries
+    # whose values are dict-like to avoid TypeErrors.
+    route_data = {k: v for k, v in route_result.items()
+                  if k != "_meta" and isinstance(v, dict)}
 
-    all_prevs = {info["prev_stop"] for info in route_data.values()
-                 if info["prev_stop"] is not None}
+    all_prevs = {info.get("prev_stop") for info in route_data.values()
+                 if isinstance(info, dict) and info.get("prev_stop") is not None}
     destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
         destinations = list(route_data.keys())
@@ -2990,7 +3363,9 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         elif total_arrival is not None:
             scheduled_total = _time_str(int(total_arrival))
 
-    return {
+    # Build the response object but persist a minimal logged_journey
+    # first for router implementations that did not already attach one.
+    resp = {
         "success": True,
         "legs": legs,
         "meta": {
@@ -3004,10 +3379,65 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
+            # Expose the logged_journey id (if the router attached one)
+            # so clients can request smoothed geometry with /route/geometry
+            # using the exact journey that was selected by the router.
+            "logged_journey_id": route_result.get("_logged_journey_id") if isinstance(route_result, dict) else None,
             "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
         },
         "routeGeometries": geometries,
     }
+
+    # Persist a minimal logged_journey record when the router did not
+    # already attach one. This ensures /route/geometry can look up the
+    # exact journey that produced these geometries even for router
+    # implementations that do not create logged_journey entries.
+    try:
+        if isinstance(route_result, dict) and not route_result.get('_logged_journey_id'):
+            import uuid
+            from main import BUS_DB_PATH
+            from bus_loader import BusLoader
+
+            lj = {
+                'id': uuid.uuid4().hex,
+                'created_at': None,
+                'start_point': tuple(start_point) if start_point else None,
+                'destination_point': tuple(destination_point) if destination_point else None,
+                'total_arrival': meta.get('total_arrival'),
+                'legs': [],
+            }
+            # Build minimal legs with from_stop/to_stop coords (if available)
+            for leg in legs:
+                l = {}
+                # include any journey metadata if present on the produced leg
+                if 'journey_origin' in leg or 'journey_destination' in leg or leg.get('line_name'):
+                    l['journey_metadata'] = {
+                        'line_name': leg.get('line_name'),
+                        'destination_display': leg.get('journey_destination')
+                    }
+                # include raw from/to coords so /route/geometry can fallback to OSRM
+                fs = leg.get('from_stop') or {}
+                ts = leg.get('to_stop') or {}
+                if isinstance(fs, dict) and 'lat' in fs and 'lon' in fs:
+                    l['from_stop'] = {'lat': fs['lat'], 'lon': fs['lon']}
+                if isinstance(ts, dict) and 'lat' in ts and 'lon' in ts:
+                    l['to_stop'] = {'lat': ts['lat'], 'lon': ts['lon']}
+                lj['legs'].append(l)
+
+            # Persist best-effort (do not fail the whole response on DB error)
+            try:
+                bl = BusLoader(BUS_DB_PATH)
+                bl.insert_logged_journey(lj)
+                # Annotate the route_result and response meta so callers can reference the id
+                route_result['_logged_journey_id'] = lj['id']
+                resp['meta']['logged_journey_id'] = lj['id']
+            except Exception:
+                pass
+    except Exception:
+        # Do not allow logging failures to disrupt normal response
+        pass
+
+    return resp
 
 
 @app.post("/journey/plan")
@@ -3043,7 +3473,11 @@ async def journey_plan(request: JourneyPlanRequest):
         return build_journey_plan_response(
             result, merged, stop_coords, request_start_seconds=start_seconds)
     except Exception as exc:
-        return {"success": False, "error": str(exc),
+        import traceback
+        tb = traceback.format_exc()
+        logger.exception('Error in /journey/plan: %s', exc)
+        # Return traceback in error during dev to help debugging (non-prod)
+        return {"success": False, "error": str(exc), "trace": tb,
                 "legs": None, "meta": None, "routeGeometries": None}
 
 
@@ -3184,7 +3618,10 @@ async def compare_routers(request: JourneyPlanRequest):
             },
         }
     except Exception as exc:
-        return {"success": False, "error": str(exc), "main": None, "eco": None}
+        import traceback
+        tb = traceback.format_exc()
+        logger.exception('Error in /journey/compare: %s', exc)
+        return {"success": False, "error": str(exc), "trace": tb, "main": None, "eco": None}
 
 @app.post("/api/route")
 async def get_route(request: RouteRequest):

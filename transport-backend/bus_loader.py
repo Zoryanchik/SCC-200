@@ -256,6 +256,12 @@ class BusLoader:
                 lon         DOUBLE PRECISION NOT NULL,
                 PRIMARY KEY (route_id, seq)
             );
+            -- Logged journey records (JSONB) captured during routing
+            CREATE TABLE IF NOT EXISTS bus_journeys (
+                id          TEXT PRIMARY KEY,
+                journey     JSONB NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT now()
+            );
             -- Indexes for faster JOINs in load_busdata_for_date
             CREATE INDEX IF NOT EXISTS idx_journey_routes_route ON bus_journey_routes(route_id);
             CREATE INDEX IF NOT EXISTS idx_route_stops_route ON bus_route_stops(route_id);
@@ -273,6 +279,24 @@ class BusLoader:
             cur.execute(stmt2)
         conn.commit()
         conn.close()
+        
+    def insert_logged_journey(self, lj: dict):
+        """Persist a logged journey dict into bus_journeys (JSONB).
+
+        Best-effort: on any DB error we catch and print but do not raise.
+        """
+        try:
+            conn = self._connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO bus_journeys (id, journey) VALUES (%s, %s::jsonb) "
+                "ON CONFLICT (id) DO UPDATE SET journey = EXCLUDED.journey",
+                (lj.get('id'), json.dumps(lj)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[bus] ⚠ Failed to persist logged_journey {lj.get('id')}: {e}")
         
     @staticmethod
     def _parse_duration(iso):
@@ -353,13 +377,27 @@ class BusLoader:
                 if mapping is None:
                     continue
                 for loc in mapping.findall(f'{ns}Location'):
-                    lat_s = loc.findtext(f'{ns}Translation/{ns}Latitude', '')
-                    lon_s = loc.findtext(f'{ns}Translation/{ns}Longitude', '')
+                    # TXC files vary: some providers wrap coords in
+                    # <Translation><Latitude> / <Longitude></Translation>
+                    # while others place <Latitude> and <Longitude>
+                    # directly under <Location>. Handle both patterns and
+                    # tolerate either ordering.
+                    lat_s = loc.findtext(f'{ns}Translation/{ns}Latitude') or loc.findtext(f'{ns}Latitude')
+                    lon_s = loc.findtext(f'{ns}Translation/{ns}Longitude') or loc.findtext(f'{ns}Longitude')
+                    # In some malformed files the tags may be present but
+                    # empty; normalize to empty string if None
+                    lat_s = (lat_s or '').strip()
+                    lon_s = (lon_s or '').strip()
                     if lat_s and lon_s:
                         try:
                             waypoints.append((float(lat_s), float(lon_s)))
                         except ValueError:
-                            pass
+                            # try swapping if parsing failed (some files put
+                            # lon/lat in reversed order inside the tags)
+                            try:
+                                waypoints.append((float(lon_s), float(lat_s)))
+                            except Exception:
+                                pass
             if waypoints:
                 route_section_tracks[rs_id] = waypoints
 

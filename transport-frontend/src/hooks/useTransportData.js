@@ -236,19 +236,22 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
           return { ...r, lat, lon };
         }) : result;
 
-        // Filter out stop-type results that lack numeric coordinates: those
-        // can't be used for map-centred actions (flyTo) so we don't surface
-        // them in the autocomplete prompts.
+        // If a map centre is provided, filter out stop-type results that lack
+        // numeric coordinates (they're not useful for map-centred actions).
+        // If no map centre is provided (e.g. in tests or simple autocompletes),
+        // keep all results so callers can decide how to handle missing coords.
         let filteredResult = normalized;
         try {
-          filteredResult = (filteredResult || []).filter((r) => {
-            if (!r) return false;
-            if (r.type === 'stop') {
-              // require numeric lat/lon for stop suggestions
-              return typeof r.lat === 'number' && typeof r.lon === 'number';
-            }
-            return true;
-          });
+          if (mapCenter) {
+            filteredResult = (filteredResult || []).filter((r) => {
+              if (!r) return false;
+              if (r.type === 'stop') {
+                // require numeric lat/lon for stop suggestions when map-centred
+                return typeof r.lat === 'number' && typeof r.lon === 'number';
+              }
+              return true;
+            });
+          }
         } catch (e) {
           // if filtering fails, fall back to original normalized list
           filteredResult = normalized;

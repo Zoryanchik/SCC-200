@@ -192,6 +192,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   {step.type === 'walk' ? (
                     <Typography
                       variant="caption"
+                      data-testid={`step-time-${idx}`}
                       sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
                       fontWeight={400}
                     >
@@ -204,6 +205,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                       {(step.journey_origin || step.journey_destination) && (
                         <Typography
                           variant="caption"
+                          data-testid={`step-time-${idx}`}
                           sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
                           fontWeight={400}
                         >
@@ -213,13 +215,14 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                       {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
                         <Typography
                           variant="caption"
+                          data-testid={`step-time-${idx}`}
                           sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
                           fontWeight={400}
                         >
-                          {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
-                          {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
-                          {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
-                          {step.type !== 'walk' ? ' (planned)' : ''}
+              {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
+              {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
+              {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
+              {step.type !== 'walk' ? ' (planned)' : ''}
                         </Typography>
                       )}
                     </>

@@ -128,60 +128,234 @@ const MapClickClearHandler = ({ onClear }) => {
 const JourneyRouteLayer = ({ segments }) => {
 	const map = useMap();
 
+	// Normalize coords to [[lat, lon], ...] numeric arrays and produce a stable key
+	const normalizeSegments = (inSegments) => {
+		if (!Array.isArray(inSegments)) return [];
+		const out = [];
+		for (const s of inSegments) {
+			if (!s || !Array.isArray(s.coords)) continue;
+			const coords = [];
+			for (const pt of s.coords) {
+				if (!Array.isArray(pt) || pt.length < 2) continue;
+				const a = Number(pt[0]);
+				const b = Number(pt[1]);
+				if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+				// Detect lon/lat vs lat/lon by latitude range
+				if (a < -90 || a > 90) {
+					coords.push([b, a]);
+				} else {
+					coords.push([a, b]);
+				}
+			}
+			if (coords.length < 2) continue;
+
+			// If the segment includes explicit leg endpoints (_from/_to) try to clip
+			// the geometry to only the portion between those endpoints so we don't
+			// draw the entire vehicle route (common when stored tracks are full-route).
+			const clipToLeg = (pts, fromPt, toPt) => {
+				if (!Array.isArray(pts) || pts.length < 2 || !fromPt || !toPt) return pts;
+				// nearest index by simple lat/lon distance (fast approximation)
+				const sqDist = (a, b) => {
+					const dlat = a[0] - b[0];
+					const dlon = a[1] - b[1];
+					return dlat * dlat + dlon * dlon;
+				};
+				let idxFrom = null;
+				let idxTo = null;
+				let bestFrom = Infinity;
+				let bestTo = Infinity;
+				for (let i = 0; i < pts.length; i++) {
+					const p = pts[i];
+					const dF = sqDist(p, fromPt);
+					const dT = sqDist(p, toPt);
+					if (dF < bestFrom) { bestFrom = dF; idxFrom = i; }
+					if (dT < bestTo) { bestTo = dT; idxTo = i; }
+				}
+				if (idxFrom == null || idxTo == null) return pts;
+				if (idxFrom <= idxTo) return pts.slice(idxFrom, idxTo + 1);
+				return pts.slice(idxTo, idxFrom + 1);
+			};
+
+			// If provided, _from/_to are in [lat, lon] format
+			if (s._from && s._to) {
+				const clipped = clipToLeg(coords, s._from, s._to);
+				if (Array.isArray(clipped) && clipped.length >= 2) {
+					// replace coords with clipped segment
+					coords.length = 0;
+					coords.push(...clipped);
+				}
+			}
+			const key = `${s.id || 'seg'}-${coords.length}`;
+			out.push({ ...s, coords, _normKey: key });
+		}
+		return out;
+	};
+
+	const normSegments = normalizeSegments(segments);
+
+	// Densify sparse coords to make polylines appear smoother when OSRM smoothing
+	// isn't available. Only apply to non-walk segments to keep walk legs dashed
+	// and visually lighter.
+	const densifyCoords = (coords, pointsPerPair = 2) => {
+		if (!Array.isArray(coords) || coords.length < 2) return coords;
+		const out = [];
+		for (let i = 0; i < coords.length - 1; i++) {
+			const [lat1, lon1] = coords[i];
+			const [lat2, lon2] = coords[i + 1];
+			out.push([lat1, lon1]);
+			for (let k = 1; k <= pointsPerPair; k++) {
+				const t = k / (pointsPerPair + 1);
+				out.push([lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t]);
+			}
+		}
+		// push last
+		out.push(coords[coords.length - 1]);
+		return out;
+	};
+
+	// For very sparse segments (2 points) create a gentle curved arc so the
+	// visual overlay looks like a route instead of a straight line.
+	const makeCurvedSegment = (a, b, numPoints = 20, curvature = 0.06) => {
+		// a, b are [lat, lon]
+		const [lat1, lon1] = a;
+		const [lat2, lon2] = b;
+		// Convert to radians for distance calc
+		const toRad = (d) => (d * Math.PI) / 180;
+		const R = 6371000; // meters
+		const dLat = toRad(lat2 - lat1);
+		const dLon = toRad(lon2 - lon1);
+		const phi1 = toRad(lat1);
+		const phi2 = toRad(lat2);
+		const hav = Math.sin(dLat/2)**2 + Math.cos(phi1)*Math.cos(phi2)*Math.sin(dLon/2)**2;
+		const dist = 2 * R * Math.atan2(Math.sqrt(hav), Math.sqrt(1-hav));
+		// Midpoint
+		const midLat = (lat1 + lat2) / 2;
+		const midLon = (lon1 + lon2) / 2;
+		// Perpendicular vector in degrees (approx)
+		const dx = lon2 - lon1;
+		const dy = lat2 - lat1;
+		// normalize perp
+		let px = -dy;
+		let py = dx;
+		const plen = Math.sqrt(px*px + py*py) || 1;
+		px /= plen; py /= plen;
+		// offset magnitude (degrees) — convert meters -> degrees roughly by 111320 m per degree latitude
+		const offsetMeters = Math.max(30, Math.min(500, dist * curvature));
+		const offsetDeg = offsetMeters / 111320;
+		const centerLat = midLat + py * offsetDeg;
+		const centerLon = midLon + px * offsetDeg;
+		// Build quadratic Bezier from a -> center -> b
+		const pts = [];
+		for (let i = 0; i <= numPoints; i++) {
+			const t = i / numPoints;
+			// Quadratic Bezier: (1-t)^2 * a + 2(1-t)t*c + t^2 * b
+			const lat = (1-t)*(1-t)*lat1 + 2*(1-t)*t*centerLat + t*t*lat2;
+			const lon = (1-t)*(1-t)*lon1 + 2*(1-t)*t*centerLon + t*t*lon2;
+			pts.push([lat, lon]);
+		}
+		return pts;
+	};
+
+	// Chaikin smoothing (corner-cutting) to make polylines visually smoother.
+	const chaikinSmooth = (coords, iterations = 2) => {
+		if (!Array.isArray(coords) || coords.length < 3) return coords;
+		let pts = coords.slice();
+		for (let it = 0; it < iterations; it++) {
+			const next = [];
+			next.push(pts[0]); // keep first
+			for (let i = 0; i < pts.length - 1; i++) {
+				const [x0, y0] = pts[i];
+				const [x1, y1] = pts[i + 1];
+				const Q = [0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1];
+				const R = [0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1];
+				next.push(Q);
+				next.push(R);
+			}
+			next.push(pts[pts.length - 1]);
+			pts = next;
+		}
+		return pts;
+	};
+
+	const displaySegments = normSegments.map((s) => {
+		const isWalk = s.mode === 'walking' || s.color === '#888888' || (s.id && s.id.startsWith('walk'));
+		// If already fairly dense, leave as-is. Otherwise densify non-walk legs and apply Chaikin smoothing.
+		if (!isWalk) {
+			let coords = s.coords;
+			if (coords.length === 2) {
+				// produce a curved arc between the two endpoints
+				coords = makeCurvedSegment(coords[0], coords[1], 24, 0.06);
+				return { ...s, coords };
+			}
+			if (coords.length < 40) coords = densifyCoords(coords, 3);
+			// apply smoothing to make the visual line more continuous
+			coords = chaikinSmooth(coords, 2);
+			return { ...s, coords };
+		}
+		return s;
+	});
+
 	useEffect(() => {
-		if (!segments || segments.length === 0) return;
-		const allCoords = segments.flatMap((s) => s.coords || []);
+		// DEV-LOG: inspect the incoming segments prop to verify coords shape (after normalization/densify)
+		// eslint-disable-next-line no-console
+		console.debug('[DEBUG] JourneyRouteLayer display segments:', Array.isArray(displaySegments) ? displaySegments.map(s => ({ id: s.id, coordsLen: (s.coords || []).length, key: s._normKey })) : displaySegments);
+
+		if (!displaySegments || displaySegments.length === 0) return;
+		const allCoords = displaySegments.flatMap((s) => s.coords || []);
 		if (allCoords.length < 2) return;
 		try {
 			map.fitBounds(allCoords, { padding: [40, 40], maxZoom: 15 });
 		} catch (e) {
 			// ignore if map not ready
 		}
-	}, [map, segments]);
+		}, [map, JSON.stringify(displaySegments.map(s => s._normKey))]);
 
-	if (!segments || segments.length === 0) return null;
+		if (!displaySegments || displaySegments.length === 0) return null;
 
-	return (
-		<>
-			{segments.map((seg) => {
-				if (!seg.coords || seg.coords.length < 2) return null;
-				const isWalk = seg.color === '#888888' || (seg.id && seg.id.startsWith('walk'));
-				return (
-					<Polyline
-						key={seg.id}
-						positions={seg.coords}
-						pathOptions={{
-							color: seg.color || '#1a73e8',
-							weight: isWalk ? 3 : 5,
-							opacity: isWalk ? 0.6 : 0.85,
-							dashArray: isWalk ? '6 8' : undefined,
-						}}
-					/>
-				);
-			})}
-			{/* Origin dot */}
-			{segments[0]?.coords?.[0] && (
-				<CircleMarker
-					center={segments[0].coords[0]}
-					radius={7}
-					pathOptions={{ color: '#fff', weight: 2, fillColor: '#10B981', fillOpacity: 1 }}
-				/>
-			)}
-			{/* Destination dot */}
-			{(() => {
-				const last = segments[segments.length - 1];
-				const pt = last?.coords?.[last.coords.length - 1];
-				if (!pt) return null;
-				return (
+		return (
+			<>
+				{displaySegments.map((seg) => {
+					if (!seg.coords || seg.coords.length < 2) return null;
+					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && seg.id.startsWith('walk'));
+					// Use normalized key to force Leaflet to replace the polyline when coords change
+					return (
+						<Polyline
+							key={seg._normKey}
+							positions={seg.coords}
+							pathOptions={{
+								color: isWalk ? '#000000' : (seg.color || '#1a73e8'),
+								weight: isWalk ? 2.5 : 4,
+								opacity: isWalk ? 0.9 : 0.92,
+								lineCap: 'round',
+								lineJoin: 'round',
+								dashArray: isWalk ? '6 8' : undefined,
+							}}
+						/>
+					);
+				})}
+				{/* Origin dot */}
+				{displaySegments[0]?.coords?.[0] && (
 					<CircleMarker
-						center={pt}
+						center={displaySegments[0].coords[0]}
 						radius={7}
-						pathOptions={{ color: '#fff', weight: 2, fillColor: '#d32f2f', fillOpacity: 1 }}
+						pathOptions={{ color: '#fff', weight: 2, fillColor: '#10B981', fillOpacity: 1 }}
 					/>
-				);
-			})()}
-		</>
-	);
+				)}
+				{/* Destination dot */}
+				{(() => {
+					const last = displaySegments[displaySegments.length - 1];
+					const pt = last?.coords?.[last.coords.length - 1];
+					if (!pt) return null;
+					return (
+						<CircleMarker
+							center={pt}
+							radius={7}
+							pathOptions={{ color: '#fff', weight: 2, fillColor: '#d32f2f', fillOpacity: 1 }}
+						/>
+					);
+				})()}
+			</>
+		);
 };
 
 const MapController = ({ onReady, onMoveEnd }) => {
@@ -416,6 +590,7 @@ export default function MapViewMap({
 					<RouteLineLayer activeRoutes={activeRoutes} />
 				{/* Journey-plan route overlay */}
 				<JourneyRouteLayer segments={journeyRoute} />
+				{/* Developer debug overlay removed - rely on JourneyRouteLayer smoothing and styling */}
 					{filteredMarkers.map((marker) => (
 						<Marker
 							key={marker.id}

@@ -47,6 +47,14 @@ const [locationStatus, setLocationStatus] = useState('idle');
 const [locationError, setLocationError] = useState(null);
 const [mapInstance, setMapInstance] = useState(null);
 
+// Track current map center for dynamic bus-live queries
+const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+
+// Called by MapViewMap whenever the map finishes panning/zooming
+const handleMoveEnd = useCallback(({ lat, lon }) => {
+  setMapCenter({ lat, lon });
+}, []);
+
 // Search bar state
 const [searchQuery, setSearchQuery] = useState('');
 const [searchValue, setSearchValue] = useState(null);
@@ -62,14 +70,6 @@ const handleSearchSelect = useCallback((option) => {
   setSearchValue(null);
   setSearchQuery('');
 }, [mapInstance]);
-
-// Track current map center for dynamic bus-live queries
-const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
-
-// Called by MapViewMap whenever the map finishes panning/zooming
-const handleMoveEnd = useCallback(({ lat, lon }) => {
-setMapCenter({ lat, lon });
-}, []);
 
 // Fetch real data from API using the current map center (debounced inside the hook)
 const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('SCCU', {
