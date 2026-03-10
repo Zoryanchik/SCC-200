@@ -162,6 +162,70 @@ const MOCK_MARKERS = [
 
 const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
 
+// Geometry helpers: haversine distance and robust nearest-index with a
+// tolerance. These are used when splitting a full-route smoothed polyline
+// into per-leg segments — using a meter-based tolerance avoids losing very
+// short walking transfers when OSRM smoothing slightly shifts points.
+const _toRad = (d) => (d * Math.PI) / 180;
+const haversineMeters = (a, b) => {
+  if (!a || !b) return Infinity;
+  const lat1 = Number(a[0]); const lon1 = Number(a[1]);
+  const lat2 = Number(b[0]); const lon2 = Number(b[1]);
+  if (!Number.isFinite(lat1) || !Number.isFinite(lon1) || !Number.isFinite(lat2) || !Number.isFinite(lon2)) return Infinity;
+  const R = 6371000; // metres
+  const dLat = _toRad(lat2 - lat1);
+  const dLon = _toRad(lon2 - lon1);
+  const phi1 = _toRad(lat1);
+  const phi2 = _toRad(lat2);
+  const aHarv = Math.sin(dLat / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(aHarv), Math.sqrt(1 - aHarv));
+};
+
+// Project point p ([lat,lon]) onto segment a->b (both [lat,lon]). Returns
+// the projected point [lat,lon]. This treats lat/lon as planar which is fine
+// for short distances used here.
+const projectPointToSegment = (p, a, b) => {
+  const ay = Number(a[0]); const ax = Number(a[1]);
+  const by = Number(b[0]); const bx = Number(b[1]);
+  const py = Number(p[0]); const px = Number(p[1]);
+  const vx = bx - ax; const vy = by - ay; // vector a->b in lon/lat
+  const wx = px - ax; const wy = py - ay; // vector a->p
+  const denom = vx * vx + vy * vy;
+  if (denom === 0) return [ay, ax];
+  let t = (wx * vx + wy * vy) / denom;
+  if (t < 0) t = 0; if (t > 1) t = 1;
+  return [ay + vy * t, ax + vx * t];
+};
+
+// Find the nearest index in `coords` to `pt` within `tolMeters`. If no
+// coord is within tol, attempt to find the nearest projection onto each
+// segment and accept that if it's within tol. Returns index (0..n-1) or
+// null when nothing close enough.
+const nearestIndexWithTolerance = (coords, pt, tolMeters = 80) => {
+  if (!Array.isArray(coords) || coords.length === 0 || !pt) return null;
+  let bestIdx = null; let bestDist = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const d = haversineMeters(coords[i], pt);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  if (bestDist <= tolMeters) return bestIdx;
+  // Try projecting to each segment and see if projection is within tol.
+  let bestSegIdx = null; let bestProjDist = Infinity; let bestProjPoint = null;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const proj = projectPointToSegment(pt, coords[i], coords[i + 1]);
+    const d = haversineMeters(proj, pt);
+    if (d < bestProjDist) { bestProjDist = d; bestSegIdx = i; bestProjPoint = proj; }
+  }
+  if (bestProjDist <= tolMeters && bestSegIdx != null) {
+    // Choose the nearer endpoint of the segment to represent the projected
+    // location as an index to slice the coords array coherently.
+    const i = bestSegIdx;
+    const d0 = haversineMeters(coords[i], bestProjPoint);
+    const d1 = haversineMeters(coords[i + 1], bestProjPoint);
+    return d0 <= d1 ? i : i + 1;
+  }
+  return null;
+};
 export default function HomePage() {
   const LABEL_DESCRIPTIONS = {
     'EA': 'Earliest Arrival',
@@ -956,18 +1020,86 @@ export default function HomePage() {
                 }
                 return out;
               };
+              // Fetch walking geometry for any walking segments that only have
+              // crude [from,to] coords. This runs in background and updates
+              // routeOptions in-place when better geometry is available.
+              const fetchWalkingSegmentCoords = async (fromPt, toPt) => {
+                try {
+                  const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
+                  const url = `${API_BASE.replace(/\/$/, '')}/route/walking?from_lat=${encodeURIComponent(fromPt[0])}&from_lon=${encodeURIComponent(fromPt[1])}&to_lat=${encodeURIComponent(toPt[0])}&to_lon=${encodeURIComponent(toPt[1])}`;
+                  const resp = await fetch(url);
+                  if (!resp.ok) return null;
+                  const data = await resp.json();
+                  if (!data || !Array.isArray(data.coords) || data.coords.length < 2) return null;
+                  return data.coords;
+                } catch (e) {
+                  return null;
+                }
+              };
+
+              const fetchWalkingForOption = async (optIdx) => {
+                try {
+                  const opt = routeOptions?.[optIdx];
+                  if (!opt || !Array.isArray(opt.routeGeometries)) return;
+                  const geoms = opt.routeGeometries;
+                  let changed = false;
+                  const updated = await Promise.all(geoms.map(async (seg) => {
+                    const isWalk = seg && (seg.mode === 'walking' || String(seg.id || '').startsWith('walk') || seg.name === 'walk');
+                    if (!isWalk) return seg;
+                    if (!Array.isArray(seg.coords) || seg.coords.length <= 2) {
+                      const fromPt = Array.isArray(seg.coords) && seg.coords[0] ? seg.coords[0] : null;
+                      const toPt = Array.isArray(seg.coords) && seg.coords[seg.coords.length - 1] ? seg.coords[seg.coords.length - 1] : null;
+                      if (!fromPt || !toPt) return seg;
+                      const coords = await fetchWalkingSegmentCoords(fromPt, toPt);
+                      if (Array.isArray(coords) && coords.length >= 2) {
+                        changed = true;
+                        return { ...seg, coords, id: (seg.id || 'walk') + '-geom' };
+                      }
+                    }
+                    return seg;
+                  }));
+                  if (changed) {
+                    setRouteOptions((prev) => {
+                      if (!Array.isArray(prev)) return prev;
+                      const copy = prev.slice();
+                      copy[optIdx] = { ...copy[optIdx], routeGeometries: updated };
+                      return copy;
+                    });
+                  }
+                } catch (e) {
+                  // ignore background failures
+                }
+              };
               const splitCoordsIntoLegs = (coords, legs) => {
                 if (!Array.isArray(coords) || coords.length < 2) return [];
                 if (!Array.isArray(legs) || legs.length === 0) return [{ id: 'smoothed-0', name: 'Smoothed route', coords, color: '#1a73e8' }];
-                const sqDist = (a, b) => { const dlat = a[0] - b[0]; const dlon = a[1] - b[1]; return dlat * dlat + dlon * dlon; };
-                const nearestIndex = (pt) => {
+                const TOL = 80; // metres
+                const pureNearestIdx = (pt) => {
                   if (!pt) return null;
-                  let best = Infinity; let idx = null;
+                  let best = Infinity, idx = null;
                   for (let i = 0; i < coords.length; i++) {
-                    const d = sqDist(coords[i], pt);
+                    const d = haversineMeters(coords[i], pt);
                     if (d < best) { best = d; idx = i; }
                   }
                   return idx;
+                };
+                // When nearest-with-tolerance fails, try projecting the point
+                // onto each segment and choose the nearer endpoint of the best
+                // projection. This is more robust when OSRM smoothing shifts
+                // points away from exact stop coords.
+                const projectIndex = (pt) => {
+                  if (!pt) return null;
+                  let bestSeg = null; let bestProj = null; let bestDist = Infinity;
+                  for (let i = 0; i < coords.length - 1; i++) {
+                    const proj = projectPointToSegment(pt, coords[i], coords[i + 1]);
+                    const d = haversineMeters(proj, pt);
+                    if (d < bestDist) { bestDist = d; bestSeg = i; bestProj = proj; }
+                  }
+                  if (bestSeg == null) return null;
+                  const i = bestSeg;
+                  const d0 = haversineMeters(coords[i], bestProj);
+                  const d1 = haversineMeters(coords[i + 1], bestProj);
+                  return d0 <= d1 ? i : i + 1;
                 };
                 const segments = [];
                 for (let i = 0; i < legs.length; i++) {
@@ -976,11 +1108,17 @@ export default function HomePage() {
                   const to = leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number' ? [leg.to_stop.lat, leg.to_stop.lon] : null;
                   let segCoords = null;
                   if (from && to) {
-                    const fi = nearestIndex(from);
-                    const ti = nearestIndex(to);
+                    const fi = nearestIndexWithTolerance(coords, from, TOL);
+                    const ti = nearestIndexWithTolerance(coords, to, TOL);
                     if (fi != null && ti != null) {
-                      if (fi <= ti) segCoords = coords.slice(fi, ti + 1);
-                      else segCoords = coords.slice(ti, fi + 1);
+                      segCoords = fi <= ti ? coords.slice(fi, ti + 1) : coords.slice(ti, fi + 1);
+                    } else {
+                      // Relax: try projecting to nearest segment (robust when
+                      // OSRM smoothing moves endpoints) then fall back to pure
+                      // nearest index as a last resort.
+                      const f2 = projectIndex(from) ?? pureNearestIdx(from);
+                      const t2 = projectIndex(to) ?? pureNearestIdx(to);
+                      if (f2 != null && t2 != null) segCoords = f2 <= t2 ? coords.slice(f2, t2 + 1) : coords.slice(t2, f2 + 1);
                     }
                   }
                   if (!Array.isArray(segCoords) || segCoords.length < 2) {
@@ -1001,6 +1139,9 @@ export default function HomePage() {
               const newOptions = sortedArr.slice();
               newOptions[0] = { ...newOptions[0], routeGeometries: segments };
               setRouteOptions(newOptions);
+              // Background: try to replace crude [from,to] walking segments
+              // with OSRM foot-profile geometry for a better visual.
+              void fetchWalkingForOption(0);
               setSelectedRouteIdx(0);
               setIsSearching(false);
               return;
@@ -1076,12 +1217,57 @@ export default function HomePage() {
               if (!Array.isArray(norm) || norm.length < 2) {
                 setSelectedRouteIdx(0);
               } else {
+                // Attempt to split the smoothed full-route coords into per-leg
+                // segments using the plan's leg endpoints so walking legs stay
+                // separate from vehicle legs. If splitting fails, fall back to
+                // a single smoothed segment as before.
+                const splitCoordsIntoLegs = (coords, legs) => {
+                  if (!Array.isArray(coords) || coords.length < 2) return [];
+                  if (!Array.isArray(legs) || legs.length === 0) return [];
+                  const TOL = 80; // metres
+                  const pureNearestIdx = (pt) => {
+                    if (!pt) return null;
+                    let best = Infinity, idx = null;
+                    for (let i = 0; i < coords.length; i++) {
+                      const d = haversineMeters(coords[i], pt);
+                      if (d < best) { best = d; idx = i; }
+                    }
+                    return idx;
+                  };
+                  const segments = [];
+                  for (let i = 0; i < legs.length; i++) {
+                    const leg = legs[i] || {};
+                    const from = leg.from_stop && typeof leg.from_stop.lat === 'number' && typeof leg.from_stop.lon === 'number' ? [leg.from_stop.lat, leg.from_stop.lon] : null;
+                    const to = leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number' ? [leg.to_stop.lat, leg.to_stop.lon] : null;
+                    let segCoords = null;
+                    if (from && to) {
+                      const fi = nearestIndexWithTolerance(coords, from, TOL);
+                      const ti = nearestIndexWithTolerance(coords, to, TOL);
+                      if (fi != null && ti != null) {
+                        segCoords = fi <= ti ? coords.slice(fi, ti + 1) : coords.slice(ti, fi + 1);
+                      } else {
+                        const f2 = projectIndex(from) ?? pureNearestIdx(from);
+                        const t2 = projectIndex(to) ?? pureNearestIdx(to);
+                        if (f2 != null && t2 != null) segCoords = f2 <= t2 ? coords.slice(f2, t2 + 1) : coords.slice(t2, f2 + 1);
+                      }
+                    }
+                    if (!Array.isArray(segCoords) || segCoords.length < 2) {
+                      if (from && to) segCoords = [from, to]; else continue;
+                    }
+                    segments.push({ id: `seg-${i}`, name: leg.line_name || (leg.mode ? leg.mode : `Segment ${i}`), coords: segCoords, color: (leg.mode === 'walking' || (leg && leg.mode && String(leg.mode).toLowerCase() === 'walking')) ? '#000000' : '#1a73e8', mode: (leg.mode && String(leg.mode).toLowerCase()) || (leg.line_name ? 'transit' : 'walking') });
+                  }
+                  return segments;
+                };
+
+                const segments = splitCoordsIntoLegs(norm, plan?.legs || []);
                 const newOptions = sortedOptions.slice();
                 newOptions[0] = {
                   ...newOptions[0],
-                  routeGeometries: [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
+                  routeGeometries: (Array.isArray(segments) && segments.length > 0) ? segments : [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
                 };
                 setRouteOptions(newOptions);
+                // Background: attempt to fetch OSRM walking geometry for small walk segments
+                void fetchWalkingForOption(0);
                 setSelectedRouteIdx(0);
               }
             }
@@ -1240,18 +1426,80 @@ export default function HomePage() {
         return;
       }
 
-      // Replace the option's routeGeometries with a single smoothed segment
+      // Attempt to split smoothed route into per-leg segments using the plan
+      // so small walking transfers (walk->bus) remain distinct and render
+      // with the walking style. Fall back to a single smoothed segment.
+      const splitCoordsIntoLegs = (coords, legs) => {
+        if (!Array.isArray(coords) || coords.length < 2) return [];
+        if (!Array.isArray(legs) || legs.length === 0) return [];
+        const TOL = 80; // metres
+        const pureNearestIdx = (pt) => {
+          if (!pt) return null;
+          let best = Infinity, idx = null;
+          for (let i = 0; i < coords.length; i++) {
+            const d = haversineMeters(coords[i], pt);
+            if (d < best) { best = d; idx = i; }
+          }
+          return idx;
+        };
+        const projectIndex = (pt) => {
+          if (!pt) return null;
+          let bestSeg = null; let bestProj = null; let bestDist = Infinity;
+          for (let i = 0; i < coords.length - 1; i++) {
+            const proj = projectPointToSegment(pt, coords[i], coords[i + 1]);
+            const d = haversineMeters(proj, pt);
+            if (d < bestDist) { bestDist = d; bestSeg = i; bestProj = proj; }
+          }
+          if (bestSeg == null) return null;
+          const i = bestSeg;
+          const d0 = haversineMeters(coords[i], bestProj);
+          const d1 = haversineMeters(coords[i + 1], bestProj);
+          return d0 <= d1 ? i : i + 1;
+        };
+        const segments = [];
+        for (let i = 0; i < legs.length; i++) {
+          const leg = legs[i] || {};
+          const from = leg.from_stop && typeof leg.from_stop.lat === 'number' && typeof leg.from_stop.lon === 'number' ? [leg.from_stop.lat, leg.from_stop.lon] : null;
+          const to = leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number' ? [leg.to_stop.lat, leg.to_stop.lon] : null;
+          let segCoords = null;
+          if (from && to) {
+            const fi = nearestIndexWithTolerance(coords, from, TOL);
+            const ti = nearestIndexWithTolerance(coords, to, TOL);
+            if (fi != null && ti != null) {
+              segCoords = fi <= ti ? coords.slice(fi, ti + 1) : coords.slice(ti, fi + 1);
+            } else {
+              const f2 = projectIndex(from) ?? pureNearestIdx(from);
+              const t2 = projectIndex(to) ?? pureNearestIdx(to);
+              if (f2 != null && t2 != null) segCoords = f2 <= t2 ? coords.slice(f2, t2 + 1) : coords.slice(t2, f2 + 1);
+            }
+          }
+          if (!Array.isArray(segCoords) || segCoords.length < 2) {
+            if (from && to) segCoords = [from, to]; else continue;
+          }
+          segments.push({ id: `seg-${i}`, name: leg.line_name || (leg.mode ? leg.mode : `Segment ${i}`), coords: segCoords, color: (leg.mode === 'walking' || (leg && leg.mode && String(leg.mode).toLowerCase() === 'walking')) ? '#000000' : '#1a73e8', mode: (leg.mode && String(leg.mode).toLowerCase()) || (leg.line_name ? 'transit' : 'walking') });
+        }
+        return segments;
+      };
+
+      const firstSrcOfOpt = Object.values(routeOptions[idx].sources || {})[0];
+      const planForOpt = firstSrcOfOpt ? (firstSrcOfOpt.route ? firstSrcOfOpt.route : firstSrcOfOpt) : null;
+      const segments = splitCoordsIntoLegs(norm, planForOpt?.legs || plan?.legs || []);
+
+      // Replace the option's routeGeometries with either per-leg segments or
+      // a single smoothed segment as a fallback.
       const newOptions = routeOptions.slice();
       newOptions[idx] = {
         ...newOptions[idx],
-        routeGeometries: [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
+        routeGeometries: (Array.isArray(segments) && segments.length > 0) ? segments : [{ id: `smoothed-${ljid}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }],
       };
       // DEV-LOG: report the fetched smoothed geometry so we can verify ordering/shape
       // eslint-disable-next-line no-console
       console.debug('[DEBUG] fetched smoothed geometry for', ljid, { idx, coords: norm?.length, sample: norm?.slice(0,3), source: data.source || null });
-      setRouteOptions(newOptions);
-      // Now that geometry is applied, set the selected index so the map will render it
-      setSelectedRouteIdx(idx);
+  setRouteOptions(newOptions);
+  // Background: try to fetch improved walking geometry for this option
+  void fetchWalkingForOption(idx);
+  // Now that geometry is applied, set the selected index so the map will render it
+  setSelectedRouteIdx(idx);
     } catch (e) {
       // best-effort only — do not block selection on geometry failures
       // eslint-disable-next-line no-console

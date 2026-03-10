@@ -663,6 +663,50 @@ def _query_osrm_for_coords(osrm_base: str, coords_lonlat: list):
         return None
 
 
+    def _query_osrm_for_coords_profile(osrm_base: str, coords_lonlat: list, profile: str = 'driving'):
+        """Call OSRM route with a list of 'lon,lat' strings and a profile; return list of [lat,lon] or None on failure."""
+        if not coords_lonlat:
+            return None
+        coords_str = ";".join(coords_lonlat)
+        url = osrm_base.rstrip('/') + f"/route/v1/{profile}/{coords_str}?overview=full&geometries=geojson"
+        try:
+            req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
+            with urlopen(req, timeout=10) as resp:
+                data = json.load(resp)
+            if data.get('code') != 'Ok':
+                return None
+            routes = data.get('routes') or []
+            if not routes:
+                return None
+            geom = routes[0].get('geometry')
+            if not geom:
+                return None
+            coords = [[c[1], c[0]] for c in geom.get('coordinates', [])]
+            return coords
+        except URLError:
+            return None
+        except Exception:
+            return None
+
+
+    @app.get("/route/walking")
+    def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float):
+        """Return walking geometry between two points by proxying OSRM foot profile.
+
+        Query params: from_lat, from_lon, to_lat, to_lon
+        Response: {"coords": [[lat, lon], ...], "source": "osrm"} or {"error": "..."}
+        """
+        osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+        try:
+            coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
+            coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat, profile='foot')
+            if coords and len(coords) >= 2:
+                return {"coords": coords, "source": "osrm"}
+            return {"error": "no_geometry_available"}
+        except Exception:
+            return {"error": "failed"}
+
+
 def _fetch_route_tracks(route_id: str):
     """Return the route track from bus_route_tracks as list of (lat, lon) or [] on failure."""
     try:

@@ -278,7 +278,9 @@ const JourneyRouteLayer = ({ segments }) => {
 	};
 
 	const displaySegments = normSegments.map((s) => {
-		const isWalk = s.mode === 'walking' || s.color === '#888888' || (s.id && s.id.startsWith('walk'));
+		// Consider both backend 'mode' and frontend-normalised 'type' so
+		// walking legs are detected regardless of earlier normalisation.
+		const isWalk = s.mode === 'walking' || s.type === 'walk' || s.color === '#888888' || (s.id && s.id.startsWith('walk'));
 		// If already fairly dense, leave as-is. Otherwise densify non-walk legs and apply Chaikin smoothing.
 		if (!isWalk) {
 			let coords = s.coords;
@@ -319,8 +321,8 @@ const JourneyRouteLayer = ({ segments }) => {
 	// Ensure walking segments are rendered after vehicle segments so they are visually on top
 	// and use a heavier dashed style so they are not visually covered by bus tracks.
 	const renderSegments = (Array.isArray(displaySegments) ? displaySegments.slice() : []).sort((a, b) => {
-		const isWalkA = (a && (a.mode === 'walking' || a.color === '#888888' || (a.id && String(a.id).startsWith('walk'))));
-		const isWalkB = (b && (b.mode === 'walking' || b.color === '#888888' || (b.id && String(b.id).startsWith('walk'))));
+		const isWalkA = (a && (a.mode === 'walking' || a.type === 'walk' || a.color === '#888888' || (a.id && String(a.id).startsWith('walk'))));
+		const isWalkB = (b && (b.mode === 'walking' || b.type === 'walk' || b.color === '#888888' || (b.id && String(b.id).startsWith('walk'))));
 		if (isWalkA === isWalkB) return 0;
 		return isWalkA ? 1 : -1;
 	});
@@ -334,20 +336,51 @@ const JourneyRouteLayer = ({ segments }) => {
 					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && String(seg.id).startsWith('walk'));
 					// Use normalized key to force Leaflet to replace the polyline when coords change
 					// For walking segments, use a heavier weight and a bold dashed pattern so they remain visible on top of vehicle tracks.
-					return (
-						<Polyline
-							key={seg._normKey}
-							positions={seg.coords}
-							pathOptions={{
-								color: isWalk ? '#000000' : (seg.color || '#1a73e8'),
-								weight: isWalk ? 6 : 4,
-								opacity: isWalk ? 1 : 0.92,
-								lineCap: 'round',
-								lineJoin: 'round',
-								dashArray: isWalk ? '8 6' : undefined,
-							}}
-						/>
-					);
+						return (
+							<>
+								{/* Cyan underlay/frame so route lines (vehicle and walking) have a cyan outline */}
+								<Polyline
+									key={`${seg._normKey}-frame`}
+									positions={seg.coords}
+									pathOptions={{
+										color: '#00ffff',
+										weight: isWalk ? 5 : 6,
+										opacity: 0.95,
+										lineCap: 'round',
+										lineJoin: 'round',
+										dashArray: isWalk ? '10 6' : undefined,
+									}}
+								/>
+								{/* Main overlay line */}
+								<Polyline
+									key={seg._normKey}
+									positions={seg.coords}
+									pathOptions={{
+										// Walking legs: deep grey, dashed so they remain distinct from vehicle tracks
+										color: isWalk ? 'hsla(307, 53%, 67%, 1.00)' : (seg.color || '#1a73e8'),
+										weight: isWalk ? 4 : 4,
+										opacity: isWalk ? 1 : 1,
+										lineCap: 'round',
+										lineJoin: 'round',
+										dashArray: isWalk ? '10 6' : undefined,
+									}}
+								/>
+								{isWalk && seg.coords && seg.coords.length >= 2 && (
+									<>
+										<CircleMarker
+											center={seg.coords[0]}
+											radius={4}
+											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
+										/>
+										<CircleMarker
+											center={seg.coords[seg.coords.length - 1]}
+											radius={4}
+											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
+										/>
+									</>
+								)}
+							</>
+						);
 				})}
 				{/* Origin dot */}
 				{displaySegments[0]?.coords?.[0] && (
@@ -371,8 +404,8 @@ const JourneyRouteLayer = ({ segments }) => {
 					);
 				})()}
 			</>
-		);
-};
+			);
+	};
 
 const MapController = ({ onReady, onMoveEnd }) => {
 	const map = useMap();

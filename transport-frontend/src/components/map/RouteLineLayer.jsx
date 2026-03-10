@@ -34,18 +34,109 @@ function SingleRouteLine({ routeData }) {
   return (
     <>
       {routeData.variants.map((variant, idx) => {
-        // Prefer OSRM road-following geometry when available;
-        // fall back to straight stop-to-stop lines.
+        // Prefer OSRM / stored route geometry when available;
+        // fall back to straight stop-to-stop lines. When geometry is
+        // available we also merge explicit stop coordinates into the
+        // geometry so stops are guaranteed to lie on the rendered line
+        // and then do a light Chaikin smoothing pass for a nicer visual.
+        const stopPositions = stopsToLatLngs(variant.stops);
+        // Project a point onto a segment (a->b) returning the nearest point
+        const projectPointToSegment = (p, a, b) => {
+          // treat coordinates as (lat, lon) pairs in degrees — good enough for short distances
+          const vx = b[0] - a[0];
+          const vy = b[1] - a[1];
+          const wx = p[0] - a[0];
+          const wy = p[1] - a[1];
+          const denom = vx * vx + vy * vy || 1e-12;
+          let t = (wx * vx + wy * vy) / denom;
+          if (t < 0) t = 0;
+          if (t > 1) t = 1;
+          return [a[0] + t * vx, a[1] + t * vy];
+        };
+
+        // Insert each stop projected onto the nearest geometry segment so the
+        // route follows the main road rather than kink towards the raw stop coords.
+        const insertStopsIntoGeometry = (geom, stops) => {
+          if (!Array.isArray(geom) || geom.length < 2) return stops || [];
+          const out = geom.slice();
+
+          for (const stop of (stops || [])) {
+            let bestSegIdx = 0;
+            let bestD = Infinity;
+            let bestProj = null;
+            // Find nearest segment and projected point
+            for (let i = 0; i < out.length - 1; i++) {
+              const a = out[i];
+              const b = out[i + 1];
+              const proj = projectPointToSegment(stop, a, b);
+              const dlat = proj[0] - stop[0];
+              const dlon = proj[1] - stop[1];
+              const d2 = dlat * dlat + dlon * dlon;
+              if (d2 < bestD) {
+                bestD = d2;
+                bestSegIdx = i;
+                bestProj = proj;
+              }
+            }
+
+            if (bestProj) {
+              // Insert the projected point after the segment's start vertex so
+              // the stop lies on the polyline but the geometry shape remains road-following.
+              // Avoid inserting duplicates next to identical points.
+              const nextIdx = bestSegIdx + 1;
+              const existing = out[nextIdx];
+              if (!existing || existing[0] !== bestProj[0] || existing[1] !== bestProj[1]) {
+                out.splice(nextIdx, 0, bestProj);
+              }
+            }
+          }
+
+          return out;
+        };
+
+        const chaikinSmooth = (coords, iterations = 1) => {
+          if (!Array.isArray(coords) || coords.length < 3) return coords;
+          let pts = coords.slice();
+          for (let it = 0; it < iterations; it++) {
+            const next = [];
+            next.push(pts[0]);
+            for (let i = 0; i < pts.length - 1; i++) {
+              const [x0, y0] = pts[i];
+              const [x1, y1] = pts[i + 1];
+              const Q = [0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1];
+              const R = [0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1];
+              next.push(Q);
+              next.push(R);
+            }
+            next.push(pts[pts.length - 1]);
+            pts = next;
+          }
+          return pts;
+        };
+
         const positions = variant.geometry
-          ? variant.geometry
-          : stopsToLatLngs(variant.stops);
+          ? chaikinSmooth(insertStopsIntoGeometry(variant.geometry, stopPositions), 1)
+          : stopPositions;
+        
+        
         if (positions.length < 2) return null;
 
         const color = VARIANT_COLORS[idx % VARIANT_COLORS.length];
 
         return (
           <React.Fragment key={`${routeData.line}-v${idx}`}>
-            {/* The route polyline */}
+            {/* Cyan underlay/frame so route variants have a cyan outline */}
+            <Polyline
+              positions={positions}
+              pathOptions={{
+                color: '#00ffff',
+                weight: 6,
+                opacity: 0.9,
+                dashArray: idx > 0 ? '8 6' : undefined,
+              }}
+            />
+
+            {/* The route polyline (on top) */}
             <Polyline
               positions={positions}
               pathOptions={{
