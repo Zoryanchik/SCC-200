@@ -602,6 +602,15 @@ async def search_stops(
                 try:
                     # Use the atco_loader's DB to search stop_coords by name
                     conn = atco_loader._connect()
+                    # For read-only SELECT queries prefer autocommit so that
+                    # a single failing statement does not leave the
+                    # connection in an aborted transaction state which would
+                    # break subsequent reads if the connection were reused.
+                    try:
+                        conn.autocommit = True
+                    except Exception:
+                        # Some driver wrappers may not expose autocommit; ignore
+                        pass
                     cur = conn.cursor()
                     # Match by name, town, or the combined display (name, town)
                     # so queries that include a town (e.g. "George Street Lancaster")
@@ -906,6 +915,10 @@ async def search_stops(
                 if atco_loader:
                     try:
                         conn = atco_loader._connect()
+                        try:
+                            conn.autocommit = True
+                        except Exception:
+                            pass
                         cur = conn.cursor()
                         # Query only the atcos we need
                         placeholders = ','.join(['%s'] * len(missing_atcos))
@@ -2666,6 +2679,16 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     total_arrival = meta.get("total_arrival")
     destination_point = meta.get("destination", ())
 
+    # Boarding buffers (seconds) used to compute an adjusted arrival
+    # at the first stop: match router boarding buffers (bus/train)
+    BUS_BOARD_BUFFER = 60
+    TRAIN_BOARD_BUFFER = 180
+
+    # Track an explicit initial departure (seconds since midnight) when
+    # we compute it for the start walking leg. Initialise to None so
+    # it's available later when computing total duration.
+    initial_departure_secs = None
+
     # -- Start walking leg --
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
         first_int = ordered[0][0]
@@ -2675,14 +2698,42 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if first_coord:
             to_loc["lat"] = first_coord[0]
             to_loc["lon"] = first_coord[1]
+
+        # Adjust the arrival at the first stop to be the vehicle's
+        # departure minus a boarding buffer when the next leg is a
+        # transit leg. This models the user arriving early enough to
+        # board (e.g. 60s for bus, 180s for train).
+        first_arrival_secs = ordered[0][1]["arrival_time"]
+        if len(ordered) > 1:
+            next_info = ordered[1][1]
+            next_mode = (next_info.get("mode") or "").lower()
+            board_dep = next_info.get("board_departure")
+            if board_dep is not None and board_dep < float("inf"):
+                if next_mode == "bus":
+                    buf = BUS_BOARD_BUFFER
+                elif next_mode == "train":
+                    buf = TRAIN_BOARD_BUFFER
+                else:
+                    buf = BUS_BOARD_BUFFER
+                # ensure non-negative
+                first_arrival_secs = max(0, int(board_dep) - int(buf))
+
+        # Compute when the user should depart from the start point
+        initial_departure_secs = None
+        if first_arrival_secs is not None:
+            try:
+                initial_departure_secs = int(first_arrival_secs) - int(start_walk)
+            except Exception:
+                initial_departure_secs = None
+
         legs.append({
             "mode": "walking",
             "from_stop": {"name": "Start", "lat": start_point[0],
                           "lon": start_point[1]},
             "to_stop": to_loc,
             "duration_seconds": start_walk,
-            "departure_time": None,
-            "arrival_time": _time_str(ordered[0][1]["arrival_time"]),
+            "departure_time": _time_str(initial_departure_secs) if initial_departure_secs is not None else None,
+            "arrival_time": _time_str(first_arrival_secs),
         })
         wc = [[start_point[0], start_point[1]]]
         if first_coord:
@@ -2880,8 +2931,17 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     total_duration_secs = None
     total_duration_str = None
 
-    if total_arrival is not None and request_start_seconds is not None:
-        total_duration_secs = int(total_arrival - int(request_start_seconds))
+    # Prefer using the computed initial departure time when available to
+    # compute the canonical total journey duration. Fall back to the
+    # request_start_seconds when initial departure isn't present.
+    start_ref = None
+    if initial_departure_secs is not None:
+        start_ref = int(initial_departure_secs)
+    elif request_start_seconds is not None:
+        start_ref = int(request_start_seconds)
+
+    if total_arrival is not None and start_ref is not None:
+        total_duration_secs = int(total_arrival - int(start_ref))
         # Human-friendly duration string (e.g. "14 mins" or "1h 10 mins")
         if total_duration_secs >= 3600:
             hrs = total_duration_secs // 3600
@@ -2912,6 +2972,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
+            "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
         },
         "routeGeometries": geometries,
     }

@@ -13,7 +13,7 @@ import IconButton from "@mui/material/IconButton";
 import { memo } from "react";
 import { Bus, Train, MapPin, Heart } from "lucide-react";
 
-export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false, fullHeight = false }) {
+export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false, isSelected = false, fullHeight = false }) {
   const parseDurationToMinutes = (value) => {
     if (!value) return 0;
     if (typeof value === 'number') return value;
@@ -41,7 +41,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
       sx={{
         p: 2,
         transition: 'all 0.3s',
-        height: fullHeight ? '100%' : 360,
+        height: fullHeight ? '100%' : 'auto',
         minHeight: 160,
         display: 'flex',
         flexDirection: 'column',
@@ -49,9 +49,9 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
     >
       {/* Header (fixed) */}
       <Stack spacing={1.5} sx={{ flex: '0 0 auto' }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-          <Stack spacing={0.5}>
-            <Typography fontWeight={700} color="primary">
+            <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+            <Stack spacing={0.5}>
+            <Typography fontWeight={700} sx={{ color: (theme) => theme.palette.mode === 'light' ? '#000' : 'white' }}>
               {route.duration}
             </Typography>
             <Typography variant="caption" color="text.secondary">
@@ -66,7 +66,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
           <Stack alignItems="flex-end" spacing={0.5}>
             {route.price && (
               <>
-                <Typography fontWeight={700} color="success.main" sx={{ lineHeight: 1.2 }}>
+                <Typography fontWeight={700} sx={{ lineHeight: 1.2, color: (theme) => theme.palette.mode === 'light' ? '#4CBB17' : 'lime' }}>
                   {route.price}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
@@ -95,68 +95,89 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
         <Divider sx={{ my: 0.5 }} />
       </Stack>
 
-      {/* Steps container — scrollable area (fixed height) */}
-      <Box sx={{ overflowY: 'auto', maxHeight: 220, pr: 1, flex: '1 1 auto' }}>
+  {/* Steps container — make non-scrollable so card content flows naturally */}
+  <Box sx={{ overflowY: 'visible', overflowX: 'hidden', pr: 1, flex: '1 1 auto' }}>
         <Stack spacing={1}>
           {route.steps?.map((step, idx) => (
-            <Stack key={idx} direction="row" spacing={1.5} alignItems="flex-start">
-              {step.type === "walk" && <MapPin size={18} color="#6b7280" style={{ marginTop: 2 }} />}
-              {step.type === "bus" && <Bus size={18} color="#1976d2" style={{ marginTop: 2 }} />}
-              {step.type === "train" && <Train size={18} color="#2e7d32" style={{ marginTop: 2 }} />}
-              <Box sx={{ flex: 1 }}>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                  <Typography fontWeight={700} textTransform="capitalize" variant="body2">
-                    {step.type}
-                  </Typography>
-                  {step.route ? (
-                    <Typography variant="body2" fontWeight={600} color="primary" component="span">
-                      Line {step.route}
+            <Box key={idx}>
+              {/* Show starting stop for the first step */}
+              {idx === 0 && step.from && (
+                <Typography variant="body1" fontWeight={800} sx={{ mb: 0.5, color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc' }}>
+                  {step.from}
+                </Typography>
+              )}
+
+              {/* Mode + duration line with a downward indicator */}
+              <Stack direction="row" spacing={1} alignItems="flex-start">
+                {/* bold vertical connector to visually join stops */}
+                <Box sx={{ width: 28, display: 'flex', justifyContent: 'center' }}>
+                  <Box sx={{ width: 6, bgcolor: '#00bcd4', borderRadius: 3, minHeight: 36 }} />
+                </Box>
+                <Box sx={{ flex: 1 }}>
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                    <Typography fontWeight={800} textTransform="capitalize" variant="body1">
+                      {step.type === 'walk' ? 'Walk' : step.type === 'bus' ? 'Bus' : step.type}
                     </Typography>
-                  ) : null}
-                  <Typography variant="body2" color="text.secondary" component="span">
-                    {step.duration}
-                  </Typography>
-                </Stack>
+                    {step.type === 'bus' && step.route && (
+                      <Typography variant="body1" fontWeight={700} color="primary" component="span">
+                        Line {step.route}
+                      </Typography>
+                    )}
+                    <Typography variant="body2" color="text.secondary" component="span" fontWeight={700}>
+                      {step.duration}
+                    </Typography>
+                  </Stack>
 
-                {(step.from || step.to) && (
-                  <Typography variant="body2" sx={{ mt: 0.25 }}>
-                    {step.from ? step.from : null}
-                    {step.from && step.to ? " → " : ""}
-                    {step.to ? step.to : null}
-                  </Typography>
-                )}
+                  {/* For walk show arrival; for vehicles show service and dep/arr */}
+                  {step.type === 'walk' ? (
+                    <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }} fontWeight={400} color="text.secondary">
+                      {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
+                      {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
+                      {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
+                    </Typography>
+                  ) : (
+                    <>
+                      {(step.journey_origin || step.journey_destination) && (
+                        <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }} fontWeight={400} color="text.secondary">
+                            Service: {step.journey_origin || '?'} → {step.journey_destination || '?'}
+                          </Typography>
+                      )}
+                      {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
+                        <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }} fontWeight={400} color="text.secondary">
+                          {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
+                          {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
+                          {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
+                          {step.type !== 'walk' ? ' (planned)' : ''}
+                        </Typography>
+                      )}
+                    </>
+                  )}
 
-                {(step.journey_origin || step.journey_destination) && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
-                    Service: {step.journey_origin || "?"} → {step.journey_destination || "?"}
-                  </Typography>
-                )}
+                  {/* Realtime / status indicators (kept below the times) */}
+                  {step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset) && (
+                    <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.5 }}>
+                      {step.realtime_departure_time_with_offset ? `Dep ${step.realtime_departure_time_with_offset}` : ""}
+                      {step.realtime_departure_time_with_offset && step.realtime_arrival_time_with_offset ? "  •  " : ""}
+                      {step.realtime_arrival_time_with_offset ? `Arr ${step.realtime_arrival_time_with_offset}` : ""}
+                      {" (expected)"}
+                    </Typography>
+                  )}
 
-                {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
-                  <Typography variant="caption" fontWeight={500} color={step.delay_seconds > 0 ? "text.disabled" : "text.secondary"} data-testid={`step-time-${idx}`} sx={{ display: "block", mt: 0.25, textDecoration: step.delay_seconds > 0 ? "line-through" : "none" }}>
-                    {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ""}
-                    {step.departure_time_with_offset && step.arrival_time_with_offset ? "  •  " : ""}
-                    {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ""}
-                    {step.type !== 'walk' ? " (planned)" : ""}
-                  </Typography>
-                )}
+                  {step.status && step.status !== "On time" && (
+                    <Typography variant="caption" fontWeight={700} color="error.main" data-testid={`step-delay-${idx}`} sx={{ display: "inline-block", mt: 0.5, px: 0.75, py: 0.15, borderRadius: 1, bgcolor: "error.50" }}>
+                      ⚠ {step.status}
+                    </Typography>
+                  )}
+                </Box>
+              </Stack>
 
-                {step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset) && (
-                  <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.25 }}>
-                    {step.realtime_departure_time_with_offset ? `Dep ${step.realtime_departure_time_with_offset}` : ""}
-                    {step.realtime_departure_time_with_offset && step.realtime_arrival_time_with_offset ? "  •  " : ""}
-                    {step.realtime_arrival_time_with_offset ? `Arr ${step.realtime_arrival_time_with_offset}` : ""}
-                    {" (expected)"}
-                  </Typography>
-                )}
-
-                {step.status && step.status !== "On time" && (
-                  <Typography variant="caption" fontWeight={700} color="error.main" data-testid={`step-delay-${idx}`} sx={{ display: "inline-block", mt: 0.25, px: 0.75, py: 0.15, borderRadius: 1, bgcolor: "error.50" }}>
-                    ⚠ {step.status}
-                  </Typography>
-                )}
-              </Box>
-            </Stack>
+              {/* Destination stop for this step */}
+              {step.to && (
+                <Typography variant="body1" fontWeight={800} sx={{ mt: 0.5, mb: 1, color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc' }}>
+                  {step.to}
+                </Typography>
+              )}
+            </Box>
           ))}
         </Stack>
       </Box>

@@ -14,6 +14,10 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CircularProgress from "@mui/material/CircularProgress";
+import Dialog from "@mui/material/Dialog";
+import DialogTitle from "@mui/material/DialogTitle";
+import DialogContent from "@mui/material/DialogContent";
+import DialogActions from "@mui/material/DialogActions";
 import { AlertCircle, Bus, Clock, MapPin, Navigation as NavIcon, Crosshair, Train, Heart, X } from "lucide-react";
 import { useStopSearch, useFavoriteRoutes, useLiveDepartures, useServiceAlerts, useLiveUpdates, useLiveBusLocations } from "../hooks/useTransportData";
 import { getJourneyPlans, compareRouters } from "../services/transportApi";
@@ -145,6 +149,9 @@ export default function HomePage() {
   const [showSuggested, setShowSuggested] = useState(false);
   // Geometry drawn on the map: derived from the selected option
   const journeyRoute = routeOptions[selectedRouteIdx]?.routeGeometries ?? null;
+
+  // State for showing router/label details when a label chip is clicked
+  const [labelDetail, setLabelDetail] = useState({ open: false, label: '', content: null });
 
   // ---- Map + live-bus state (merged from map-view-page) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
@@ -518,43 +525,85 @@ export default function HomePage() {
 
       // Desired display order (human-friendly)
       const routerOrder = [
-        { key: 'main', label: 'Original' },
+        { key: 'main', label: 'E·A' },
         { key: 'eco', label: 'Eco' },
         { key: 'lazy', label: 'Lazy' },
         { key: 'greedy', label: 'Greedy' },
       ];
 
-      const options = routerOrder.reduce((acc, item, idx) => {
+      // Build options but merge identical journeys (same steps) and collect their labels.
+      const optionsMap = new Map(); // signature -> option
+
+      const makeSignature = (card) => {
+        if (!card || !Array.isArray(card.steps)) return JSON.stringify(card || {});
+        return card.steps.map(s => `${s.type}|${s.route}|${s.from}|${s.to}|${s.duration}`).join('||');
+      };
+
+      routerOrder.forEach((item) => {
         const res = compareResp[item.key];
         if (res && res.route) {
-          // Some compare responses wrap route under `route`/`route_text` etc.
-          const journey = res.route || res; // tolerate both shapes
+          const journey = res.route || res;
           const card = journeyToRouteCard(journey);
           if (card) {
-            acc.push({
-              id: acc.length + 1,
-              card: { ...card, id: acc.length + 1 },
-              routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
-              label: item.label,
-            });
-            return acc;
+            const sig = makeSignature(card);
+            if (optionsMap.has(sig)) {
+              const existing = optionsMap.get(sig);
+              if (!existing.labels.includes(item.label)) {
+                existing.labels.push(item.label);
+                existing.label = existing.labels.join(' · ');
+                // record the per-label source for detail view
+                existing.sources = existing.sources || {};
+                existing.sources[item.label] = res;
+              }
+            } else {
+              const id = optionsMap.size + 1;
+              optionsMap.set(sig, {
+                id,
+                card: { ...card, id },
+                routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
+                labels: [item.label],
+                label: item.label,
+                sources: { [item.label]: res },
+              });
+            }
+            return;
           }
         }
-        // No route returned for this router — placeholder
-        acc.push({
-          id: acc.length + 1,
+
+        // No route returned for this router — treat as a placeholder but try to merge
+        const placeholder = {
+          id: null,
           card: {
-            id: acc.length + 1,
+            id: null,
             duration: 'No route found',
             transfers: maxTransfers,
             steps: [],
             walkMinutes: 0,
           },
           routeGeometries: [],
+          labels: [item.label],
           label: item.label,
-        });
-        return acc;
-      }, []);
+        };
+        const sig = `__placeholder__${item.label}`;
+        if (optionsMap.has(sig)) {
+          const existing = optionsMap.get(sig);
+          if (!existing.labels.includes(item.label)) {
+            existing.labels.push(item.label);
+            existing.label = existing.labels.join(' · ');
+            existing.sources = existing.sources || {};
+            existing.sources[item.label] = res;
+          }
+        } else {
+          const id = optionsMap.size + 1;
+          placeholder.id = id;
+          placeholder.card.id = id;
+          // attach sources map even for placeholders so the UI can show detail
+          placeholder.sources = { [item.label]: res };
+          optionsMap.set(sig, placeholder);
+        }
+      });
+
+      const options = Array.from(optionsMap.values());
 
       // If compare returned no routes for any router, fall back to a single
       // main /journey/plan call so the user still sees results when compare
@@ -571,7 +620,7 @@ export default function HomePage() {
               id: 1,
               card: { ...mainCard, id: 1 },
               routeGeometries: Array.isArray(mainJourney.routeGeometries) ? mainJourney.routeGeometries : [],
-              label: 'Original',
+              label: 'E·A',
             }]);
             setSelectedRouteIdx(0);
             setIsSearching(false);
@@ -612,13 +661,18 @@ export default function HomePage() {
     setSelectedRouteIdx(idx);
   };
 
+  const handleOpenLabelDetail = (opt, label) => {
+    const content = opt?.sources?.[label] ?? null;
+    setLabelDetail({ open: true, label, content });
+  };
+
   const MapFallback = () => (
     <Skeleton variant="rounded" sx={{ width: "100%", height: { xs: 350, md: 450 } }} />
   );
 
   // Build the suggested routes panel so it can be injected into the map side column
   const suggestedRoutesPanel = (
-    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050, height: '100%', display: 'flex', flexDirection: 'column', border: '1px solid', borderColor: '#00bcd4' }}>
       <Stack spacing={2} sx={{ flex: '0 0 auto' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 1051 }}>
           <Typography variant="h6" fontWeight={700}>
@@ -644,36 +698,46 @@ export default function HomePage() {
               <Box
                 key={opt.id}
                 onClick={() => handleSelectRoute(idx)}
-                sx={{ cursor: 'pointer' }}
+                sx={{ cursor: 'pointer', height: 'auto', display: 'block' }}
               >
-                {/* Option label + selected indicator */}
-                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
-                  <Box
-                    sx={{
-                      width: 22, height: 22, borderRadius: '50%',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 12, fontWeight: 700,
-                      backgroundColor: idx === selectedRouteIdx ? 'primary.main' : 'grey.300',
-                      color: idx === selectedRouteIdx ? 'white' : 'text.secondary',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {idx + 1}
-                  </Box>
-                  <Typography variant="caption" fontWeight={700} color={idx === selectedRouteIdx ? 'primary.main' : 'text.secondary'}>
-                    {opt.label}
+                {/* Option label + selected indicator: render multiple chips (uppercase) clickable for details */}
+                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75, flexWrap: 'wrap' }}>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                    {(Array.isArray(opt.labels) ? opt.labels : [opt.label]).map((lab) => (
+                      <Chip
+                        key={lab}
+                        size="small"
+                        label={String(lab).toUpperCase()}
+                        onClick={(e) => { e.stopPropagation(); handleOpenLabelDetail(opt, lab); }}
+                        sx={{
+                          fontWeight: 700,
+                          borderRadius: 1,
+                          backgroundColor: idx === selectedRouteIdx ? '#00bcd4' : 'grey.300',
+                          color: idx === selectedRouteIdx ? 'white' : 'text.primary',
+                          height: 22,
+                          fontSize: '0.68rem',
+                          paddingLeft: 1,
+                          paddingRight: 1,
+                          cursor: 'pointer',
+                        }}
+                      />
+                    ))}
+                  </Stack>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: idx === selectedRouteIdx ? '#00bcd4' : 'white' }}>
                     {idx === selectedRouteIdx ? ' — shown on map' : ''}
                   </Typography>
                 </Stack>
                 <Box
                   sx={{
                     outline: idx === selectedRouteIdx ? '2px solid' : '1px solid',
-                    outlineColor: idx === selectedRouteIdx ? 'primary.main' : 'divider',
+                    outlineColor: idx === selectedRouteIdx ? '#00bcd4' : 'divider',
                     borderRadius: 2,
                     transition: 'outline 0.15s',
+                    height: 'auto',
+                    display: 'block',
                   }}
                 >
-                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} fullHeight={routeOptions.length === 1} />
+                  <RouteCard route={opt.card} onSave={handleSaveRoute} isSaved={isFavorited(opt.card)} isSelected={idx === selectedRouteIdx} fullHeight={routeOptions.length === 1} />
                 </Box>
               </Box>
             ))}
@@ -690,6 +754,22 @@ export default function HomePage() {
 
   return (
     <Stack spacing={{ xs: 1.5, md: 2 }}>
+      {/* Dialog to show per-router/label details when a label chip is clicked */}
+      <Dialog open={labelDetail.open} onClose={() => setLabelDetail({ ...labelDetail, open: false })} maxWidth="md" fullWidth>
+        <DialogTitle>{labelDetail.label ? String(labelDetail.label).toUpperCase() : 'Details'}</DialogTitle>
+        <DialogContent dividers>
+          {labelDetail.content ? (
+            <Box component="pre" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.8rem', m: 0 }}>
+              {JSON.stringify(labelDetail.content, null, 2)}
+            </Box>
+          ) : (
+            <Typography>No details available for this label.</Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLabelDetail({ ...labelDetail, open: false })}>Close</Button>
+        </DialogActions>
+      </Dialog>
       <Paper
         elevation={0}
         sx={{
@@ -748,6 +828,7 @@ export default function HomePage() {
                   freeSolo
                   filterOptions={(x) => x}
                   options={allStops.from}
+                  ListboxProps={{ sx: { maxHeight: '510px' } }}
                   getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
                   value={selectedFromStop}
                   onChange={(e, value) => {
@@ -767,19 +848,21 @@ export default function HomePage() {
                     const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                     return (
                       <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                        <Box sx={{ flexGrow: 1 }}>
-                          <Typography variant="body2" fontWeight={600}>
-                            {label}
-                          </Typography>
-                          {optionType === "location" && (
-                            <Typography variant="caption" color="text.secondary">
-                              Location
+                          <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>
+                            {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                          </Box>
+                          <Box sx={{ flexGrow: 1 }}>
+                            <Typography variant="body2" fontWeight={600}>
+                              {label}
                             </Typography>
-                          )}
+                            {optionType === "location" && (
+                              <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>
+                                Location
+                              </Typography>
+                            )}
+                          </Box>
+                          <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
                         </Box>
-                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                      </Box>
                     );
                   }}
                   renderInput={(params) => (
@@ -855,6 +938,7 @@ export default function HomePage() {
                   freeSolo
                   filterOptions={(x) => x}
                   options={allStops.to}
+                  ListboxProps={{ sx: { maxHeight: '510px' } }}
                   getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
                   value={selectedToStop}
                   onChange={(e, value) => {
@@ -874,19 +958,21 @@ export default function HomePage() {
                     const optionType = typeof option === "string" ? "stop" : option.type || "stop";
                     return (
                       <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                        <Box sx={{ flexGrow: 1 }}>
-                          <Typography variant="body2" fontWeight={600}>
-                            {label}
-                          </Typography>
-                          {optionType === "location" && (
-                            <Typography variant="caption" color="text.secondary">
-                              Location
+                          <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>
+                            {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                          </Box>
+                          <Box sx={{ flexGrow: 1 }}>
+                            <Typography variant="body2" fontWeight={600}>
+                              {label}
                             </Typography>
-                          )}
+                            {optionType === "location" && (
+                              <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>
+                                Location
+                              </Typography>
+                            )}
+                          </Box>
+                          <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
                         </Box>
-                        <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                      </Box>
                     );
                   }}
                   renderInput={(params) => (
