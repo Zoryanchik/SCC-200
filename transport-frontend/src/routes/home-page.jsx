@@ -126,8 +126,8 @@ export default function HomePage() {
   const defaultTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`; // HH:MM
   const [departureDate, setDepartureDate] = useState(defaultDate);
   const [departureClock, setDepartureClock] = useState(defaultTime);
-  // default transfers changed to 0 per request
-  const [maxTransfers, setMaxTransfers] = useState(0);
+  // default transfers set to 3
+  const [maxTransfers, setMaxTransfers] = useState(3);
   // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
   const [transportMode, setTransportMode] = useState('all');
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
