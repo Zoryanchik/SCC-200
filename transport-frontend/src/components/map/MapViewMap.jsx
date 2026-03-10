@@ -298,37 +298,53 @@ const JourneyRouteLayer = ({ segments }) => {
 	useEffect(() => {
 		// DEV-LOG: inspect the incoming segments prop to verify coords shape (after normalization/densify)
 		// eslint-disable-next-line no-console
-		console.debug('[DEBUG] JourneyRouteLayer display segments:', Array.isArray(displaySegments) ? displaySegments.map(s => ({ id: s.id, coordsLen: (s.coords || []).length, key: s._normKey })) : displaySegments);
+		console.debug('[DEBUG] JourneyRouteLayer display segments:', Array.isArray(displaySegments) ? displaySegments.map(s => ({ id: s.id, coordsLen: (s.coords || []).length, key: s._normKey, mode: s.mode })) : displaySegments);
 
 		if (!displaySegments || displaySegments.length === 0) return;
 		const allCoords = displaySegments.flatMap((s) => s.coords || []);
 		if (allCoords.length < 2) return;
 		try {
-			map.fitBounds(allCoords, { padding: [40, 40], maxZoom: 15 });
+			// Bias the fitted bounds so the route appears on the left ~2/3 of the map
+			// Compute a right-side padding equal to ~1/3 of the map width so the
+			// route is shifted left when fitted. Use paddingTopLeft for the normal
+			// small inset and paddingBottomRight to reserve space on the right.
+			const size = map.getSize();
+			const rightPad = Math.round((size && size.x) ? size.x * 0.33 : 0);
+			map.fitBounds(allCoords, { paddingTopLeft: [40, 40], paddingBottomRight: [rightPad, 40], maxZoom: 15 });
 		} catch (e) {
 			// ignore if map not ready
 		}
 		}, [map, JSON.stringify(displaySegments.map(s => s._normKey))]);
 
+	// Ensure walking segments are rendered after vehicle segments so they are visually on top
+	// and use a heavier dashed style so they are not visually covered by bus tracks.
+	const renderSegments = (Array.isArray(displaySegments) ? displaySegments.slice() : []).sort((a, b) => {
+		const isWalkA = (a && (a.mode === 'walking' || a.color === '#888888' || (a.id && String(a.id).startsWith('walk'))));
+		const isWalkB = (b && (b.mode === 'walking' || b.color === '#888888' || (b.id && String(b.id).startsWith('walk'))));
+		if (isWalkA === isWalkB) return 0;
+		return isWalkA ? 1 : -1;
+	});
+
 		if (!displaySegments || displaySegments.length === 0) return null;
 
 		return (
 			<>
-				{displaySegments.map((seg) => {
+				{renderSegments.map((seg) => {
 					if (!seg.coords || seg.coords.length < 2) return null;
-					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && seg.id.startsWith('walk'));
+					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && String(seg.id).startsWith('walk'));
 					// Use normalized key to force Leaflet to replace the polyline when coords change
+					// For walking segments, use a heavier weight and a bold dashed pattern so they remain visible on top of vehicle tracks.
 					return (
 						<Polyline
 							key={seg._normKey}
 							positions={seg.coords}
 							pathOptions={{
 								color: isWalk ? '#000000' : (seg.color || '#1a73e8'),
-								weight: isWalk ? 2.5 : 4,
-								opacity: isWalk ? 0.9 : 0.92,
+								weight: isWalk ? 6 : 4,
+								opacity: isWalk ? 1 : 0.92,
 								lineCap: 'round',
 								lineJoin: 'round',
-								dashArray: isWalk ? '6 8' : undefined,
+								dashArray: isWalk ? '8 6' : undefined,
 							}}
 						/>
 					);
@@ -548,9 +564,9 @@ export default function MapViewMap({
 					<MapContainer
 						center={[54.050556, -2.800556]}
 						zoom={10}
-						// Disable scroll-wheel / trackpad two-finger slide zoom but allow pinch-to-zoom on touch devices
+						// Enable scroll-wheel / trackpad zoom and keep pinch-to-zoom on touch devices
 						// (scrollWheelZoom handles mouse wheel and trackpad two-finger scroll; touchZoom enables pinch)
-							scrollWheelZoom={false}
+							scrollWheelZoom={true}
 							touchZoom={true}
 						style={{ height: "100%", width: "100%" }}
 						className="leaflet-container-custom"

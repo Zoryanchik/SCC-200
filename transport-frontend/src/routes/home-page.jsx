@@ -1093,6 +1093,58 @@ export default function HomePage() {
         console.warn('Prefetch smoothed geometry failed', e);
         setSelectedRouteIdx(0);
       }
+      // Background: prefetch smoothed geometry for remaining options so
+      // vehicle legs follow roads when possible. This updates routeOptions
+      // incrementally as OSRM results arrive without blocking selection.
+      (async () => {
+        try {
+          const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
+          const fetchGeomForOption = async (optIdx) => {
+            const opt = sortedOptions[optIdx];
+            const src = opt ? Object.values(opt.sources)[0] : null;
+            const plan = src ? (src.route ? src.route : src) : null;
+            const lj = plan?.meta?.logged_journey_id ?? null;
+            if (!lj) return;
+            const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(lj)}`;
+            try {
+              const resp = await fetch(url);
+              if (!resp.ok) return;
+              const data = await resp.json();
+              if (!data || !Array.isArray(data.coords) || data.coords.length < 2) return;
+              const normalizeCoords = (raw) => {
+                if (!Array.isArray(raw)) return [];
+                const out = [];
+                for (const pt of raw) {
+                  if (!Array.isArray(pt) || pt.length < 2) continue;
+                  const a = Number(pt[0]);
+                  const b = Number(pt[1]);
+                  if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+                  if (a < -90 || a > 90) out.push([b, a]); else out.push([a, b]);
+                }
+                return out;
+              };
+              const norm = normalizeCoords(data.coords);
+              if (!Array.isArray(norm) || norm.length < 2) return;
+              // Update the one option's routeGeometries in state
+              setRouteOptions((prev) => {
+                if (!Array.isArray(prev)) return prev;
+                const copy = prev.slice();
+                copy[optIdx] = { ...copy[optIdx], routeGeometries: [{ id: `smoothed-${lj}`, name: 'Smoothed route', coords: norm, color: '#1a73e8' }] };
+                return copy;
+              });
+            } catch (err) {
+              // ignore per-option failures
+            }
+          };
+
+          // Fire off prefetches for all non-first options in parallel but non-blocking
+          for (let i = 1; i < sortedOptions.length; i++) {
+            void fetchGeomForOption(i);
+          }
+        } catch (err) {
+          // ignore
+        }
+      })();
     } catch (error) {
       console.error('Journey search error:', error);
       setRouteOptions([]);
