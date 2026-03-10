@@ -143,7 +143,6 @@ export default function HomePage() {
   // Index of the card the user has clicked / selected (controls map geometry)
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
   const [showSuggested, setShowSuggested] = useState(false);
-  const [showRaw, setShowRaw] = useState(false);
   // Geometry drawn on the map: derived from the selected option
   const journeyRoute = routeOptions[selectedRouteIdx]?.routeGeometries ?? null;
 
@@ -515,10 +514,7 @@ export default function HomePage() {
       // /journey/compare endpoint once. That returns results from multiple
       // router implementations (main/original, eco, lazy, greedy). We'll
       // display those results (one slot per router) and label them accordingly.
-  const compareResp = await compareRouters(fromCoords, toCoords, isoString, { maxTransfers: maxTransfers, mode: apiMode, includeRaw: true });
-  // Debug: log raw backend compare response for inspection
-  // eslint-disable-next-line no-console
-  console.debug('RAW /journey/compare response:', compareResp._raw ?? compareResp);
+    const compareResp = await compareRouters(fromCoords, toCoords, isoString, { maxTransfers: maxTransfers, mode: apiMode });
 
       // Desired display order (human-friendly)
       const routerOrder = [
@@ -540,8 +536,6 @@ export default function HomePage() {
               card: { ...card, id: acc.length + 1 },
               routeGeometries: Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [],
               label: item.label,
-              // Preserve raw backend payload for debugging (may be null)
-              raw: journey._raw ?? journey,
             });
             return acc;
           }
@@ -558,7 +552,6 @@ export default function HomePage() {
           },
           routeGeometries: [],
           label: item.label,
-          raw: null,
         });
         return acc;
       }, []);
@@ -631,14 +624,9 @@ export default function HomePage() {
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
           </Typography>
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Button size="small" variant="outlined" onClick={() => setShowRaw((s) => !s)}>
-              {showRaw ? 'Hide raw' : 'Show raw'}
-            </Button>
-            <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
-              <X size={14} />
-            </IconButton>
-          </Stack>
+          <IconButton size="small" onClick={() => setShowSuggested(false)} aria-label="Close suggested routes">
+            <X size={14} />
+          </IconButton>
         </Box>
       </Stack>
 
@@ -696,15 +684,7 @@ export default function HomePage() {
           </Typography>
         )}
       </Box>
-      {/* Raw debug panel — shows the selected option's raw legs JSON when enabled */}
-      {showRaw && routeOptions.length > 0 && (
-        <Box sx={{ mt: 1, p: 1, backgroundColor: '#f7fafc', borderTop: '1px solid', borderColor: 'divider', maxHeight: '30vh', overflow: 'auto' }}>
-          <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>Raw legs for selected route (read-only):</Typography>
-          <Box component="pre" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.75rem', m: 0 }}>
-            {JSON.stringify(routeOptions[selectedRouteIdx]?.raw?.legs ?? routeOptions[selectedRouteIdx]?.raw ?? {}, null, 2)}
-          </Box>
-        </Box>
-      )}
+      
     </Paper>
   );
 
