@@ -25,6 +25,7 @@ import { getJourneyPlans, compareRouters } from "../services/transportApi";
 import DepartureCard from "../components/common/DepartureCard";
 import RouteCard from "../components/common/RouteCard";
 import WeatherWidget from "../components/common/WeatherWidget";
+import RemoveDangerousHTML from "../components/common/RemoveDangerousHTML";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
@@ -2179,7 +2180,8 @@ export default function HomePage() {
                     alert.severity === "warning" ? "rgba(245, 158, 11, 0.05)" : "rgba(59, 130, 246, 0.05)",
                 }}
               >
-                {alert.message}
+                {/* Some Messages contain HTML to be rendered, which must first be sanitised */}
+                <RemoveDangerousHTML rawHTML={alert.message} />
               </Alert>
             ))
           ) : (
