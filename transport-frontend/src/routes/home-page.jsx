@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, lazy, Suspense } from
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
+import Popover from '@mui/material/Popover';
 import IconButton from "@mui/material/IconButton";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
@@ -83,19 +84,62 @@ function journeyToRouteCard(journey) {
   // string when the backend provides it (arrival − departure start).
   const meta = journey.meta || {};
   let duration = "";
+  // Also compute a numeric totalSeconds to allow programmatic comparisons
+  const totalSec = meta.total_seconds ?? legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
   if (meta.total_duration) {
     duration = meta.total_duration;
   } else {
-    const totalSec = legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
     const totalMin = Math.round(totalSec / 60);
     duration = totalMin >= 60
       ? `${Math.floor(totalMin / 60)}h ${totalMin % 60} mins`
       : `${totalMin} mins`;
   }
 
+  // initial departure seconds may be provided by the backend (meta.initial_departure_secs)
+  const initialDepartureSecsMeta = meta.initial_departure_secs ?? null;
+
+  // Helper: parse a time string like "HH:MM" or "HH:MM:SS" possibly with " (+Nd)" suffix
+  const parseTimeToSecondsOfDay = (timeStr) => {
+    if (!timeStr || typeof timeStr !== 'string') return null;
+    // strip any day offset suffix like " (+1d)"
+    const core = timeStr.split('(')[0].trim();
+    const parts = core.split(':').map((p) => parseInt(p, 10));
+    if (parts.length < 2 || Number.isNaN(parts[0]) || Number.isNaN(parts[1])) return null;
+    const hh = parts[0];
+    const mm = parts[1];
+    const ss = parts.length >= 3 && !Number.isNaN(parts[2]) ? parts[2] : 0;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+    return hh * 3600 + mm * 60 + ss;
+  };
+
+  // Prefer meta-provided epoch seconds, else derive seconds-of-day from the first leg's departure time.
+  let initialDepartureSecs = initialDepartureSecsMeta ?? null;
+  try {
+    if (!Number.isFinite(initialDepartureSecs) && Array.isArray(journey?.legs) && journey.legs.length > 0) {
+      const first = journey.legs[0];
+      const candidates = [
+        first.realtime_departure_time_with_offset,
+        first.departure_time_with_offset,
+        first.scheduled_departure_time,
+        first.departure_time,
+      ];
+      for (const t of candidates) {
+        const secs = parseTimeToSecondsOfDay(t);
+        if (Number.isFinite(secs)) {
+          initialDepartureSecs = secs;
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    // ignore parse errors
+  }
+
   return {
     id: 1,
     duration,
+    totalSeconds: totalSec,
+    initialDepartureSecs,
     transfers,
     steps,
     walkMinutes,
@@ -119,6 +163,17 @@ const MOCK_MARKERS = [
 const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
 
 export default function HomePage() {
+  const LABEL_DESCRIPTIONS = {
+    'EA': 'Earliest Arrival',
+    'E·A': 'Earliest Arrival',
+    'ED': 'Earliest Departure',
+    'E·D': 'Earliest Departure',
+    'FASTEST': 'Smallest Total Time',
+    'ECO': 'Prefer Walking',
+    'GREEDY': 'Least Transfers',
+    'COSY': 'No Transfer Within Same Mode',
+    'LAZY': 'Shorter Walks — Fewer Transfers',
+  };
   const [fromLocation, setFromLocation] = useState("");
   const [toLocation, setToLocation] = useState("");
   const [selectedFromStop, setSelectedFromStop] = useState(null);
@@ -136,8 +191,8 @@ export default function HomePage() {
   // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
   const [transportMode, setTransportMode] = useState('all');
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
-  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 300);
-  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 300);
+  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 800);
+  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 800);
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
@@ -145,10 +200,10 @@ export default function HomePage() {
   // Array of { card, routeGeometries } — one entry per alternative route
   const [routeOptions, setRouteOptions] = useState([]);
   // Index of the card the user has clicked / selected (controls map geometry)
-  const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
+  const [selectedRouteIdx, setSelectedRouteIdx] = useState(null);
   const [showSuggested, setShowSuggested] = useState(false);
   // Geometry drawn on the map: derived from the selected option
-  const journeyRoute = routeOptions[selectedRouteIdx]?.routeGeometries ?? null;
+  const journeyRoute = (typeof selectedRouteIdx === 'number') ? (routeOptions[selectedRouteIdx]?.routeGeometries ?? null) : null;
 
   // State for showing router/label details when a label chip is clicked
   const [labelDetail, setLabelDetail] = useState({ open: false, label: '', content: null });
@@ -163,6 +218,7 @@ export default function HomePage() {
   const [userLocation, setUserLocation] = useState(null);
   const [locationStatus, setLocationStatus] = useState('idle');
   const [locationError, setLocationError] = useState(null);
+  const [autoLocated, setAutoLocated] = useState(false);
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
   const handleMoveEnd = useCallback(({ lat, lon }) => {
@@ -204,6 +260,45 @@ export default function HomePage() {
       { enableHighAccuracy: true, timeout: 10000 }
     );
   }, [setSelectedFromStop, setFromLocation, setMapCenter]);
+
+  // Auto-fill the From field with the user's current location once on first load
+  useEffect(() => {
+    if (autoLocated) return;
+    if (!navigator || !navigator.geolocation) {
+      setAutoLocated(true);
+      return;
+    }
+    // Try to get a quick fix; failure should be silent (user can click the button)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        const loc = {
+          name: 'My location',
+          display_name: 'My location',
+          lat,
+          lon,
+          type: 'location',
+        };
+        setSelectedFromStop(loc);
+        setFromLocation('My location');
+        setUserLocation([lat, lon]);
+        try {
+          setMapCenter({ lat, lon });
+        } catch (e) {
+          // ignore if mapCenter setter not ready
+        }
+        setLocationStatus('granted');
+        setLocationError(null);
+        setAutoLocated(true);
+      },
+      () => {
+        // on error, mark attempted so we don't keep asking
+        setAutoLocated(true);
+      },
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+    );
+  }, [autoLocated, setSelectedFromStop, setFromLocation, setUserLocation, setMapCenter]);
 
   const requestLocation = useCallback(() => {
     if (!navigator || !navigator.geolocation) {
@@ -527,7 +622,8 @@ export default function HomePage() {
       const routerOrder = [
         { key: 'main', label: 'E·A' },
         { key: 'eco', label: 'Eco' },
-        { key: 'lazy', label: 'Lazy' },
+        { key: 'cosy', label: 'COSY' },
+        { key: 'lazy', label: 'LAZY' },
         { key: 'greedy', label: 'Greedy' },
       ];
 
@@ -605,6 +701,100 @@ export default function HomePage() {
 
       const options = Array.from(optionsMap.values());
 
+      // Add special labels:
+      // - "E·D": mark options with the earliest initial departure (if provided by backend in meta.initial_departure_secs)
+      // - "FASTEST": mark options with the smallest totalSeconds
+      try {
+        const withInit = options.map((o) => ({ opt: o, init: (() => {
+          // prefer meta-provided initial seconds from any source
+          const srcs = o.sources ? Object.values(o.sources) : [];
+          for (const s of srcs) {
+            if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs)) return Number(s.meta.initial_departure_secs);
+            if (s && s.meta && s.meta.initial_departure_time) {
+              const t = Date.parse(s.meta.initial_departure_time);
+              if (!Number.isNaN(t)) return Math.floor(t / 1000);
+            }
+          }
+          // fallback: use card.initialDepartureSecs if journeyToRouteCard populated it (meta->card mapping)
+          if (o.card && Number.isFinite(o.card.initialDepartureSecs)) return Number(o.card.initialDepartureSecs);
+          return null;
+        })() }));
+
+        const initVals = withInit.map((w) => w.init).filter((v) => Number.isFinite(v));
+        if (initVals.length > 0) {
+          const minInit = Math.min(...initVals);
+          for (const w of withInit) {
+            if (Number.isFinite(w.init) && w.init === minInit) {
+              if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
+            }
+          }
+        }
+
+        // FASTEST: compare numeric totalSeconds on the card
+        const totalVals = options.map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null)).filter((v) => Number.isFinite(v));
+        if (totalVals.length > 0) {
+          const minTotal = Math.min(...totalVals);
+          const EPS = 1; // seconds tolerance for "equally fastest"
+          for (const o of options) {
+            if (o.card && Number.isFinite(o.card.totalSeconds) && Math.abs(o.card.totalSeconds - minTotal) <= EPS) {
+              if (!o.labels.includes('FASTEST')) o.labels.push('FASTEST');
+            }
+          }
+        }
+
+          // E·A: earliest arrival. Prefer meta-provided initial departure + total_seconds
+          try {
+            const arrivalVals = options.map((o) => {
+              // look through any provided sources' meta for initial + total
+              const srcs = o.sources ? Object.values(o.sources) : [];
+              for (const s of srcs) {
+                if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs) && Number.isFinite(s.meta.total_seconds)) {
+                  return Number(s.meta.initial_departure_secs) + Number(s.meta.total_seconds);
+                }
+                if (s && s.meta && Number.isFinite(s.meta.final_arrival_secs)) {
+                  return Number(s.meta.final_arrival_secs);
+                }
+              }
+              // fallback: use card initialDepartureSecs + card.totalSeconds
+              if (o.card && Number.isFinite(o.card.initialDepartureSecs) && Number.isFinite(o.card.totalSeconds)) {
+                return Number(o.card.initialDepartureSecs) + Number(o.card.totalSeconds);
+              }
+              return null;
+            }).filter((v) => Number.isFinite(v));
+            if (arrivalVals.length > 0) {
+              const minArrival = Math.min(...arrivalVals);
+              const EPS_A = 1; // seconds tolerance for ties
+              for (const o of options) {
+                // compute candidate arrival as above
+                let cand = null;
+                const srcs = o.sources ? Object.values(o.sources) : [];
+                for (const s of srcs) {
+                  if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs) && Number.isFinite(s.meta.total_seconds)) {
+                    cand = Number(s.meta.initial_departure_secs) + Number(s.meta.total_seconds);
+                    break;
+                  }
+                  if (s && s.meta && Number.isFinite(s.meta.final_arrival_secs)) {
+                    cand = Number(s.meta.final_arrival_secs);
+                    break;
+                  }
+                }
+                if (cand === null && o.card && Number.isFinite(o.card.initialDepartureSecs) && Number.isFinite(o.card.totalSeconds)) {
+                  cand = Number(o.card.initialDepartureSecs) + Number(o.card.totalSeconds);
+                }
+                if (Number.isFinite(cand) && Math.abs(cand - minArrival) <= EPS_A) {
+                  if (!o.labels.includes('E·A')) o.labels.unshift('E·A');
+                }
+              }
+            }
+          } catch (e) {
+            // ignore arrival computation failures
+          }
+      } catch (e) {
+        // don't block rendering on label computation failures
+        // eslint-disable-next-line no-console
+        console.warn('Failed to compute E·D/FASTEST labels', e);
+      }
+
       // If compare returned no routes for any router, fall back to a single
       // main /journey/plan call so the user still sees results when compare
       // failed to produce routes.
@@ -616,12 +806,67 @@ export default function HomePage() {
           console.debug('RAW /journey/plan response:', mainJourney._raw ?? mainJourney);
           const mainCard = journeyToRouteCard(mainJourney);
           if (mainCard) {
-            setRouteOptions([{
+            // Build a single-option array compatible with the compare flow so
+            // label computation (E·D / FASTEST) runs consistently.
+            const singleOpt = {
               id: 1,
               card: { ...mainCard, id: 1 },
               routeGeometries: Array.isArray(mainJourney.routeGeometries) ? mainJourney.routeGeometries : [],
+              labels: ['E·A'],
               label: 'E·A',
-            }]);
+              sources: { 'E·A': mainJourney },
+            };
+
+            const optionsArr = [singleOpt];
+            // Compute E·D / FASTEST labels for this single option as well
+            try {
+              const withInit = optionsArr.map((o) => ({ opt: o, init: (() => {
+                const srcs = o.sources ? Object.values(o.sources) : [];
+                for (const s of srcs) {
+                  if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs)) return Number(s.meta.initial_departure_secs);
+                  if (s && s.meta && s.meta.initial_departure_time) {
+                    const t = Date.parse(s.meta.initial_departure_time);
+                    if (!Number.isNaN(t)) return Math.floor(t / 1000);
+                  }
+                }
+                if (o.card && Number.isFinite(o.card.initialDepartureSecs)) return Number(o.card.initialDepartureSecs);
+                return null;
+              })() }));
+
+              const initVals = withInit.map((w) => w.init).filter((v) => Number.isFinite(v));
+              if (initVals.length > 0) {
+                const minInit = Math.min(...initVals);
+                for (const w of withInit) {
+                  if (Number.isFinite(w.init) && w.init === minInit) {
+                    if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
+                  }
+                }
+              }
+
+              const totalVals = optionsArr.map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null)).filter((v) => Number.isFinite(v));
+              if (totalVals.length > 0) {
+                const minTotal = Math.min(...totalVals);
+                const EPS = 1; // seconds tolerance for "equally fastest"
+                for (const o of optionsArr) {
+                  if (o.card && Number.isFinite(o.card.totalSeconds) && Math.abs(o.card.totalSeconds - minTotal) <= EPS) {
+                    if (!o.labels.includes('FASTEST')) o.labels.push('FASTEST');
+                  }
+                }
+              }
+            } catch (e) {
+              // ignore label computation failures
+            }
+
+            // sort optionsArr so routes with more labels appear first
+            const sortedArr = optionsArr.slice().sort((a, b) => {
+              const la = Array.isArray(a.labels) ? a.labels.length : (a.label ? 1 : 0);
+              const lb = Array.isArray(b.labels) ? b.labels.length : (b.label ? 1 : 0);
+              if (lb !== la) return lb - la;
+              const ta = a.card && Number.isFinite(a.card.totalSeconds) ? a.card.totalSeconds : Infinity;
+              const tb = b.card && Number.isFinite(b.card.totalSeconds) ? b.card.totalSeconds : Infinity;
+              return ta - tb;
+            });
+            setRouteOptions(sortedArr);
             setSelectedRouteIdx(0);
             setIsSearching(false);
             return;
@@ -631,7 +876,16 @@ export default function HomePage() {
         }
       }
 
-      setRouteOptions(options);
+      // Show routes ordered by the number of labels (more labels first), then by fastest totalSeconds
+      const sortedOptions = options.slice().sort((a, b) => {
+        const la = Array.isArray(a.labels) ? a.labels.length : (a.label ? 1 : 0);
+        const lb = Array.isArray(b.labels) ? b.labels.length : (b.label ? 1 : 0);
+        if (lb !== la) return lb - la;
+        const ta = a.card && Number.isFinite(a.card.totalSeconds) ? a.card.totalSeconds : Infinity;
+        const tb = b.card && Number.isFinite(b.card.totalSeconds) ? b.card.totalSeconds : Infinity;
+        return ta - tb;
+      });
+      setRouteOptions(sortedOptions);
       setSelectedRouteIdx(0);
     } catch (error) {
       console.error('Journey search error:', error);
@@ -658,12 +912,22 @@ export default function HomePage() {
   };
 
   const handleSelectRoute = (idx) => {
-    setSelectedRouteIdx(idx);
+    setSelectedRouteIdx((prev) => (prev === idx ? null : idx));
   };
 
-  const handleOpenLabelDetail = (opt, label) => {
+  const [labelAnchorEl, setLabelAnchorEl] = useState(null);
+
+  const handleOpenLabelDetail = (event, opt, label) => {
+    // Toggle popup: close if same label clicked
+    const sameLabel = labelDetail.open && String(labelDetail.label || '').toUpperCase() === String(label || '').toUpperCase();
+    if (sameLabel) {
+      setLabelDetail({ open: false, label: '', content: null });
+      setLabelAnchorEl(null);
+      return;
+    }
     const content = opt?.sources?.[label] ?? null;
     setLabelDetail({ open: true, label, content });
+    setLabelAnchorEl(event.currentTarget);
   };
 
   const MapFallback = () => (
@@ -703,29 +967,66 @@ export default function HomePage() {
                 {/* Option label + selected indicator: render multiple chips (uppercase) clickable for details */}
                 <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75, flexWrap: 'wrap' }}>
                   <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
-                    {(Array.isArray(opt.labels) ? opt.labels : [opt.label]).map((lab) => (
-                      <Chip
-                        key={lab}
-                        size="small"
-                        label={String(lab).toUpperCase()}
-                        onClick={(e) => { e.stopPropagation(); handleOpenLabelDetail(opt, lab); }}
-                        sx={{
-                          fontWeight: 700,
-                          borderRadius: 1,
-                          backgroundColor: idx === selectedRouteIdx ? '#00bcd4' : 'grey.300',
-                          color: idx === selectedRouteIdx ? 'white' : 'text.primary',
-                          height: 22,
-                          fontSize: '0.68rem',
-                          paddingLeft: 1,
-                          paddingRight: 1,
-                          cursor: 'pointer',
-                        }}
-                      />
-                    ))}
+                    {(() => {
+                      // enforce requested display order and colours
+                      const rawLabels = Array.isArray(opt.labels) ? opt.labels : [opt.label];
+                      const ORDER = ['E·A', 'E·D', 'FASTEST', 'ECO', 'GREEDY', 'COSY', 'LAZY'];
+                      const orderKey = (s) => String(s || '').toUpperCase();
+                      const ORDER_UP = ORDER.map((o) => o.toUpperCase());
+                      const colorMap = {
+                        'E·A': '#FFF8E1', // light ivory
+                        'E·D': '#E0BBE4', // lilac
+                        'FASTEST': '#87CEEB', // sky blue
+                        'ECO': '#C6F6D5', // mint (soft)
+                        'GREEDY': '#FF7F50', // coral
+                        // COSY: sage colour
+                        'COSY': '#9DC183', // sage
+                        'LAZY': '#FFF59D', // lemon (Shorter Walks)
+                      };
+
+                      const sorted = rawLabels.slice().sort((a, b) => {
+                        const A = orderKey(a);
+                        const B = orderKey(b);
+                        const ia = ORDER_UP.indexOf(A);
+                        const ib = ORDER_UP.indexOf(B);
+                        if (ia === -1 && ib === -1) return A.localeCompare(B);
+                        if (ia === -1) return 1;
+                        if (ib === -1) return -1;
+                        return ia - ib;
+                      });
+
+                      return sorted.map((lab) => {
+                        const labUp = String(lab || '').toUpperCase();
+                        // match keys in colorMap by normalizing '·' vs '.' etc
+                        const key = Object.keys(colorMap).find((k) => k.toUpperCase() === labUp) || labUp;
+                        const bg = colorMap[key] || 'grey.300';
+                        return (
+                          <Box key={lab} sx={{ display: 'inline-block' }}>
+                            <Chip
+                              size="small"
+                              label={labUp}
+                              onClick={(e) => { e.stopPropagation(); handleOpenLabelDetail(e, opt, lab); }}
+                              sx={{
+                                fontWeight: 700,
+                                borderRadius: 0.5,
+                                backgroundColor: bg,
+                                color: '#000000', // font black per request
+                                border: '1px solid #00BCD4', // frame cyan
+                                height: 18,
+                                fontSize: '0.56rem',
+                                paddingLeft: 0.25,
+                                paddingRight: 0.25,
+                                minWidth: '0px',
+                                lineHeight: '16px',
+                                cursor: 'pointer',
+                                px: 0.4,
+                              }}
+                            />
+                          </Box>
+                        );
+                      });
+                    })()}
                   </Stack>
-                  <Typography variant="caption" sx={{ fontWeight: 700, color: idx === selectedRouteIdx ? '#00bcd4' : 'white' }}>
-                    {idx === selectedRouteIdx ? ' — shown on map' : ''}
-                  </Typography>
                 </Stack>
                 <Box
                   sx={{
@@ -753,23 +1054,9 @@ export default function HomePage() {
   );
 
   return (
-    <Stack spacing={{ xs: 1.5, md: 2 }}>
-      {/* Dialog to show per-router/label details when a label chip is clicked */}
-      <Dialog open={labelDetail.open} onClose={() => setLabelDetail({ ...labelDetail, open: false })} maxWidth="md" fullWidth>
-        <DialogTitle>{labelDetail.label ? String(labelDetail.label).toUpperCase() : 'Details'}</DialogTitle>
-        <DialogContent dividers>
-          {labelDetail.content ? (
-            <Box component="pre" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.8rem', m: 0 }}>
-              {JSON.stringify(labelDetail.content, null, 2)}
-            </Box>
-          ) : (
-            <Typography>No details available for this label.</Typography>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setLabelDetail({ ...labelDetail, open: false })}>Close</Button>
-        </DialogActions>
-      </Dialog>
+    <>
+      <Stack spacing={{ xs: 1.5, md: 2 }}>
+      {/* Label popups are rendered inline above each chip (see chips rendering) */}
       <Paper
         elevation={0}
         sx={{
@@ -1313,6 +1600,22 @@ export default function HomePage() {
       </Paper>
 
       {/* Bottom weather widget removed — now shown inline in the map filter row */}
-    </Stack>
+      </Stack>
+      <Popover
+        open={labelDetail.open}
+        anchorEl={labelAnchorEl}
+        onClose={() => { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); }}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        disableRestoreFocus
+        PaperProps={{ elevation: 0, sx: { backgroundColor: '#00BCD4', boxShadow: 'none', border: 'none', borderRadius: '10px' } }}
+      >
+        <Box sx={{ p: '8px 12px', minWidth: 140, backgroundColor: 'transparent', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+          <Typography variant="body2" sx={{ color: 'white', fontWeight: 700 }}>
+            {LABEL_DESCRIPTIONS[String(labelDetail.label || '').toUpperCase()] || String(labelDetail.label || '').toUpperCase()}
+          </Typography>
+        </Box>
+      </Popover>
+    </>
   );
 }

@@ -109,12 +109,21 @@ async def lifespan(app: FastAPI):
                 logger.warning('BUS_AUTO_CREATE_DB requested but ensure_db_and_schema failed: %s', _e)
 
         from main import initialize_base
+        # Attempt one-time base initialization. If this raises, we record
+        # that an attempt was made so we don't repeatedly re-run expensive
+        # initialisation on every request (which caused the repeated
+        # "Initializing Transport Backend System" output seen during dev).
         _base_cache = initialize_base()
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "Backend initialisation failed  — endpoints requiring "
             "transport data will be unavailable: %s", exc,
         )
+    finally:
+        # Mark that we've attempted initialization once (success or fail).
+        # Other code paths consult this flag to avoid re-running init on
+        # every request which can cause noisy repeated logging.
+        globals()['_base_init_attempted'] = True
     # Configure and start the WebSocket/STOMP live-updates broker
     try:
         ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10))
@@ -2197,7 +2206,13 @@ async def bus_arrivals(stop_code: str, limit: int = 5):
 # Global cache for (merged, router, walking) by (date, AM/PM bucket)
 _router_cache = {}
 _router_cache_lock = threading.Lock()
+# Base init state: _base_cache holds the cached base data when
+# initialization succeeds, and _base_init_attempted indicates whether
+# we've already tried initialisation once. This prevents repeated,
+# noisy re-attempts (and repeated "Initializing Transport Backend System"
+# prints) when the first attempt fails.
 _base_cache = None
+_base_init_attempted = False
 
 # Real-time delay map: {journey_id: delay_seconds}
 _journey_delay_map: Dict[int, int] = {}
@@ -2289,15 +2304,32 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
     with _router_cache_lock:
         if cache_key in _router_cache:
             return _router_cache[cache_key]
-        if _base_cache is None:
+        # If base data hasn't been initialised yet, try once. If a
+        # previous attempt already ran and failed, avoid re-running
+        # initialise_base to prevent noisy repeated initialisation logs
+        # and excessive work.
+        global _base_init_attempted
+        if _base_cache is None and not _base_init_attempted:
             from main import initialize_base
-            _base_cache = initialize_base()
-            # Merge prebuilt cache from init
-            if "prebuilt_cache" in _base_cache:
-                _router_cache.update(_base_cache["prebuilt_cache"])
-            # Check again after merging prebuilt
-            if cache_key in _router_cache:
-                return _router_cache[cache_key]
+            try:
+                _base_cache = initialize_base()
+                # Merge prebuilt cache from init
+                if _base_cache and "prebuilt_cache" in _base_cache:
+                    _router_cache.update(_base_cache["prebuilt_cache"])
+                # Check again after merging prebuilt
+                if cache_key in _router_cache:
+                    return _router_cache[cache_key]
+            except Exception:
+                # Record that we've attempted initialisation so we don't
+                # repeatedly try on every request. Subsequent callers
+                # will receive an exception and can respond with 503.
+                _base_init_attempted = True
+                raise
+            finally:
+                _base_init_attempted = True
+        elif _base_cache is None and _base_init_attempted:
+            # A previous attempt failed — don't retry here.
+            raise RuntimeError("Backend base initialisation previously failed")
         loader = _base_cache["loader"]
         walking_raw = _base_cache["walking_raw"]
         al = _base_cache.get("atco_loader")
@@ -3039,8 +3071,10 @@ async def compare_routers(request: JourneyPlanRequest):
         merged, main_router, walking = get_router_for_date(
             date_str, start_time=start_seconds)
 
-        # Lazily construct optional routers (eco, lazy, greedy).
+        # Lazily construct optional routers (eco, cosy, lazy, greedy).
+        # optional routers: eco, cosy, lazy, greedy
         eco_router = None
+        cosy_router = None
         lazy_router = None
         greedy_router = None
         try:
@@ -3048,6 +3082,11 @@ async def compare_routers(request: JourneyPlanRequest):
             eco_router = EcoRaptor(merged)
         except Exception:
             eco_router = None
+        try:
+            from cosy_router import RaptorRouter as CosyRaptor
+            cosy_router = CosyRaptor(merged)
+        except Exception:
+            cosy_router = None
         try:
             from lazy_router import RaptorRouter as LazyRaptor
             lazy_router = LazyRaptor(merged)
@@ -3058,6 +3097,13 @@ async def compare_routers(request: JourneyPlanRequest):
             greedy_router = GreedyRaptor(merged)
         except Exception:
             greedy_router = None
+
+        # Debug: record which optional routers were successfully constructed
+        available_routers = [name for name, obj in (
+            ("eco", eco_router), ("cosy", cosy_router),
+            ("lazy", lazy_router), ("greedy", greedy_router)
+        ) if obj is not None]
+        logger.debug("compare_routers: available optional routers: %s", available_routers)
 
         # Helper wrapper to call router.route with timing
         def _run_router(rtr):
@@ -3078,6 +3124,8 @@ async def compare_routers(request: JourneyPlanRequest):
         routers = [("main", main_router)]
         if eco_router is not None:
             routers.append(("eco", eco_router))
+        if cosy_router is not None:
+            routers.append(("cosy", cosy_router))
         if lazy_router is not None:
             routers.append(("lazy", lazy_router))
         if greedy_router is not None:
@@ -3093,6 +3141,7 @@ async def compare_routers(request: JourneyPlanRequest):
 
         main_res, main_time = router_results.get("main", (None, None))
         eco_res, eco_time = router_results.get("eco", (None, None))
+        cosy_res, cosy_time = router_results.get("cosy", (None, None))
         lazy_res, lazy_time = router_results.get("lazy", (None, None))
         greedy_res, greedy_time = router_results.get("greedy", (None, None))
 
@@ -3101,11 +3150,13 @@ async def compare_routers(request: JourneyPlanRequest):
         # Build full journey-plan responses (same shape as /journey/plan)
         main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds) if main_res is not None else None
         eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds) if eco_res is not None else None
+        cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds) if cosy_res is not None else None
         lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds) if lazy_res is not None else None
         greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds) if greedy_res is not None else None
 
         return {
             "success": True,
+            "available_routers": available_routers,
             "main": {
                 "route": main_plan,
                 "route_text": format_route_text(main_res, merged) if main_res is not None else None,
@@ -3115,6 +3166,11 @@ async def compare_routers(request: JourneyPlanRequest):
                 "route": eco_plan,
                 "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
                 "time_seconds": eco_time,
+            },
+            "cosy": {
+                "route": cosy_plan,
+                "route_text": format_route_text(cosy_res, merged) if cosy_res is not None else None,
+                "time_seconds": cosy_time,
             },
             "lazy": {
                 "route": lazy_plan,
@@ -3193,18 +3249,20 @@ async def route_by_address(request: AddressRouteRequest):
         allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
         start_seconds = seconds_since_midnight(time_str)
 
-        merged, router, walking = get_router_for_date(
-            date_str, start_time=start_seconds)
-        result = router.route(
-            n_transfer_limit=max_transfers,
-            walking=walking,
-            start_time=start_seconds,
-            start_point=start_point,
-            destination=destination,
-            allowed_modes=allowed_modes,
+        # Build a JourneyPlanRequest and delegate to the compare endpoint
+        # so address-based requests return the same multi-router response
+        # (main, eco, cosy, lazy, greedy) as `/journey/compare`.
+        jreq = JourneyPlanRequest(
+            fromStop=StopLocation(lat=start_point[0], lon=start_point[1]),
+            toStop=StopLocation(lat=destination[0], lon=destination[1]),
+            departureTime=time_str,
+            date=date_str,
+            maxTransfers=max_transfers,
+            mode=request.mode,
         )
-        route_text = format_route_text(result, merged)
-        return {"success": True, "route": _sanitize_route(result), "route_text": route_text}
+        # Reuse the compare_routers handler to perform multi-router comparison.
+        resp = await compare_routers(jreq)
+        return resp
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

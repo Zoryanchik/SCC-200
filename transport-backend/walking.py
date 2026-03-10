@@ -24,7 +24,7 @@ class Walking:
 
     def __init__(self, inter_walk_table, stop_coords,
                  osrm_base="http://localhost:5012",
-                 max_walk_seconds=600):
+                 max_walk_seconds=800):
         self._inter = inter_walk_table          # {stop_int: {stop_int: secs}}
         self._coords = stop_coords              # {stop_int: (lat, lon)}
         self._osrm = osrm_base

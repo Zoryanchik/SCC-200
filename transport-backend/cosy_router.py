@@ -34,7 +34,6 @@ class RaptorRouter:
 
     def __init__(self, network):
         self.network = network
-        self.found = False
 
     # ── public entry point ───────────────────────────────────────
 
@@ -68,8 +67,6 @@ class RaptorRouter:
         initial_stops = dict(initial_list)
         switch_a: set = set()
         for stop, walk_time in initial_list:
-            if walk_time > 300:
-                continue
             reach_stops[stop][1] = start_time + walk_time
             reach_stops[stop][2] = WALKING
             switch_a.add(stop)
@@ -94,27 +91,24 @@ class RaptorRouter:
                     normalized.add(m)
             allowed_modes = normalized
 
-        final_list = walking.reachable_stops(destination)
-        if not final_list:
-            return {}
-        
         # Clear any previous debug events and run recursive rounds
         if hasattr(self, '_debug_events'):
             del self._debug_events
-        self.recursive_raptor(final_list,
+        self.recursive_raptor(
             -1, n_transfer_limit, reach_stops, walking,
             switch_a, allowed_modes, initial_stops,
             debug_stop_ids=debug_stop_ids,
         )
 
         # ── Find best final stop ─────────────────────────────────
+        final_list = walking.reachable_stops(destination)
+        if not final_list:
+            return {}
 
         best_final_stop = None
         final_walk_seconds = None
         best_total_arrival = inf
         for stop, walk_time in final_list:
-            if walk_time > 300:
-                continue
             if reach_stops[stop][1] < inf:
                 if reach_stops[stop][2] == WALKING:
                     pre = reach_stops[stop][0]
@@ -228,7 +222,6 @@ class RaptorRouter:
     # ── recursive RAPTOR rounds ──────────────────────────────────
 
     def recursive_raptor(self,
-                         final_list: List[Tuple[int, int]],
                          n_transfer: int,
                          transfer_limit: int,
                          reach_stops: List[List[Any]],
@@ -253,7 +246,7 @@ class RaptorRouter:
         within the same round cannot enable extra transfers beyond
         the transfer-limit.
         """
-        if not switch_a or n_transfer == transfer_limit or self.found:
+        if not switch_a or n_transfer == transfer_limit:
             return
         n_transfer += 1
         switch_b: set = set()
@@ -297,10 +290,8 @@ class RaptorRouter:
                     continue
                 walk_stops = walking.inter_walk(stop)
                 for walk_stop, _ in walk_stops.items():
-                    wal_bet = walking.walking_time_between(walking.get_loc_coords(pre), walking.get_loc_coords(walk_stop))
-                    if wal_bet > 300:
-                        continue
-                    walk_arrival = reach_stops[pre][1] + wal_bet
+                    walk_arrival = reach_stops[pre][1] + walking.walking_time_between(
+                        walking.get_loc_coords(pre), walking.get_loc_coords(walk_stop))
                     if reach_stops[walk_stop][1] > walk_arrival:
                         reach_stops[walk_stop][1] = walk_arrival
                         reach_stops[walk_stop][0] = pre
@@ -314,8 +305,6 @@ class RaptorRouter:
             else:
                 walk_stops = walking.inter_walk(stop)
                 for walk_stop, secs in walk_stops.items():
-                    if secs > 300:
-                        continue
                     walk_arrival = reach_stops[stop][1] + secs
                     if reach_stops[walk_stop][1] > walk_arrival:
                         reach_stops[walk_stop][1] = walk_arrival
@@ -328,12 +317,7 @@ class RaptorRouter:
                                 self._debug_events = []
                             self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
 
-        for stop, _ in final_list:
-            if reach_stops[stop][1] < math.inf:
-                self.found = True
-                break
-
-        self.recursive_raptor(final_list,
+        self.recursive_raptor(
             n_transfer, transfer_limit, reach_stops, walking,
             switch_b, allowed_modes,
         )
@@ -413,7 +397,7 @@ class RaptorRouter:
             for subsequent_point, subsequent_a_time, _d in journey_times[start_pos + 1:]:
                 if subsequent_point == stop:
                     continue
-                if subsequent_a_time < reach_stops[subsequent_point][1]:
+                if subsequent_a_time < reach_stops[subsequent_point][1] and reach_stops[subsequent_point][2] != reach_stops[stop][2]:
                     reach_stops[subsequent_point][1] = subsequent_a_time
                     reach_stops[subsequent_point][0] = stop
                     reach_stops[subsequent_point][2] = network.journey_type(first_journey)

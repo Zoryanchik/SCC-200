@@ -50,7 +50,7 @@ const [mapInstance, setMapInstance] = useState(null);
 // Search bar state
 const [searchQuery, setSearchQuery] = useState('');
 const [searchValue, setSearchValue] = useState(null);
-const { results: searchResults, loading: searchLoading } = useStopSearch(searchQuery, 300);
+const { results: searchResults, loading: searchLoading } = useStopSearch(searchQuery, 800);
 
 const handleSearchSelect = useCallback((option) => {
   if (!option || !mapInstance) return;

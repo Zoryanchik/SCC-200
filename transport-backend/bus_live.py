@@ -3,7 +3,13 @@ import ssl
 import urllib.request
 import socket
 from urllib.parse import urlparse
-import xml.etree.ElementTree as ET
+try:
+    # Prefer lxml for faster, more robust XML parsing when available
+    from lxml import etree as ET
+    _USING_LXML = True
+except Exception:
+    import xml.etree.ElementTree as ET
+    _USING_LXML = False
 from datetime import datetime
 from typing import List, Tuple, Iterable, Optional
 

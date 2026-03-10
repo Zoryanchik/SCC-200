@@ -12,6 +12,10 @@ IMAGE=transport-backend:local
 CONTAINER=transport-backend-local
 CACHE_DIR="$HERE/cache"
 
+# Default memory to allocate to the backend container. Can be overridden
+# by setting CONTAINER_MEM in the environment (e.g. CONTAINER_MEM=6g).
+CONTAINER_MEM="${CONTAINER_MEM:-4g}"
+
 mkdir -p "$CACHE_DIR"
 
 # NOTE: automatic Cython/build steps were removed per developer request.
@@ -160,6 +164,8 @@ START_SCRIPT="echo '[startup] skipping in-container Cython/build steps'; echo '[
 # Run the container and pass the startup script as the command to execute.
 # We use '/bin/sh -c "$START_SCRIPT"' so the whole script runs inside the
 # container's shell. Quoting is important here to avoid word-splitting issues.
-$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE" /bin/sh -c "$START_SCRIPT"
+$RUNTIME run -d $RUN_FLAGS $ENV_FLAGS -m "$CONTAINER_MEM" -v "$CACHE_DIR":/app/cache${MOUNT_OPTS} "$IMAGE" /bin/sh -c "$START_SCRIPT"
 
 echo "Container started (id: $($RUNTIME ps -l --format '{{.ID}}' 2>/dev/null))."
+
+echo "Container memory limit: $CONTAINER_MEM"

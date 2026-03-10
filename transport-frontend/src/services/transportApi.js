@@ -355,8 +355,8 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
 };
 
 /**
- * Compare multiple router implementations (main, eco, lazy, greedy)
- * Returns an object with keys 'main','eco','lazy','greedy' each containing
+ * Compare multiple router implementations (main, eco, cosy, lazy, greedy)
+ * Returns an object with keys 'main','eco','cosy','lazy','greedy' each containing
  * the same journey-plan response shape as /journey/plan.
  */
 export const compareRouters = async (fromStop, toStop, departureTime, options = {}) => {
