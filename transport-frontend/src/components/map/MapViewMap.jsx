@@ -7,7 +7,7 @@ import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 import "leaflet/dist/leaflet.css";
-import { useEffect } from "react";
+import React, { useEffect } from "react";
 // Allow a sideContent prop to be injected by the parent (e.g. Suggested routes)
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
@@ -95,6 +95,49 @@ const createUserIcon = () => {
 };
 
 /**
+ * Create a prominent endpoint icon (Start / Destination).
+ * @param {string} color - fill color for the endpoint
+ * @param {string} label - short label to render inside the icon ('S'|'D' or text)
+ */
+const createEndpointIcon = (color = '#10B981', label = '') => {
+	const size = 36;
+	const c = size / 2;
+	const r = c - 2;
+	const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+		<circle cx="${c}" cy="${c}" r="${r}" fill="${color}" stroke="#ffffff" stroke-width="3" />
+		<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Helvetica,sans-serif" font-size="12" font-weight="700" fill="#fff">${label}</text>
+	</svg>`;
+	return L.divIcon({ html: svg, className: 'endpoint-div-icon', iconSize: [size, size], iconAnchor: [c, c], popupAnchor: [0, -c] });
+};
+
+/**
+ * Programmatically add prominent Start/Destination markers to a Leaflet map.
+ * Returns an array of created Leaflet marker instances (so callers can remove them).
+ * @param {L.Map} map
+ * @param {[number,number]|null} start [lat,lon]
+ * @param {[number,number]|null} end [lat,lon]
+ */
+export const highlightEndpoints = (map, start, end) => {
+	if (!map) return [];
+	const created = [];
+	try {
+		if (start && Array.isArray(start) && start.length === 2) {
+			const m = L.marker(start, { icon: createEndpointIcon('#10B981', 'S') }).addTo(map);
+			m.bindTooltip('Start', { permanent: true, direction: 'right', className: 'endpoint-tooltip' });
+			created.push(m);
+		}
+		if (end && Array.isArray(end) && end.length === 2) {
+			const m = L.marker(end, { icon: createEndpointIcon('#d32f2f', 'D') }).addTo(map);
+			m.bindTooltip('Destination', { permanent: true, direction: 'right', className: 'endpoint-tooltip' });
+			created.push(m);
+		}
+	} catch (e) {
+		// ignore failures — function is best-effort
+	}
+	return created;
+};
+
+/**
  * Returns the colour to use for a bus marker icon based on delay.
  * @param {number|null} delayMinutes
  */
@@ -127,6 +170,14 @@ const MapClickClearHandler = ({ onClear }) => {
  */
 const JourneyRouteLayer = ({ segments }) => {
 	const map = useMap();
+	const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050').replace(/\/$/, '');
+
+	// Local cache of fetched OSRM geometries for segments which lack a usable
+	// polyline. Keyed by segment _normKey so refreshes replace entries.
+	const [fetchedCoordsMap, setFetchedCoordsMap] = React.useState({});
+	// Keep track of any programmatically-added endpoint markers so we can
+	// remove them when the route changes or the component unmounts.
+	const endpointMarkersRef = React.useRef([]);
 
 	// Normalize coords to [[lat, lon], ...] numeric arrays and produce a stable key
 	const normalizeSegments = (inSegments) => {
@@ -147,7 +198,7 @@ const JourneyRouteLayer = ({ segments }) => {
 					coords.push([a, b]);
 				}
 			}
-			if (coords.length < 2) continue;
+			if (coords.length === 0) continue;
 
 			// If the segment includes explicit leg endpoints (_from/_to) try to clip
 			// the geometry to only the portion between those endpoints so we don't
@@ -192,6 +243,20 @@ const JourneyRouteLayer = ({ segments }) => {
 	};
 
 	const normSegments = normalizeSegments(segments);
+
+	// Helper to normalise coords returned from the backend/OSRM to [[lat,lon],...]
+	const normalizeCoords = (raw) => {
+		if (!Array.isArray(raw)) return [];
+		const out = [];
+		for (const pt of raw) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const a = Number(pt[0]);
+			const b = Number(pt[1]);
+			if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+			if (a < -90 || a > 90) out.push([b, a]); else out.push([a, b]);
+		}
+		return out;
+	};
 
 	// Densify sparse coords to make polylines appear smoother when OSRM smoothing
 	// isn't available. Only apply to non-walk segments to keep walk legs dashed
@@ -314,6 +379,93 @@ const JourneyRouteLayer = ({ segments }) => {
 		}
 		}, [map, JSON.stringify(displaySegments.map(s => s._normKey))]);
 
+	// Explicitly highlight start and end points for the current route.
+	useEffect(() => {
+		try {
+			// remove any previous markers
+			if (Array.isArray(endpointMarkersRef.current) && endpointMarkersRef.current.length > 0) {
+				endpointMarkersRef.current.forEach((m) => {
+					try { map.removeLayer(m); } catch (e) { /* ignore */ }
+				});
+				endpointMarkersRef.current = [];
+			}
+
+			if (!displaySegments || displaySegments.length === 0) return;
+			const firstSeg = displaySegments[0];
+			const lastSeg = displaySegments[displaySegments.length - 1];
+			const start = firstSeg?.coords?.[0] ?? null;
+			const end = lastSeg?.coords?.[lastSeg.coords.length - 1] ?? null;
+			if (map && start && end) {
+				const created = highlightEndpoints(map, start, end);
+				endpointMarkersRef.current = created;
+			}
+		} catch (e) {
+			// best-effort only
+		}
+		return () => {
+			if (Array.isArray(endpointMarkersRef.current)) {
+				endpointMarkersRef.current.forEach((m) => {
+					try { map.removeLayer(m); } catch (e) { /* ignore */ }
+				});
+				endpointMarkersRef.current = [];
+			}
+		};
+	}, [map, JSON.stringify(displaySegments.map(s => s._normKey))]);
+
+	// For any non-walking segment with fewer than 2 coords, attempt a best-effort
+	// OSRM fetch to build a polyline between the previous segment's end and
+	// the next segment's start. This helps when the journey-plan returned only
+	// a single-point placeholder for a vehicle leg.
+	useEffect(() => {
+		let mounted = true;
+		(async () => {
+			if (!displaySegments || displaySegments.length === 0) return;
+			const updates = {};
+			for (let i = 0; i < displaySegments.length; i++) {
+				const seg = displaySegments[i];
+				const isWalk = seg.mode === 'walking' || seg.type === 'walk' || seg.color === '#888888' || (seg.id && String(seg.id).startsWith('walk'));
+				if (isWalk) continue;
+				if (!seg || !Array.isArray(seg.coords) || seg.coords.length >= 2) continue;
+				// Skip if we already fetched coords for this segment
+				if (seg._normKey && fetchedCoordsMap[seg._normKey]) continue;
+				// Determine from/to points from neighbouring segments
+				let from = null;
+				let to = null;
+				const prev = displaySegments[i - 1];
+				const next = displaySegments[i + 1];
+				if (prev) {
+					const pk = prev._normKey;
+					const pa = (pk && fetchedCoordsMap[pk]) ? fetchedCoordsMap[pk] : prev.coords;
+					if (pa && pa.length) from = pa[pa.length - 1];
+				}
+				if (!from && seg.coords && seg.coords.length) from = seg.coords[0];
+				if (next) {
+					const nk = next._normKey;
+					const nb = (nk && fetchedCoordsMap[nk]) ? fetchedCoordsMap[nk] : next.coords;
+					if (nb && nb.length) to = nb[0];
+				}
+				if (!to && seg.coords && seg.coords.length) to = seg.coords[0];
+				if (!from || !to) continue;
+				try {
+					const url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(from[0])}&from_lon=${encodeURIComponent(from[1])}&to_lat=${encodeURIComponent(to[0])}&to_lon=${encodeURIComponent(to[1])}&mode=driving`;
+					const resp = await fetch(url);
+					if (!resp.ok) continue;
+					const data = await resp.json();
+					const norm = normalizeCoords(data.coords);
+					if (norm && norm.length >= 2) {
+						if (mounted) updates[seg._normKey] = norm;
+					}
+				} catch (e) {
+					// ignore
+				}
+			}
+			if (mounted && Object.keys(updates).length) {
+				setFetchedCoordsMap((p) => ({ ...p, ...updates }));
+			}
+		})();
+		return () => { mounted = false; };
+	}, [map, JSON.stringify(displaySegments.map(s => s._normKey))]);
+
 	// Ensure walking segments are rendered after vehicle segments so they are visually on top
 	// and use a heavier dashed style so they are not visually covered by bus tracks.
 	const renderSegments = (Array.isArray(displaySegments) ? displaySegments.slice() : []).sort((a, b) => {
@@ -327,8 +479,10 @@ const JourneyRouteLayer = ({ segments }) => {
 
 		return (
 			<>
-				{renderSegments.map((seg) => {
-					if (!seg.coords || seg.coords.length < 2) return null;
+				{renderSegments.map((seg, segIdx) => {
+					// Prefer any fetched OSRM geometry for segments that lacked a usable polyline
+					const actualCoords = (seg && seg._normKey && fetchedCoordsMap[seg._normKey]) ? fetchedCoordsMap[seg._normKey] : seg.coords;
+					if (!actualCoords || actualCoords.length < 2) return null;
 					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && String(seg.id).startsWith('walk'));
 					// Use normalized key to force Leaflet to replace the polyline when coords change
 					// For walking segments, use a heavier weight and a bold dashed pattern so they remain visible on top of vehicle tracks.
@@ -337,7 +491,7 @@ const JourneyRouteLayer = ({ segments }) => {
 								{/* Cyan underlay/frame so route lines (vehicle and walking) have a cyan outline */}
 								<Polyline
 									key={`${seg._normKey}-frame`}
-									positions={seg.coords}
+									positions={actualCoords}
 									pathOptions={{
 										color: '#00ffff',
 										weight: isWalk ? 5 : 6,
@@ -350,7 +504,7 @@ const JourneyRouteLayer = ({ segments }) => {
 								{/* Main overlay line */}
 								<Polyline
 									key={seg._normKey}
-									positions={seg.coords}
+									positions={actualCoords}
 									pathOptions={{
 										// Walking legs: deep grey, dashed so they remain distinct from vehicle tracks
 										color: isWalk ? 'hsla(307, 53%, 67%, 1.00)' : (seg.color || '#1a73e8'),
@@ -361,15 +515,15 @@ const JourneyRouteLayer = ({ segments }) => {
 										dashArray: isWalk ? '10 6' : undefined,
 									}}
 								/>
-								{isWalk && seg.coords && seg.coords.length >= 2 && (
+								{isWalk && actualCoords && actualCoords.length >= 2 && (
 									<>
 										<CircleMarker
-											center={seg.coords[0]}
+											center={actualCoords[0]}
 											radius={4}
 											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
 										/>
 										<CircleMarker
-											center={seg.coords[seg.coords.length - 1]}
+											center={actualCoords[actualCoords.length - 1]}
 											radius={4}
 											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
 										/>
@@ -378,6 +532,32 @@ const JourneyRouteLayer = ({ segments }) => {
 							</>
 						);
 				})}
+
+							{/* Transfer stop markers: render a marker at the boundary between consecutive segments */}
+							{(() => {
+								const pts = [];
+								for (let i = 0; i < displaySegments.length - 1; i++) {
+									const aKey = displaySegments[i]._normKey;
+									const bKey = displaySegments[i + 1]._normKey;
+									const a = (aKey && fetchedCoordsMap[aKey]) ? fetchedCoordsMap[aKey] : displaySegments[i].coords;
+									const b = (bKey && fetchedCoordsMap[bKey]) ? fetchedCoordsMap[bKey] : displaySegments[i + 1].coords;
+									let pt = null;
+									if (a && a.length) pt = a[a.length - 1];
+									if ((!pt || pt.length === 0) && b && b.length) pt = b[0];
+									if (pt && pt.length === 2) {
+										// Skip origin/destination (first/last)
+										if (i !== 0 || (displaySegments[0] && displaySegments[0].coords && displaySegments[0].coords.length > 0)) pts.push(pt);
+									}
+								}
+								return pts.map((p, idx) => (
+									<CircleMarker
+										key={`transfer-${idx}`}
+										center={p}
+										radius={6}
+										pathOptions={{ color: '#fff', weight: 2, fillColor: '#F59E0B', fillOpacity: 1 }}
+									/>
+								));
+							})()}
 				{/* Origin dot */}
 				{displaySegments[0]?.coords?.[0] && (
 					<CircleMarker
@@ -402,6 +582,7 @@ const JourneyRouteLayer = ({ segments }) => {
 			</>
 			);
 	};
+
 
 const MapController = ({ onReady, onMoveEnd }) => {
 	const map = useMap();
