@@ -16,24 +16,30 @@ import { Bus, Train, MapPin, Heart, Info } from "lucide-react";
 
 export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false, isSelected = false, fullHeight = false }) {
   function ClassificationInfo({ classification }) {
-    const [anchorEl, setAnchorEl] = React.useState(null);
+    const buttonRef = React.useRef(null);
+    const [open, setOpen] = React.useState(false);
     if (!classification) return null;
     const label = String(classification);
     const cap = label.charAt(0).toUpperCase() + label.slice(1);
+    const id = `classification-popover-${label}`;
     return (
       <>
         <IconButton
           size="small"
           aria-label={`classification-${label}`}
-          onClick={(e) => setAnchorEl(e.currentTarget)}
-          sx={{ ml: 1 }}
+          aria-describedby={open ? id : undefined}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); setOpen((s) => !s); }}
+          ref={buttonRef}
+          sx={{ ml: 1, p: 0.5 }}
         >
           <Info size={14} />
         </IconButton>
         <Popover
-          open={Boolean(anchorEl)}
-          anchorEl={anchorEl}
-          onClose={() => setAnchorEl(null)}
+          id={id}
+          open={open}
+          anchorEl={buttonRef.current}
+          onClose={() => setOpen(false)}
           anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
           transformOrigin={{ vertical: 'top', horizontal: 'left' }}
         >
@@ -83,21 +89,46 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
       <Stack spacing={1.5} sx={{ flex: '0 0 auto' }}>
             <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
             <Stack spacing={0.5}>
+              {/* Small label above the duration number */}
+              <Typography
+                variant="caption"
+                sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mb: 0.25 })}
+              >
+                Duration:
+              </Typography>
               <Typography
                 fontWeight={700}
-                sx={(theme) => ({
-                  color: isSelected
-                    ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff')
-                    : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
+                sx={() => ({
+                  color: '#ffffff',
                 })}
               >
                 {route.duration}
               </Typography>
+              {/* Arrival caption and computed arrival time (if available) */}
+              {typeof route?.initialDepartureSecs === 'number' && Number.isFinite(route.initialDepartureSecs) && Number.isFinite(route.totalSeconds) && (
+                (() => {
+                  const arr = Math.floor(route.initialDepartureSecs + route.totalSeconds);
+                  const secsOfDay = ((arr % 86400) + 86400) % 86400; // normalize
+                  const hh = Math.floor(secsOfDay / 3600).toString().padStart(2, '0');
+                  const mm = Math.floor((secsOfDay % 3600) / 60).toString().padStart(2, '0');
+                  const arrivalStr = `${hh}:${mm}`;
+                  return (
+                    <>
+                      <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
+                        Arrives at:
+                      </Typography>
+                      <Typography fontWeight={700} sx={() => ({ color: '#ffffff' })}>
+                        {arrivalStr}
+                      </Typography>
+                    </>
+                  );
+                })()
+              )}
                 <Typography
                   variant="caption"
                   sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
                 >
-                {route.transfers || 0} transfer{(route.transfers || 0) !== 1 ? 's' : ''}
+                {route.transfers === 0 ? 'Direct' : `${route.transfers || 0} transfer${(route.transfers || 0) !== 1 ? 's' : ''}`}
               </Typography>
               {totalWalkMinutes > 0 && (
                   <Typography
@@ -113,9 +144,9 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                 <>
                   <Typography
                     fontWeight={700}
-                    sx={(theme) => ({
+                    sx={() => ({
                       lineHeight: 1.2,
-                      color: isSelected ? (theme.palette.mode === 'light' ? '#4CBB17' : 'lime') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
+                      color: route && route.isCheapest ? '#4CBB17' : '#FF8787',
                     })}
                   >
                     {route.price}
