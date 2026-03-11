@@ -2587,6 +2587,30 @@ async def bus_live_operator(
         )
 
     out = []
+    # Attempt to load today's stop metadata and walking helper so we can
+    # filter out vehicles that are already at (or within 50m of) their
+    # destination stop. Failure to load merged/router/walking should not
+    # block the endpoint — in that case we simply skip the proximity filter.
+    try:
+        from datetime import datetime as _dt
+        today_date = _dt.now().date().isoformat()
+        now_secs = _dt.now().hour * 3600 + _dt.now().minute * 60 + _dt.now().second
+        _merged, _rtr, _walking = get_router_for_date(today_date, start_time=now_secs, apply_delay=False)
+        # Build a map of normalized stop-name -> list of (stop_idx, lat, lon)
+        _stop_name_map = {}
+        for si, sname in enumerate(_merged.stop_metadata or []):
+            try:
+                if not sname:
+                    continue
+                key = str(sname).strip().lower()
+                coords = _walking.get_loc_coords(si)
+                if coords and len(coords) == 2:
+                    _stop_name_map.setdefault(key, []).append((si, coords[0], coords[1]))
+            except Exception:
+                # ignore stops we cannot resolve
+                continue
+    except Exception:
+        _stop_name_map = None
     for item in results:
         # Support both legacy 7-tuples and new 8-tuples with bearing
         if len(item) == 7:
@@ -2601,6 +2625,28 @@ async def bus_live_operator(
             except Exception:
                 computed = None
         final_delay = delay_s if delay_s is not None else computed
+        # If we loaded stop metadata, try to filter vehicles that are already
+        # at their destination. Destination strings in feeds are free-text;
+        # we perform a simple name-match against stop metadata and if a
+        # matching stop is within 50 metres of the vehicle, skip it.
+        try:
+            if _stop_name_map and dest:
+                dest_q = str(dest).strip().lower()
+                skip = False
+                for sname_key, coords_list in _stop_name_map.items():
+                    if dest_q in sname_key or sname_key in dest_q:
+                        for (_si, s_lat, s_lon) in coords_list:
+                            if _haversine_m(lat_v, lon_v, s_lat, s_lon) <= 50.0:
+                                skip = True
+                                break
+                    if skip:
+                        break
+                if skip:
+                    # do not include vehicles that have effectively reached their destination
+                    continue
+        except Exception:
+            # On any failure in matching/filtering, fall back to including the vehicle
+            pass
         out.append({
             "line": line_ref,
             "destination": dest,
@@ -3779,7 +3825,7 @@ async def compare_routers(request: JourneyPlanRequest):
         # Lazily construct optional routers (eco, cosy, lazy, greedy).
         # optional routers: eco, cosy, lazy, greedy
         eco_router = None
-        cosy_router = None
+        computed = None
         lazy_router = None
         greedy_router = None
         try:
@@ -3787,6 +3833,7 @@ async def compare_routers(request: JourneyPlanRequest):
             eco_router = EcoRaptor(merged)
         except Exception:
             eco_router = None
+
         try:
             from cosy_router import RaptorRouter as CosyRaptor
             cosy_router = CosyRaptor(merged)

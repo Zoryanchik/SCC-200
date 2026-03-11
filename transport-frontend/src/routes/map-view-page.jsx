@@ -104,7 +104,11 @@ position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
 name: bus.name || `Bus ${bus.id}`,
 type: 'bus',
 status: bus.status || 'On time',
-routeNumber: bus.routeNumber || bus.route
+routeNumber: bus.routeNumber || bus.route,
+delayMinutes: bus.delay_minutes ?? bus.delayMinutes ?? null,
+operator: bus.operator || bus.operator_name || null,
+bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? bus.heading ?? bus.course ?? null,
+meta: bus.meta ?? null,
 });
 });
 }
@@ -202,6 +206,10 @@ status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins
 routeNumber: item?.routeNumber || item?.route,
 destination: item?.destination,
 departureTime: item?.departureTime || item?.scheduledTime
+  ,
+  delayMinutes: item?.delay_minutes ?? item?.delayMinutes ?? null,
+  operator: item?.operator || item?.operator_name || null,
+  bearing: item?.bearing ?? item?.Bearing ?? item?.bearing_degrees ?? item?.heading ?? item?.course ?? null,
 };
 };
 
