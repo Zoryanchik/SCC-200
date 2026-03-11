@@ -394,13 +394,40 @@ class RaptorRouter:
                 idx += 1
                 continue
 
+            # Disallow same-mode transfers: if the boarding stop was reached
+            # by the same mode as this journey (and it wasn't a walk), skip
+            # boarding here. This prevents creating transfers that change
+            # vehicle but keep the same mode; however an improvement to a
+            # stop's arrival time by the same mode should still be applied.
+            jmode = network.journey_type(first_journey)
+            arrived_mode = reach_stops[stop][2]
+            if arrived_mode is not None:
+                # If we arrived by the same transit mode (and it wasn't a
+                # walk), don't board here — this prevents same-mode
+                # transfers. Also, if we reached this stop by walking but
+                # the previous stop (pre) was of the same mode, disallow
+                # boarding as that is effectively a same-mode transfer.
+                if arrived_mode != WALKING and arrived_mode == jmode:
+                    idx += 1
+                    continue
+                if arrived_mode == WALKING:
+                    pre = reach_stops[stop][0]
+                    if pre is not None:
+                        pre_mode = reach_stops[pre][2]
+                        if pre_mode == jmode:
+                            idx += 1
+                            continue
+
             for subsequent_point, subsequent_a_time, _d in journey_times[start_pos + 1:]:
                 if subsequent_point == stop:
                     continue
-                if subsequent_a_time < reach_stops[subsequent_point][1] and reach_stops[subsequent_point][2] != reach_stops[stop][2]:
+                # Allow updating a stop even if the existing arrival was the
+                # same mode — we only block boarding transfers of the same
+                # mode at the boarding point above.
+                if subsequent_a_time < reach_stops[subsequent_point][1]:
                     reach_stops[subsequent_point][1] = subsequent_a_time
                     reach_stops[subsequent_point][0] = stop
-                    reach_stops[subsequent_point][2] = network.journey_type(first_journey)
+                    reach_stops[subsequent_point][2] = jmode
                     reach_stops[subsequent_point][3] = first_journey
                     reach_stops[subsequent_point][4] = network
                     switch_b.add(subsequent_point)

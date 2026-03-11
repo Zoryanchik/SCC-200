@@ -53,6 +53,11 @@ class MergedData:
         # Per-journey mode (BUS or TRAIN), filled during merge
         self._journey_mode = []
 
+        # Per-stop mode (BUS or TRAIN), parallel to merged stop indices.
+        # Filled during merge so callers can inspect which source a stop
+        # originated from (mirrors journey mode behavior).
+        self._stop_mode = []
+
         route_offset = 0
         journey_offset = 0
         stop_offset = 0
@@ -113,6 +118,11 @@ class MergedData:
 
             # Record the transport mode for every journey in this group
             self._journey_mode.extend([mode] * n_journeys)
+
+            # Record the transport mode for each stop contributed by this
+            # data group so the merged stop index space has an associated
+            # mode value per stop (exactly like journey mode above).
+            self._stop_mode.extend([mode] * n_stops)
 
             # Mapper bookkeeping
             mapper = getattr(data, "map_stops", None)
@@ -192,6 +202,16 @@ class MergedData:
         """Return the transport mode (BUS or TRAIN) for a merged journey."""
         if journey_id_int < len(self._journey_mode):
             return self._journey_mode[journey_id_int]
+        return BUS  # fallback
+
+    def stop_type(self, merged_stop_int: int) -> int:
+        """Return the transport mode (BUS or TRAIN) for a merged stop.
+
+        Mirrors :meth:`journey_type` and returns ``BUS`` when the index
+        is out of range.
+        """
+        if merged_stop_int < len(self._stop_mode):
+            return self._stop_mode[merged_stop_int]
         return BUS  # fallback
 
     def get_atco_code(self, merged_stop_int: int):
