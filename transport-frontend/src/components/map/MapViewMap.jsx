@@ -168,12 +168,10 @@ export const highlightEndpoints = (map, start, end) => {
 	try {
 		if (start && Array.isArray(start) && start.length === 2) {
 			const m = L.marker(start, { icon: createEndpointIcon('#10B981', 'S') }).addTo(map);
-			m.bindTooltip('Start', { permanent: true, direction: 'right', className: 'endpoint-tooltip' });
 			created.push(m);
 		}
 		if (end && Array.isArray(end) && end.length === 2) {
 			const m = L.marker(end, { icon: createEndpointIcon('#d32f2f', 'D') }).addTo(map);
-			m.bindTooltip('Destination', { permanent: true, direction: 'right', className: 'endpoint-tooltip' });
 			created.push(m);
 		}
 	} catch (e) {

@@ -3360,6 +3360,8 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "departure_time": None,
             "arrival_time": (seconds_to_time(int(total_arrival))
                              if total_arrival else None),
+            "departure_day_offset": 0,
+            "arrival_day_offset": (int(total_arrival) // 86400) if total_arrival is not None else 0,
         }]
 
         coords = []
@@ -3542,6 +3544,9 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "duration_seconds": start_walk,
             "departure_time": _time_str(initial_departure_secs) if initial_departure_secs is not None else None,
             "arrival_time": _time_str(first_arrival_secs),
+            # integer day offsets (0 = same day, 1 = next day, ...)
+            "departure_day_offset": (int(initial_departure_secs) // 86400) if initial_departure_secs is not None else 0,
+            "arrival_day_offset": (int(first_arrival_secs) // 86400) if first_arrival_secs is not None else 0,
         })
         wc = [[start_point[0], start_point[1]]]
         if first_coord:
@@ -3591,6 +3596,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "from_stop": from_loc,
             "to_stop": to_loc,
             "arrival_time": _time_str(curr_info["arrival_time"]),
+            "arrival_day_offset": (int(curr_info["arrival_time"]) // 86400) if curr_info.get("arrival_time") is not None else 0,
         }
 
         line_name = ""
@@ -3657,6 +3663,20 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             else:
                 leg["duration_seconds"] = None
 
+            # Attach integer day offsets for departure/arrival so the
+            # frontend can render multi-day annotations. If a specific
+            # board_dep wasn't available use the previous stop arrival
+            # time as the departure reference.
+            try:
+                dep_secs_val = board_dep if board_dep is not None else prev_info.get("arrival_time")
+                leg["departure_day_offset"] = (int(dep_secs_val) // 86400) if dep_secs_val is not None else 0
+            except Exception:
+                leg["departure_day_offset"] = 0
+            try:
+                leg["arrival_day_offset"] = (int(arr_secs) // 86400) if arr_secs is not None and arr_secs != float("inf") else 0
+            except Exception:
+                leg["arrival_day_offset"] = 0
+
         legs.append(leg)
 
         # -- geometry for this leg --
@@ -3697,6 +3717,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 from_loc["classification"] = lcls
         except Exception:
             pass
+        dep_secs = ordered[-1][1]["arrival_time"] if ordered and ordered[-1][1].get("arrival_time") is not None else None
         legs.append({
             "mode": "walking",
             "from_stop": from_loc,
@@ -3704,9 +3725,10 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                         "lat": destination_point[0],
                         "lon": destination_point[1]},
             "duration_seconds": end_walk,
-            "departure_time": _time_str(
-                ordered[-1][1]["arrival_time"]),
+            "departure_time": _time_str(dep_secs),
             "arrival_time": _time_str(total_arrival),
+            "departure_day_offset": (int(dep_secs) // 86400) if dep_secs is not None else 0,
+            "arrival_day_offset": (int(total_arrival) // 86400) if total_arrival is not None else 0,
         })
         wc = []
         if last_coord:
@@ -3806,6 +3828,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             # using the exact journey that was selected by the router.
             "logged_journey_id": route_result.get("_logged_journey_id") if isinstance(route_result, dict) else None,
             "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
+            "initial_departure_day_offset": (int(initial_departure_secs) // 86400) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else 0,
         },
         "routeGeometries": geometries,
     }

@@ -35,6 +35,15 @@ const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
  * steps, walkMinutes}).  Returns null when legs are empty.
  */
 function journeyToRouteCard(journey) {
+  // Debug: print the raw journey object received so we can verify
+  // whether arrival_day_offset / departure_day_offset and related
+  // augmented fields are present at runtime.
+  try {
+    // eslint-disable-next-line no-console
+    console.debug('[journeyToRouteCard] incoming journey:', journey);
+  } catch (e) {
+    // ignore
+  }
   const legs = journey?.legs;
   if (!Array.isArray(legs) || legs.length === 0) return null;
 
@@ -90,7 +99,8 @@ function journeyToRouteCard(journey) {
   const meta = journey.meta || {};
   let duration = "";
   // Also compute a numeric totalSeconds to allow programmatic comparisons
-  const totalSec = meta.total_seconds ?? legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
+  // Backend sends "total_duration_seconds" (not "total_seconds")
+  const totalSec = meta.total_duration_seconds ?? meta.total_seconds ?? legs.reduce((s, l) => s + (l.duration_seconds ?? 0), 0);
   if (meta.total_duration) {
     duration = meta.total_duration;
   } else {
@@ -100,25 +110,48 @@ function journeyToRouteCard(journey) {
       : `${totalMin} mins`;
   }
 
-  // initial departure seconds may be provided by the backend (meta.initial_departure_secs)
-  const initialDepartureSecsMeta = meta.initial_departure_secs ?? null;
+  // initial departure seconds — backend sends initial_departure_time (string)
+  // and initial_departure_day_offset (int), NOT initial_departure_secs.
+  // Parse the time string and combine with the day offset.
+  let initialDepartureSecsMeta = null;
+  let initialDepartureDayShiftMeta = 0;
+  try {
+    if (meta.initial_departure_time) {
+      const parsed = parseTimeWithOffset(meta.initial_departure_time);
+      if (Number.isFinite(parsed.secs)) {
+        initialDepartureSecsMeta = parsed.secs;
+        initialDepartureDayShiftMeta = parsed.dayShift || (Number.isFinite(meta.initial_departure_day_offset) ? meta.initial_departure_day_offset : 0);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
 
-  // Helper: parse a time string like "HH:MM" or "HH:MM:SS" possibly with " (+Nd)" suffix
-  const parseTimeToSecondsOfDay = (timeStr) => {
-    if (!timeStr || typeof timeStr !== 'string') return null;
-    // strip any day offset suffix like " (+1d)"
+  // parse a time string like "HH:MM" or "HH:MM:SS" possibly with a suffix like "(+1d)"
+  // Returns { secs: number|null, dayShift: number }
+  const parseTimeWithOffset = (timeStr) => {
+    if (!timeStr || typeof timeStr !== 'string') return { secs: null, dayShift: 0 };
+    // extract day-shift suffix like "(+1d)" or "(+2 days)"
+    let dayShift = 0;
+    try {
+      const m = timeStr.match(/\(\s*\+\s*(\d+)\s*d/i);
+      if (m && m[1]) dayShift = Number(m[1]) || 0;
+    } catch (e) {
+      dayShift = 0;
+    }
     const core = timeStr.split('(')[0].trim();
     const parts = core.split(':').map((p) => parseInt(p, 10));
-    if (parts.length < 2 || Number.isNaN(parts[0]) || Number.isNaN(parts[1])) return null;
+    if (parts.length < 2 || Number.isNaN(parts[0]) || Number.isNaN(parts[1])) return { secs: null, dayShift };
     const hh = parts[0];
     const mm = parts[1];
     const ss = parts.length >= 3 && !Number.isNaN(parts[2]) ? parts[2] : 0;
-    if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
-    return hh * 3600 + mm * 60 + ss;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return { secs: null, dayShift };
+    return { secs: hh * 3600 + mm * 60 + ss, dayShift };
   };
 
-  // Prefer meta-provided epoch seconds, else derive seconds-of-day from the first leg's departure time.
+  // Prefer meta-provided departure time, else derive from the first leg's departure time.
   let initialDepartureSecs = initialDepartureSecsMeta ?? null;
+  let initialDepartureDayShift = initialDepartureDayShiftMeta || 0;
   try {
     if (!Number.isFinite(initialDepartureSecs) && Array.isArray(journey?.legs) && journey.legs.length > 0) {
       const first = journey.legs[0];
@@ -129,9 +162,10 @@ function journeyToRouteCard(journey) {
         first.departure_time,
       ];
       for (const t of candidates) {
-        const secs = parseTimeToSecondsOfDay(t);
-        if (Number.isFinite(secs)) {
-          initialDepartureSecs = secs;
+        const parsed = parseTimeWithOffset(t);
+        if (Number.isFinite(parsed.secs)) {
+          initialDepartureSecs = parsed.secs;
+          initialDepartureDayShift = parsed.dayShift || 0;
           break;
         }
       }
@@ -140,14 +174,64 @@ function journeyToRouteCard(journey) {
     // ignore parse errors
   }
 
+  // Compute arrival day shift from the last leg's arrival_time_with_offset (if available)
+  let arrivalDayShift = 0;
+  let finalArrivalWithOffset = null;
+  try {
+    const last = journey.legs[journey.legs.length - 1];
+    const arrivalCandidates = [
+      last.realtime_arrival_time_with_offset,
+      last.arrival_time_with_offset,
+      last.scheduled_arrival_time,
+      last.arrival_time,
+    ];
+    for (const t of arrivalCandidates) {
+      const parsed = parseTimeWithOffset(t);
+      if (parsed && Number.isFinite(parsed.dayShift)) {
+        arrivalDayShift = parsed.dayShift || 0;
+        // capture the first human-friendly arrival-with-offset string if present
+        if (!finalArrivalWithOffset && typeof t === 'string') finalArrivalWithOffset = t;
+        break;
+      }
+    }
+  } catch (e) {
+    arrivalDayShift = 0;
+  }
+
+  // Also capture numeric final arrival seconds (secs since midnight) + dayShift*86400
+  let finalArrivalSecs = null;
+  try {
+    const last = journey.legs[journey.legs.length - 1];
+    const arrivalCandidates = [
+      last.realtime_arrival_time_with_offset,
+      last.arrival_time_with_offset,
+      last.scheduled_arrival_time,
+      last.arrival_time,
+    ];
+    for (const t of arrivalCandidates) {
+      const parsed = parseTimeWithOffset(t);
+      if (parsed && Number.isFinite(parsed.secs)) {
+        finalArrivalSecs = parsed.secs + (parsed.dayShift || 0) * 86400;
+        break;
+      }
+    }
+  } catch (e) {
+    finalArrivalSecs = null;
+  }
+
   return {
     id: 1,
     duration,
     totalSeconds: totalSec,
-    initialDepartureSecs,
+  initialDepartureSecs,
+  initialDepartureDayShift,
+  // dayShift is the absolute day offset of the final arrival relative to
+  // the requested date (0 = same day, 1 = next day).
+  dayShift: (Number.isFinite(arrivalDayShift) ? arrivalDayShift : 0),
     transfers,
     steps,
     walkMinutes,
+    finalArrivalWithOffset,
     // Pricing: £2.10 per bus leg (single ticket), train legs are not priced here
     busLegs: steps.filter((s) => s.type === 'bus').length,
     price: (() => {
@@ -156,6 +240,7 @@ function journeyToRouteCard(journey) {
       const total = (n * 2.10).toFixed(2);
       return `£${total}`;
     })(),
+    finalArrivalSecs,
   };
 }
 
@@ -912,29 +997,62 @@ export default function HomePage() {
       const options = Array.from(optionsMap.values());
 
       // Add special labels:
-      // - "E·D": mark options with the earliest initial departure (if provided by backend in meta.initial_departure_secs)
+      // - "E·D": mark options with the earliest initial departure
       // - "FASTEST": mark options with the smallest totalSeconds
-      try {
-        const withInit = options.map((o) => ({ opt: o, init: (() => {
-          // prefer meta-provided initial seconds from any source
-          const srcs = o.sources ? Object.values(o.sources) : [];
-          for (const s of srcs) {
-            if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs)) return Number(s.meta.initial_departure_secs);
-            if (s && s.meta && s.meta.initial_departure_time) {
-              const t = Date.parse(s.meta.initial_departure_time);
-              if (!Number.isNaN(t)) return Math.floor(t / 1000);
+      // - "E·A": mark options with the earliest arrival
+      //
+      // Helper: compute departure seconds (day-shift aware) from a source or card
+      const getDepSecs = (o) => {
+        // Try source meta first — backend sends initial_departure_time (string)
+        // and initial_departure_day_offset (integer).
+        const srcs = o.sources ? Object.values(o.sources) : [];
+        for (const s of srcs) {
+          if (s && s.meta && s.meta.initial_departure_time) {
+            const parts = String(s.meta.initial_departure_time).split('(')[0].trim().split(':').map(Number);
+            if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+              const secs = parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
+              const dayOff = Number.isFinite(s.meta.initial_departure_day_offset) ? s.meta.initial_departure_day_offset : 0;
+              return secs + dayOff * 86400;
             }
           }
-          // fallback: use card.initialDepartureSecs if journeyToRouteCard populated it (meta->card mapping)
-          if (o.card && Number.isFinite(o.card.initialDepartureSecs)) return Number(o.card.initialDepartureSecs);
-          return null;
-        })() }));
+        }
+        // Fallback: card values (already parsed with day shift by journeyToRouteCard)
+        if (o.card && Number.isFinite(o.card.initialDepartureSecs)) {
+          const dayShift = Number.isFinite(o.card.initialDepartureDayShift) ? Number(o.card.initialDepartureDayShift) : 0;
+          return Number(o.card.initialDepartureSecs) + dayShift * 86400;
+        }
+        return null;
+      };
 
+      // Helper: compute arrival seconds (day-shift aware) from a source or card
+      const getArrSecs = (o) => {
+        // Prefer card.finalArrivalSecs which is already day-shift adjusted
+        if (o.card && Number.isFinite(o.card.finalArrivalSecs)) {
+          return Number(o.card.finalArrivalSecs);
+        }
+        // Fallback: departure + total duration
+        const dep = getDepSecs(o);
+        const dur = (o.card && Number.isFinite(o.card.totalSeconds)) ? Number(o.card.totalSeconds) : null;
+        // Also check source meta for total_duration_seconds
+        const srcs = o.sources ? Object.values(o.sources) : [];
+        for (const s of srcs) {
+          if (s && s.meta && Number.isFinite(s.meta.total_duration_seconds)) {
+            if (Number.isFinite(dep)) return dep + Number(s.meta.total_duration_seconds);
+          }
+        }
+        if (Number.isFinite(dep) && Number.isFinite(dur)) return dep + dur;
+        return null;
+      };
+
+      try {
+        // E·D: earliest departure
+        const withInit = options.map((o) => ({ opt: o, init: getDepSecs(o) }));
         const initVals = withInit.map((w) => w.init).filter((v) => Number.isFinite(v));
         if (initVals.length > 0) {
           const minInit = Math.min(...initVals);
+          const INIT_TOL = 10; // seconds tolerance for earliest-departure ties
           for (const w of withInit) {
-            if (Number.isFinite(w.init) && w.init === minInit) {
+            if (Number.isFinite(w.init) && Math.abs(w.init - minInit) <= INIT_TOL) {
               if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
             }
           }
@@ -944,7 +1062,7 @@ export default function HomePage() {
         const totalVals = options.map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null)).filter((v) => Number.isFinite(v));
         if (totalVals.length > 0) {
           const minTotal = Math.min(...totalVals);
-          const EPS = 1; // seconds tolerance for "equally fastest"
+          const EPS = 10; // seconds tolerance for "equally fastest"
           for (const o of options) {
             if (o.card && Number.isFinite(o.card.totalSeconds) && Math.abs(o.card.totalSeconds - minTotal) <= EPS) {
               if (!o.labels.includes('FASTEST')) o.labels.push('FASTEST');
@@ -952,51 +1070,20 @@ export default function HomePage() {
           }
         }
 
-          // E·A: earliest arrival. Prefer meta-provided initial departure + total_seconds
-          try {
-            const arrivalVals = options.map((o) => {
-              // look through any provided sources' meta for initial + total
-              const srcs = o.sources ? Object.values(o.sources) : [];
-              for (const s of srcs) {
-                if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs) && Number.isFinite(s.meta.total_seconds)) {
-                  return Number(s.meta.initial_departure_secs) + Number(s.meta.total_seconds);
-                }
-                if (s && s.meta && Number.isFinite(s.meta.final_arrival_secs)) {
-                  return Number(s.meta.final_arrival_secs);
-                }
-              }
-              // fallback: use card initialDepartureSecs + card.totalSeconds
-              if (o.card && Number.isFinite(o.card.initialDepartureSecs) && Number.isFinite(o.card.totalSeconds)) {
-                return Number(o.card.initialDepartureSecs) + Number(o.card.totalSeconds);
-              }
-              return null;
-            }).filter((v) => Number.isFinite(v));
-            if (arrivalVals.length > 0) {
-              const minArrival = Math.min(...arrivalVals);
-              const EPS_A = 1; // seconds tolerance for ties
-              for (const o of options) {
-                // compute candidate arrival as above
-                let cand = null;
-                const srcs = o.sources ? Object.values(o.sources) : [];
-                for (const s of srcs) {
-                  if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs) && Number.isFinite(s.meta.total_seconds)) {
-                    cand = Number(s.meta.initial_departure_secs) + Number(s.meta.total_seconds);
-                    break;
-                  }
-                  if (s && s.meta && Number.isFinite(s.meta.final_arrival_secs)) {
-                    cand = Number(s.meta.final_arrival_secs);
-                    break;
-                  }
-                }
-                if (cand === null && o.card && Number.isFinite(o.card.initialDepartureSecs) && Number.isFinite(o.card.totalSeconds)) {
-                  cand = Number(o.card.initialDepartureSecs) + Number(o.card.totalSeconds);
-                }
-                if (Number.isFinite(cand) && Math.abs(cand - minArrival) <= EPS_A) {
-                  if (!o.labels.includes('E·A')) o.labels.unshift('E·A');
-                }
+        // E·A: earliest arrival
+        try {
+          const withArr = options.map((o) => ({ opt: o, arr: getArrSecs(o) }));
+          const arrVals = withArr.map((w) => w.arr).filter((v) => Number.isFinite(v));
+          if (arrVals.length > 0) {
+            const minArr = Math.min(...arrVals);
+            const EPS_A = 10; // seconds tolerance for ties
+            for (const w of withArr) {
+              if (Number.isFinite(w.arr) && Math.abs(w.arr - minArr) <= EPS_A) {
+                if (!w.opt.labels.includes('E·A')) w.opt.labels.unshift('E·A');
               }
             }
-          } catch (e) {
+          }
+        } catch (e) {
             // ignore arrival computation failures
           }
       } catch (e) {
@@ -1029,17 +1116,14 @@ export default function HomePage() {
 
             const optionsArr = [singleOpt];
             // Compute E·D / FASTEST labels for this single option as well
+            // (reuse helpers defined above if in scope, else inline)
             try {
               const withInit = optionsArr.map((o) => ({ opt: o, init: (() => {
-                const srcs = o.sources ? Object.values(o.sources) : [];
-                for (const s of srcs) {
-                  if (s && s.meta && Number.isFinite(s.meta.initial_departure_secs)) return Number(s.meta.initial_departure_secs);
-                  if (s && s.meta && s.meta.initial_departure_time) {
-                    const t = Date.parse(s.meta.initial_departure_time);
-                    if (!Number.isNaN(t)) return Math.floor(t / 1000);
-                  }
+                // Use card values (already parsed with day shift by journeyToRouteCard)
+                if (o.card && Number.isFinite(o.card.initialDepartureSecs)) {
+                  const dayShift = Number.isFinite(o.card.initialDepartureDayShift) ? Number(o.card.initialDepartureDayShift) : 0;
+                  return Number(o.card.initialDepartureSecs) + dayShift * 86400;
                 }
-                if (o.card && Number.isFinite(o.card.initialDepartureSecs)) return Number(o.card.initialDepartureSecs);
                 return null;
               })() }));
 
@@ -1047,16 +1131,16 @@ export default function HomePage() {
               if (initVals.length > 0) {
                 const minInit = Math.min(...initVals);
                 for (const w of withInit) {
-                  if (Number.isFinite(w.init) && w.init === minInit) {
-                    if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
-                  }
+                  if (Number.isFinite(w.init) && Math.abs(w.init - minInit) <= 10) {
+                      if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
+                    }
                 }
               }
 
               const totalVals = optionsArr.map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null)).filter((v) => Number.isFinite(v));
               if (totalVals.length > 0) {
                 const minTotal = Math.min(...totalVals);
-                const EPS = 1; // seconds tolerance for "equally fastest"
+                const EPS = 10; // seconds tolerance for "equally fastest"
                 for (const o of optionsArr) {
                   if (o.card && Number.isFinite(o.card.totalSeconds) && Math.abs(o.card.totalSeconds - minTotal) <= EPS) {
                     if (!o.labels.includes('FASTEST')) o.labels.push('FASTEST');
@@ -1092,6 +1176,65 @@ export default function HomePage() {
             } catch (e) {
               // ignore price marking failures
             }
+            // Mark best/least values for other comparable metrics so UI can style them
+            try {
+              // Earliest arrival
+              const arrVals = sortedArr
+                .map((o) => (o.card && Number.isFinite(o.card.finalArrivalSecs) ? o.card.finalArrivalSecs : null))
+                .filter((v) => Number.isFinite(v));
+              if (arrVals.length > 0) {
+                const minArr = Math.min(...arrVals);
+                for (const o of sortedArr) {
+                  if (!o.card) continue;
+                  const a = o.card && Number.isFinite(o.card.finalArrivalSecs) ? o.card.finalArrivalSecs : null;
+                  o.card = { ...o.card, isEarliestArrival: Number.isFinite(a) && Math.abs(a - minArr) <= 10 };
+                }
+              }
+            } catch (e) {
+              // ignore
+            }
+            try {
+              // Fastest duration (totalSeconds)
+              const totalVals = sortedArr
+                .map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null))
+                .filter((v) => Number.isFinite(v));
+              if (totalVals.length > 0) {
+                const minTotal = Math.min(...totalVals);
+                for (const o of sortedArr) {
+                  if (!o.card) continue;
+                  const t = o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null;
+                  o.card = { ...o.card, isFastestDuration: Number.isFinite(t) && Math.abs(t - minTotal) <= 10 };
+                }
+              }
+            } catch (e) {}
+            try {
+              // Fewest transfers
+              const transVals = sortedArr
+                .map((o) => (o.card && Number.isFinite(o.card.transfers) ? o.card.transfers : null))
+                .filter((v) => Number.isFinite(v));
+              if (transVals.length > 0) {
+                const minTrans = Math.min(...transVals);
+                for (const o of sortedArr) {
+                  if (!o.card) continue;
+                  const tr = o.card && Number.isFinite(o.card.transfers) ? o.card.transfers : null;
+                  o.card = { ...o.card, isFewestTransfers: Number.isFinite(tr) && tr === minTrans };
+                }
+              }
+            } catch (e) {}
+            try {
+              // Least walking
+              const walkVals = sortedArr
+                .map((o) => (o.card && Number.isFinite(o.card.walkMinutes) ? o.card.walkMinutes : null))
+                .filter((v) => Number.isFinite(v));
+              if (walkVals.length > 0) {
+                const minWalk = Math.min(...walkVals);
+                for (const o of sortedArr) {
+                  if (!o.card) continue;
+                  const w = o.card && Number.isFinite(o.card.walkMinutes) ? o.card.walkMinutes : null;
+                  o.card = { ...o.card, isLeastWalk: Number.isFinite(w) && w === minWalk };
+                }
+              }
+            } catch (e) {}
             setRouteOptions(sortedArr);
             // Prefetch per-leg OSRM geometry for the first option
             try {
@@ -1165,6 +1308,63 @@ export default function HomePage() {
       } catch (e) {
         // ignore price marking failures
       }
+      // Mark best/least values for other comparable metrics so UI can style them
+      try {
+        // Earliest arrival
+        const arrVals = sortedOptions
+          .map((o) => (o.card && Number.isFinite(o.card.finalArrivalSecs) ? o.card.finalArrivalSecs : null))
+          .filter((v) => Number.isFinite(v));
+        if (arrVals.length > 0) {
+          const minArr = Math.min(...arrVals);
+          for (const o of sortedOptions) {
+            if (!o.card) continue;
+            const a = o.card && Number.isFinite(o.card.finalArrivalSecs) ? o.card.finalArrivalSecs : null;
+            o.card = { ...o.card, isEarliestArrival: Number.isFinite(a) && Math.abs(a - minArr) <= 10 };
+          }
+        }
+      } catch (e) {}
+      try {
+        // Fastest duration
+        const totalVals = sortedOptions
+          .map((o) => (o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null))
+          .filter((v) => Number.isFinite(v));
+        if (totalVals.length > 0) {
+          const minTotal = Math.min(...totalVals);
+          for (const o of sortedOptions) {
+            if (!o.card) continue;
+            const t = o.card && Number.isFinite(o.card.totalSeconds) ? o.card.totalSeconds : null;
+            o.card = { ...o.card, isFastestDuration: Number.isFinite(t) && Math.abs(t - minTotal) <= 10 };
+          }
+        }
+      } catch (e) {}
+      try {
+        // Fewest transfers
+        const transVals = sortedOptions
+          .map((o) => (o.card && Number.isFinite(o.card.transfers) ? o.card.transfers : null))
+          .filter((v) => Number.isFinite(v));
+        if (transVals.length > 0) {
+          const minTrans = Math.min(...transVals);
+          for (const o of sortedOptions) {
+            if (!o.card) continue;
+            const tr = o.card && Number.isFinite(o.card.transfers) ? o.card.transfers : null;
+            o.card = { ...o.card, isFewestTransfers: Number.isFinite(tr) && tr === minTrans };
+          }
+        }
+      } catch (e) {}
+      try {
+        // Least walking
+        const walkVals = sortedOptions
+          .map((o) => (o.card && Number.isFinite(o.card.walkMinutes) ? o.card.walkMinutes : null))
+          .filter((v) => Number.isFinite(v));
+        if (walkVals.length > 0) {
+          const minWalk = Math.min(...walkVals);
+          for (const o of sortedOptions) {
+            if (!o.card) continue;
+            const w = o.card && Number.isFinite(o.card.walkMinutes) ? o.card.walkMinutes : null;
+            o.card = { ...o.card, isLeastWalk: Number.isFinite(w) && w === minWalk };
+          }
+        }
+      } catch (e) {}
       setRouteOptions(sortedOptions);
       // Prefetch per-leg geometry for the first displayed option
       try {

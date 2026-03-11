@@ -379,6 +379,32 @@ export const compareRouters = async (fromStop, toStop, departureTime, options = 
     );
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     const responseJson = await response.json();
+    // The /journey/compare endpoint returns nested journey-plan objects
+    // under keys like main, eco, cosy, lazy, greedy. Ensure each returned
+    // plan is augmented with the same user-friendly fields that
+    // getJourneyPlans() provides (arrival_time_with_offset, departure_time_with_offset,
+    // iso datetimes) so the UI can display day-shifts consistently.
+    try {
+      const maybeAugment = (obj) => {
+        if (!obj || !obj.route) return;
+        try {
+          // augmentJourneyResponse mutates the object in-place and returns it
+          // when given a journey-plan shape. Use it to ensure legs have
+          // arrival_time_with_offset / departure_time_with_offset.
+          const augmented = augmentJourneyResponse(obj.route, date);
+          obj.route = augmented;
+        } catch (e) {
+          // ignore augmentation failures — keep original
+        }
+      };
+      maybeAugment(responseJson.main);
+      maybeAugment(responseJson.eco);
+      maybeAugment(responseJson.cosy);
+      maybeAugment(responseJson.lazy);
+      maybeAugment(responseJson.greedy);
+    } catch (e) {
+      // non-fatal
+    }
     if (options.includeRaw) {
       try {
         if (typeof structuredClone === 'function') {
