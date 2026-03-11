@@ -245,7 +245,25 @@ const fetchGeometryForLegs = async (legs) => {
       if (data && Array.isArray(data.coords) && data.coords.length >= 2) {
         // Normalize coords — endpoint already returns [lat,lon] but be safe
         const norm = normalizeCoords(data.coords);
-        if (norm.length >= 2) segment.coords = norm;
+        if (norm.length >= 2) {
+          // Ensure the returned geometry includes exact endpoints (from/to stops).
+          // Smoothing or OSRM snapping can omit the exact stop coordinates; force them
+          // so the drawn track always covers the stop locations.
+          try {
+            const first = norm[0];
+            const last = norm[norm.length - 1];
+            const eps = 1e-6;
+            if (!first || Math.abs(first[0] - fromLat) > eps || Math.abs(first[1] - fromLon) > eps) {
+              norm[0] = [fromLat, fromLon];
+            }
+            if (!last || Math.abs(last[0] - toLat) > eps || Math.abs(last[1] - toLon) > eps) {
+              norm[norm.length - 1] = [toLat, toLon];
+            }
+          } catch (_) {
+            // ignore and fall back to norm as-is
+          }
+          segment.coords = norm;
+        }
       }
     } catch (_e) {
       // OSRM failure — keep fallback straight-line coords
