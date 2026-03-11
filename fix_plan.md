@@ -40,7 +40,7 @@ Updated: 2026-03-05
 - [x] Implement `/pricing` endpoint (distance-based stub)
 - [ ] Implement frequently / recently used routes feature
 - [ ] UI refinement for desktop and mobile layouts
-- [ ] Implement accessibility features (contrast, scaling, map clarity)
+- [x] Implement accessibility features (contrast, scaling, map clarity) *(high-contrast toggle + font-size cycling in navbar, persisted to localStorage, ARIA attributes on nav buttons)*
 - [x] **P6:** Make CORS origins env-configurable (currently hardcoded to localhost:3000/5075)
 - [x] Implement `/alerts` endpoint *(stub — returns empty list)*
 - [ ] Implement `GET /bus/times/{stopCode}` endpoint *(not implemented)*
