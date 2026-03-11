@@ -1010,6 +1010,22 @@ export default function HomePage() {
               const tb = b.card && Number.isFinite(b.card.totalSeconds) ? b.card.totalSeconds : Infinity;
               return ta - tb;
             });
+            // Mark the cheapest priced option so UI can style it
+            try {
+              const priceVals = sortedArr
+                .map((o) => (o.card && o.card.price ? parseFloat(String(o.card.price).replace(/[^0-9.]/g, '')) : null))
+                .filter((v) => Number.isFinite(v));
+              if (priceVals.length > 0) {
+                const minPrice = Math.min(...priceVals);
+                for (const o of sortedArr) {
+                  if (!o.card) continue;
+                  const p = o.card.price ? parseFloat(String(o.card.price).replace(/[^0-9.]/g, '')) : null;
+                  o.card = { ...o.card, isCheapest: Number.isFinite(p) && Math.abs(p - minPrice) < 1e-6 };
+                }
+              }
+            } catch (e) {
+              // ignore price marking failures
+            }
             setRouteOptions(sortedArr);
             // Prefetch per-leg OSRM geometry for the first option
             try {
@@ -1067,6 +1083,22 @@ export default function HomePage() {
         const tb = b.card && Number.isFinite(b.card.totalSeconds) ? b.card.totalSeconds : Infinity;
         return ta - tb;
       });
+      // Mark the cheapest priced option so UI can style it
+      try {
+        const priceVals = sortedOptions
+          .map((o) => (o.card && o.card.price ? parseFloat(String(o.card.price).replace(/[^0-9.]/g, '')) : null))
+          .filter((v) => Number.isFinite(v));
+        if (priceVals.length > 0) {
+          const minPrice = Math.min(...priceVals);
+          for (const o of sortedOptions) {
+            if (!o.card) continue;
+            const p = o.card.price ? parseFloat(String(o.card.price).replace(/[^0-9.]/g, '')) : null;
+            o.card = { ...o.card, isCheapest: Number.isFinite(p) && Math.abs(p - minPrice) < 1e-6 };
+          }
+        }
+      } catch (e) {
+        // ignore price marking failures
+      }
       setRouteOptions(sortedOptions);
       // Prefetch per-leg geometry for the first displayed option
       try {
