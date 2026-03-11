@@ -1438,6 +1438,9 @@ async def search_stops(
 # ── Station classification helpers ───────────────────────────────────
 _classification_cache: Optional[Dict[str, str]] = None
 
+# Cache mapping for per-merged-object lookup: { id(merged) : {stop_index: classification} }
+_classification_by_merged: Dict[int, Dict[int, str]] = {}
+
 
 def _get_classification_lookup() -> Dict[str, str]:
     """Return {atco_code: classification} for all stops in today's network.
@@ -1467,6 +1470,61 @@ def _get_classification_lookup() -> Dict[str, str]:
 
     _classification_cache = atco_lookup
     return _classification_cache
+
+
+def _classification_for_merged(merged: Any) -> Dict[int, str]:
+    """Return stop-index -> classification for a MergedData instance.
+
+    Strategy:
+      1. If we have a cached mapping for this merged object id, return it.
+      2. Otherwise, try to reuse the ATCO-code based process-wide cache
+         from `_get_classification_lookup()` by mapping ATCO -> stop-index
+         for this merged and building the stop-index keyed lookup.
+      3. If that fails, compute `classify_to_lookup(merged)`, cache it
+         under the merged id, and return it.
+    """
+    if merged is None:
+        return {}
+    m_id = id(merged)
+    # Fast path: per-merged cache
+    if m_id in _classification_by_merged:
+        return _classification_by_merged[m_id]
+
+    # Try to reuse ATCO -> class process cache to avoid recomputing
+    try:
+        atco_map = _get_classification_lookup() or {}
+        if atco_map:
+            # Build stop-index -> class mapping by asking merged for each stop's ATCO
+            lookup: Dict[int, str] = {}
+            total = getattr(merged, 'stop_metadata', None)
+            # If merged exposes stop count via stop_metadata use that, else try stop_to_routes length
+            if isinstance(total, list):
+                count = len(total)
+            else:
+                count = len(getattr(merged, 'stop_to_routes', []) or [])
+            for si in range(count):
+                try:
+                    atco = merged.get_atco_code(si)
+                except Exception:
+                    atco = None
+                cls = atco_map.get(atco) if atco else None
+                if cls:
+                    lookup[si] = cls
+            # Only use this mapping if it covers at least one stop; otherwise fallthrough
+            if lookup:
+                _classification_by_merged[m_id] = lookup
+                return lookup
+    except Exception:
+        # Fall back to computing directly
+        pass
+
+    # Last resort: compute from scratch and cache
+    try:
+        idx_lookup = classify_to_lookup(merged)
+        _classification_by_merged[m_id] = idx_lookup
+        return idx_lookup
+    except Exception:
+        return {}
 
 
 def _resolve_stop_classification(
@@ -3390,7 +3448,8 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     # to every stop returned in the journey legs. This uses the
     # station_classifier module which operates on the MergedData object.
     try:
-        classification_lookup = classify_to_lookup(merged)
+        # Prefer a cached per-merged lookup to avoid expensive recomputation
+        classification_lookup = _classification_for_merged(merged)
     except Exception:
         classification_lookup = {}
 
