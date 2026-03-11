@@ -10,10 +10,40 @@ import Typography from "@mui/material/Typography";
 import Divider from "@mui/material/Divider";
 import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
+import Popover from "@mui/material/Popover";
 import { memo } from "react";
-import { Bus, Train, MapPin, Heart } from "lucide-react";
+import { Bus, Train, MapPin, Heart, Info } from "lucide-react";
 
 export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = false, isSelected = false, fullHeight = false }) {
+  function ClassificationInfo({ classification }) {
+    const [anchorEl, setAnchorEl] = React.useState(null);
+    if (!classification) return null;
+    const label = String(classification);
+    const cap = label.charAt(0).toUpperCase() + label.slice(1);
+    return (
+      <>
+        <IconButton
+          size="small"
+          aria-label={`classification-${label}`}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+          sx={{ ml: 1 }}
+        >
+          <Info size={14} />
+        </IconButton>
+        <Popover
+          open={Boolean(anchorEl)}
+          anchorEl={anchorEl}
+          onClose={() => setAnchorEl(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+        >
+          <Box sx={{ p: 1, maxWidth: 240 }}>
+            <Typography fontWeight={700}>{cap}</Typography>
+          </Box>
+        </Popover>
+      </>
+    );
+  }
   const parseDurationToMinutes = (value) => {
     if (!value) return 0;
     if (typeof value === 'number') return value;
@@ -143,6 +173,11 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     })}
                   >
                     {step.from}
+                    {step.from_classification && (
+                      <Box component="span" sx={{ ml: 0 }}>
+                        <ClassificationInfo classification={step.from_classification} />
+                      </Box>
+                    )}
                   </Box>
                 </Typography>
               )}
@@ -259,6 +294,11 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     })}
                   >
                     {step.to}
+                    {step.to_classification && (
+                      <Box component="span" sx={{ ml: 0 }}>
+                        <ClassificationInfo classification={step.to_classification} />
+                      </Box>
+                    )}
                   </Box>
                 </Typography>
               )}

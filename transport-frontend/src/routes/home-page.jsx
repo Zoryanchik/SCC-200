@@ -47,6 +47,8 @@ function journeyToRouteCard(journey) {
 
     const fromName = leg.from_stop?.name || "";
     const toName = leg.to_stop?.name || "";
+  const fromClassification = leg.from_stop?.classification || null;
+  const toClassification = leg.to_stop?.classification || null;
 
     return {
       type,
@@ -54,8 +56,10 @@ function journeyToRouteCard(journey) {
       duration: durMin >= 60
         ? `${Math.floor(durMin / 60)}h ${durMin % 60} mins`
         : `${durMin} mins`,
-      from: fromName,
-      to: toName,
+  from: fromName,
+  to: toName,
+  from_classification: fromClassification,
+  to_classification: toClassification,
       journey_origin: leg.journey_origin || null,
       journey_destination: leg.journey_destination || null,
       // keep original times for the time display row in RouteCard
