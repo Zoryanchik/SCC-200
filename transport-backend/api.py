@@ -1872,6 +1872,18 @@ async def routes_for_line(line: str):
                     except Exception:
                         # ignore per-variant OSRM failures
                         pass
+                # Final fallback: if no road-following geometry found, expose
+                # the plain stop coordinates so the frontend can at least draw
+                # a stop-to-stop polyline. This guarantees a visual even when
+                # stored tracks and OSRM reconstruction are unavailable.
+                if 'geometry' not in v and stops:
+                    try:
+                        v['geometry'] = [[s['lat'], s['lon']] for s in stops if isinstance(s.get('lat'), (int, float)) and isinstance(s.get('lon'), (int, float))]
+                        if v['geometry'] and len(v['geometry']) >= 2:
+                            v['geometry_source'] = 'stops'
+                    except Exception:
+                        # ignore and leave geometry absent
+                        pass
             except Exception:
                 # ignore per-variant failures — don't break the whole response
                 continue
