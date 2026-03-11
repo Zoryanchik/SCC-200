@@ -13,6 +13,7 @@ import InputAdornment from "@mui/material/InputAdornment";
 import { MapPin, Bus, Train, Search } from "lucide-react";
 import { lazy, Suspense, useMemo, useState, useEffect, useCallback } from "react";
 import { useLiveBusLocations, useLiveDepartures, useLiveUpdates, useStopSearch } from "../hooks/useTransportData";
+import { useBusStops } from "../hooks/useBusStops";
 
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
@@ -167,26 +168,43 @@ return R * c;
 };
 }, []);
 
-const nearestStop = useMemo(() => {
-if (!userLocation || !markers.length) return null;
-let nearest = null;
-for (const marker of markers) {
-const distance = distanceMeters(userLocation, marker.position);
-if (!nearest || distance < nearest.distance) {
-nearest = { ...marker, distance };
-}
-}
-return nearest;
-}, [userLocation, markers, distanceMeters]);
+const { stops: busStops, loading: stopsLoading } = useBusStops({ enabled: true });
 
+const nearestStop = useMemo(() => {
+  if (!userLocation) return null;
+  // Prefer backend busStops when available; fallback to markers.
+  const source = (Array.isArray(busStops) && busStops.length > 0) ? busStops : markers;
+  if (!source || source.length === 0) return null;
+  let nearest = null;
+  for (const s of source) {
+    const pos = s.position || (s.lat != null && s.lon != null ? [s.lat, s.lon] : null);
+    if (!pos) continue;
+    const distance = distanceMeters(userLocation, pos);
+      if (!nearest || distance < nearest.distance) {
+      // determine kind: prefer explicit type, treat 'rail' classification as train,
+      // otherwise assume bus (backend bus stops include `lines`/`classification`)
+      const kind = s.type ?? (s.classification === 'rail' ? 'train' : 'bus');
+      // normalize name for display
+      const name = s.name || s.display_name || (kind === 'bus' ? (s.routeNumber ? `Bus ${s.routeNumber}` : 'Bus') : kind || 'Stop');
+      nearest = { ...s, position: pos, distance, name, type: kind };
+    }
+  }
+  return nearest;
+}, [userLocation, busStops, markers, distanceMeters]);
+
+// Prefer real bus-stop data from the backend for the "closest stops" UI.
+// Fallback to computing nearest markers when no bus-stop data is available.
 const closestStops = useMemo(() => {
-if (!userLocation || !markers.length) return [];
-const withDistance = markers.map((marker) => ({
-...marker,
-distance: distanceMeters(userLocation, marker.position)
-}));
-return withDistance.sort((a, b) => a.distance - b.distance).slice(0, 3);
-}, [userLocation, markers, distanceMeters]);
+  if (!userLocation) return [];
+  const source = (Array.isArray(busStops) && busStops.length > 0) ? busStops : markers;
+  const withDistance = source.map((s) => {
+    const pos = s.position || (s.lat != null && s.lon != null ? [s.lat, s.lon] : null);
+    if (!pos) return null;
+    const kind = s.type ?? (s.classification === 'rail' ? 'train' : 'bus');
+    return { ...s, distance: distanceMeters(userLocation, pos), type: kind };
+  }).filter(Boolean);
+  return withDistance.sort((a, b) => a.distance - b.distance).slice(0, 3);
+}, [userLocation, busStops, markers, distanceMeters]);
 
 const formatWalkTime = (distance) => {
 const minutes = Math.max(1, Math.round(distance / 84)); // ~1.4 m/s walking speed
