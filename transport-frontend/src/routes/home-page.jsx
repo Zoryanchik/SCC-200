@@ -328,6 +328,54 @@ export default function HomePage() {
   const defaultTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`; // HH:MM
   const [departureDate, setDepartureDate] = useState(defaultDate);
   const [departureClock, setDepartureClock] = useState(defaultTime);
+  // Date selection split into year/month/day for the column picker
+  const [dateSelYear, setDateSelYear] = useState(() => Number(defaultDate.slice(0, 4)));
+  const [dateSelMonth, setDateSelMonth] = useState(() => Number(defaultDate.slice(5, 7)));
+  const [dateSelDay, setDateSelDay] = useState(() => Number(defaultDate.slice(8, 10)));
+
+  // Time split state: use 24-hour display
+  const parseClock = (c) => {
+    if (!c || typeof c !== 'string') return { h: 0, m: 0 };
+    const parts = c.split(':').map((s) => parseInt(s, 10));
+    if (parts.length < 2 || parts.some((x) => Number.isNaN(x))) return { h: 0, m: 0 };
+    const hh = parts[0];
+    const mm = parts[1];
+    return { h: hh, m: mm };
+  };
+  const initTime = parseClock(defaultTime);
+  const [timeSelHour, setTimeSelHour] = useState(initTime.h);
+  const [timeSelMinute, setTimeSelMinute] = useState(initTime.m);
+
+  // Keep split time in sync if departureClock changes externally
+  useEffect(() => {
+    try {
+      const parsed = parseClock(departureClock);
+      setTimeSelHour(parsed.h);
+      setTimeSelMinute(parsed.m);
+    } catch (e) {
+      // ignore
+    }
+  }, [departureClock]);
+
+  const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
+
+  // Keep the split selection in sync if departureDate changes externally
+  useEffect(() => {
+    try {
+      if (typeof departureDate === 'string' && departureDate.length >= 10) {
+        const y = Number(departureDate.slice(0, 4));
+        const mo = Number(departureDate.slice(5, 7));
+        const d = Number(departureDate.slice(8, 10));
+        if (Number.isFinite(y) && Number.isFinite(mo) && Number.isFinite(d)) {
+          setDateSelYear(y);
+          setDateSelMonth(mo);
+          setDateSelDay(d);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, [departureDate]);
   // default transfers set to 3
   const [maxTransfers, setMaxTransfers] = useState(3);
   // mode selector for journey planner: 'all' | 'bus' | 'train' (UI value); map 'all' -> 'combined' for API
@@ -1438,282 +1486,191 @@ export default function HomePage() {
               {/* Date/time/transfers moved below the search inputs */}
             </Stack>
 
-                <Stack
-                  direction={{ xs: "column", md: "row" }}
-                  spacing={2}
-                  alignItems={{ md: "flex-start" }}
-                >
-                {/* Leftmost: quick 'use my location' for the From field - always visible */}
-                <IconButton
-                  aria-label="Use my location"
-                  onClick={handleUseMyLocation}
-                  size="large"
-                  sx={{ alignSelf: 'center' }}
-                >
-                    <Crosshair size={18} />
-                </IconButton>
+                <Box sx={{ display: 'grid', gap: 1, gridTemplateColumns: { xs: '1fr', md: '48px 1fr 56px 1fr auto' }, alignItems: 'center', width: '100%' }}>
+                  {/* Icon */}
+                  <Box sx={{ gridColumn: { md: 1 } }}>
+                    <IconButton aria-label="Use my location" onClick={handleUseMyLocation} size="large" sx={{ alignSelf: 'center' }}>
+                      <Crosshair size={18} />
+                    </IconButton>
+                  </Box>
 
-                <Autocomplete
-                  fullWidth
-                  freeSolo
-                  filterOptions={(x) => x}
-                  options={allStops.from}
-                  ListboxProps={{ sx: { maxHeight: '510px' } }}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
-                  value={selectedFromStop}
-                  onChange={(e, value) => {
-                    if (typeof value === "string") {
-                      setSelectedFromStop(null);
-                      setFromLocation(value);
-                      return;
-                    }
-                    setSelectedFromStop(value);
-                    if (value && typeof value === "object") setFromLocation(value.display_name || value.name || "");
-                  }}
-                  inputValue={fromLocation}
-                  onInputChange={(e, value) => setFromLocation(value)}
-                  loading={fromLoading}
-                  renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : (option.display_name || option.name);
-                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                    return (
-                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                          <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>
-                            {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                          </Box>
-                          <Box sx={{ flexGrow: 1 }}>
-                            <Typography variant="body2" fontWeight={600}>
-                              {label}
-                            </Typography>
-                            {optionType === "location" && (
-                              <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>
-                                Location
-                              </Typography>
-                            )}
-                          </Box>
-                          <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                        </Box>
-                    );
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="From"
-                      InputProps={{
-                        ...params.InputProps,
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <MapPin size={18} />
-                          </InputAdornment>
-                        ),
-                        endAdornment: fromLoading ? (
-                          <CircularProgress color="inherit" size={20} />
-                        ) : (
-                          params.InputProps.endAdornment
-                        ),
+                  {/* From input */}
+                  <Box sx={{ gridColumn: { md: 2 } }}>
+                    <Autocomplete
+                      fullWidth
+                      freeSolo
+                      filterOptions={(x) => x}
+                      options={allStops.from}
+                      ListboxProps={{ sx: { maxHeight: '510px' } }}
+                      getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
+                      value={selectedFromStop}
+                      onChange={(e, value) => {
+                        if (typeof value === "string") {
+                          setSelectedFromStop(null);
+                          setFromLocation(value);
+                          return;
+                        }
+                        setSelectedFromStop(value);
+                        if (value && typeof value === "object") setFromLocation(value.display_name || value.name || "");
                       }}
-                      sx={{
-                        "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: '#00BCD4' },
-                          "&:hover fieldset": { borderColor: '#00BCD4' },
-                          "&.Mui-focused fieldset": { borderColor: '#00BCD4' },
-                          boxShadow: 'none',
-                        },
-                        "& .MuiInputBase-input": {
-                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
-                          textOverflow: "ellipsis",
-                        },
-                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      inputValue={fromLocation}
+                      onInputChange={(e, value) => setFromLocation(value)}
+                      loading={fromLoading}
+                      renderOption={(props, option) => {
+                        const label = typeof option === "string" ? option : (option.display_name || option.name);
+                        const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                        return (
+                          <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                            <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>
+                              {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
+                            </Box>
+                            <Box sx={{ flexGrow: 1 }}>
+                              <Typography variant="body2" fontWeight={600}>{label}</Typography>
+                              {optionType === "location" && (
+                                <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>Location</Typography>
+                              )}
+                            </Box>
+                            <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                          </Box>
+                        );
                       }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label="From"
+                          InputProps={{
+                            ...params.InputProps,
+                            startAdornment: (
+                              <InputAdornment position="start"><MapPin size={18} /></InputAdornment>
+                            ),
+                            endAdornment: fromLoading ? (<CircularProgress color="inherit" size={20} />) : params.InputProps.endAdornment,
+                          }}
+                          sx={{
+                            "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, boxShadow: 'none' },
+                            "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined, textOverflow: "ellipsis" },
+                            "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                          }}
+                        />
+                      )}
                     />
-                  )}
-                />
+                  </Box>
 
-                {/* Swap button: exchange From and To values */}
-                <IconButton
-                  aria-label="Swap start and destination"
-                  onClick={() => {
-                    // swap both the selected stop objects and the input strings
-                    setSelectedFromStop((prevFrom) => {
-                      // use functional updates to ensure sync
-                      const oldFrom = prevFrom;
-                      setSelectedToStop(oldFrom);
-                      return selectedToStop;
-                    });
-                    setSelectedToStop((prev) => prev); // no-op to satisfy eslint-like rules
-                    // swap input text values
-                    setFromLocation((prevFromLoc) => {
-                      const oldFromLoc = prevFromLoc;
-                      setToLocation(oldFromLoc);
-                      return toLocation;
-                    });
-                  }}
-                  size="large"
-                  sx={{
-                    alignSelf: 'center',
-                    width: 56,
-                    height: 56,
-                    p: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    borderRadius: '12px',
-                    // Ensure keyboard focus is visible
-                    '&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
-                  }}
-                >
-                  <span style={{ fontSize: 22, lineHeight: 1 }}>⇄</span>
-                </IconButton>
+                  {/* Swap button */}
+                  <Box sx={{ gridColumn: { md: 3 }, display: 'flex', justifyContent: 'center' }}>
+                    <IconButton aria-label="Swap start and destination" onClick={() => {
+                      setSelectedFromStop((prevFrom) => { const oldFrom = prevFrom; setSelectedToStop(oldFrom); return selectedToStop; });
+                      setSelectedToStop((prev) => prev);
+                      setFromLocation((prevFromLoc) => { const oldFromLoc = prevFromLoc; setToLocation(oldFromLoc); return toLocation; });
+                    }} size="large" sx={{ width: 56, height: 56, p: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '12px', '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}>
+                      <span style={{ fontSize: 22, lineHeight: 1 }}>⇄</span>
+                    </IconButton>
+                  </Box>
 
-                <Autocomplete
-                  fullWidth
-                  freeSolo
-                  filterOptions={(x) => x}
-                  options={allStops.to}
-                  ListboxProps={{ sx: { maxHeight: '510px' } }}
-                  getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
-                  value={selectedToStop}
-                  onChange={(e, value) => {
-                    if (typeof value === "string") {
-                      setSelectedToStop(null);
-                      setToLocation(value);
-                      return;
-                    }
-                    setSelectedToStop(value);
-                    if (value && typeof value === "object") setToLocation(value.display_name || value.name || "");
-                  }}
-                  inputValue={toLocation}
-                  onInputChange={(e, value) => setToLocation(value)}
-                  loading={toLoading}
-                  renderOption={(props, option) => {
-                    const label = typeof option === "string" ? option : (option.display_name || option.name);
-                    const optionType = typeof option === "string" ? "stop" : option.type || "stop";
-                    return (
-                      <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                          <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>
-                            {optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}
-                          </Box>
-                          <Box sx={{ flexGrow: 1 }}>
-                            <Typography variant="body2" fontWeight={600}>
-                              {label}
-                            </Typography>
-                            {optionType === "location" && (
-                              <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>
-                                Location
-                              </Typography>
-                            )}
-                          </Box>
-                          <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
-                        </Box>
-                    );
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="To"
-                      InputProps={{
-                        ...params.InputProps,
-                        startAdornment: (
-                            <InputAdornment position="start">
-                            <NavIcon size={18} />
-                          </InputAdornment>
-                        ),
-                        endAdornment: toLoading ? (
-                          <CircularProgress color="inherit" size={20} />
-                        ) : (
-                          params.InputProps.endAdornment
-                        ),
+                  {/* To input */}
+                  <Box sx={{ gridColumn: { md: 4 } }}>
+                    <Autocomplete
+                      fullWidth
+                      freeSolo
+                      filterOptions={(x) => x}
+                      options={allStops.to}
+                      ListboxProps={{ sx: { maxHeight: '510px' } }}
+                      getOptionLabel={(option) => (typeof option === "string" ? option : (option.display_name || option.name || ""))}
+                      value={selectedToStop}
+                      onChange={(e, value) => {
+                        if (typeof value === "string") { setSelectedToStop(null); setToLocation(value); return; }
+                        setSelectedToStop(value);
+                        if (value && typeof value === "object") setToLocation(value.display_name || value.name || "");
                       }}
-                      sx={{
-                        "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: '#00BCD4' },
-                          "&:hover fieldset": { borderColor: '#00BCD4' },
-                          "&.Mui-focused fieldset": { borderColor: '#00BCD4' },
-                          boxShadow: 'none',
-                        },
-                        "& .MuiInputBase-input": {
-                          color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
-                          textOverflow: "ellipsis",
-                        },
-                        "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
+                      inputValue={toLocation}
+                      onInputChange={(e, value) => setToLocation(value)}
+                      loading={toLoading}
+                      renderOption={(props, option) => {
+                        const label = typeof option === "string" ? option : (option.display_name || option.name);
+                        const optionType = typeof option === "string" ? "stop" : option.type || "stop";
+                        return (
+                          <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                            <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>{optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}</Box>
+                            <Box sx={{ flexGrow: 1 }}><Typography variant="body2" fontWeight={600}>{label}</Typography>{optionType === "location" && (<Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>Location</Typography>)}</Box>
+                            <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                          </Box>
+                        );
                       }}
+                      renderInput={(params) => (
+                        <TextField {...params} label="To" InputProps={{ ...params.InputProps, startAdornment: (<InputAdornment position="start"><NavIcon size={18} /></InputAdornment>), endAdornment: toLoading ? (<CircularProgress color="inherit" size={20} />) : params.InputProps.endAdornment }} sx={{ "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, boxShadow: 'none' }, "& .MuiInputBase-input": { color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined, textOverflow: "ellipsis" }, "& .MuiInputLabel-root": { color: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined } }} />
+                      )}
                     />
-                  )}
-                />
+                  </Box>
 
-            <Button
-              variant="contained"
-              size="large"
-              sx={{
-                minWidth: { xs: "100%", md: 180 },
-                height: 56,
-                flexShrink: 0,
-              }}
-              onClick={handleSearch}
-              disabled={!fromCoords || !toCoords || isSearching}
-            >
-              {isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}
-            </Button>
-          </Stack>
+                  {/* Search button */}
+                  <Box sx={{ gridColumn: { md: 5 }, display: 'flex', justifyContent: { xs: 'stretch', md: 'flex-end' } }}>
+                    <Button variant="contained" size="large" sx={{ minWidth: { xs: "100%", md: 180 }, height: 56, flexShrink: 0 }} onClick={handleSearch} disabled={!fromCoords || !toCoords || isSearching}>{isSearching ? <CircularProgress size={24} color="inherit" /> : "Search routes"}</Button>
+                  </Box>
 
-          {/* Date/time/transfers controls moved here (below search inputs) */}
-          <Box sx={{ mt: 2, display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
-            <TextField
-              label="Date"
-              type="date"
-              size="small"
-              value={departureDate}
-              onChange={(e) => setDepartureDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 140, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
-            />
-            <TextField
-              label="Time"
-              type="time"
-              size="small"
-              value={departureClock}
-              onChange={(e) => setDepartureClock(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 110, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
-            />
-            <TextField
-              label="Transfers"
-              select
-              size="small"
-              value={maxTransfers}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                // clamp to 0..5 defensively
-                setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
-              }}
-              sx={{ width: 110, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
-            >
-              {[0,1,2,3,4,5].map((n) => (
-                <MenuItem key={n} value={n}>{n}</MenuItem>
-              ))}
-            </TextField>
-            <TextField
-              select
-              size="small"
-              value={transportMode}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (val !== null) setTransportMode(val);
-              }}
-              sx={{ ml: 1, minWidth: 120, maxWidth: 180, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
-              SelectProps={{
-                renderValue: (selected) => {
-                  if (!selected) return '';
-                  return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1);
-                },
-              }}
-            >
-              <MenuItem value="all">All</MenuItem>
-              <MenuItem value="bus">Bus</MenuItem>
-              <MenuItem value="train">Train</MenuItem>
-            </TextField>
-          </Box>
+                  {/* Date/time group aligned under From */}
+                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 2 }, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: { xs: 1, md: 0 } }}>
+                    <TextField label="Hour" select size="small" value={timeSelHour} onChange={(e) => { const h = Number(e.target.value); setTimeSelHour(h); setDepartureClock(`${pad2(h)}:${pad2(timeSelMinute)}`); }} SelectProps={{ renderValue: () => pad2(timeSelHour), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                      {Array.from({ length: 24 }, (_, i) => i).map((h) => (<MenuItem key={h} value={h} sx={{ textAlign: 'center' }}>{pad2(h)}</MenuItem>))}
+                    </TextField>
+                    <TextField label="Minute" select size="small" value={timeSelMinute} onChange={(e) => { const mm = Number(e.target.value); setTimeSelMinute(mm); setDepartureClock(`${pad2(timeSelHour)}:${pad2(mm)}`); }} SelectProps={{ renderValue: () => pad2(timeSelMinute), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, ml: 1, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                      {Array.from({ length: 60 }, (_, i) => i).map((mm) => (<MenuItem key={mm} value={mm} sx={{ textAlign: 'center' }}>{pad2(mm)}</MenuItem>))}
+                    </TextField>
+                    <TextField label="Day" select size="small" value={dateSelDay} onChange={(e) => { const newD = Number(e.target.value); setDateSelDay(newD); setDepartureDate(`${String(dateSelYear)}-${pad2(dateSelMonth)}-${pad2(newD)}`); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                      {Array.from({ length: daysInMonth(dateSelYear, dateSelMonth) }, (_, i) => i + 1).map((d) => (<MenuItem key={d} value={d} sx={{ textAlign: 'center' }}>{d}</MenuItem>))}
+                    </TextField>
+                    <TextField
+                      label="Month / Year"
+                      select
+                      size="small"
+                      value={`${dateSelYear}-${pad2(dateSelMonth)}`}
+                      onChange={(e) => {
+                        const val = String(e.target.value || '');
+                        const [yStr, mStr] = val.split('-');
+                        const newYear = Number(yStr);
+                        const newMonth = Number(mStr);
+                        if (!Number.isFinite(newYear) || !Number.isFinite(newMonth)) return;
+                        let newDay = dateSelDay;
+                        const maxD = daysInMonth(newYear, newMonth);
+                        if (newDay > maxD) newDay = maxD;
+                        setDateSelYear(newYear);
+                        setDateSelMonth(newMonth);
+                        setDateSelDay(newDay);
+                        setDepartureDate(`${String(newYear)}-${pad2(newMonth)}-${pad2(newDay)}`);
+                      }}
+                      SelectProps={{ renderValue: () => `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: 'short' }).toUpperCase()}${'\u00A0\u00A0\u00A0\u00A0'}/${'\u00A0\u00A0\u00A0\u00A0'}${dateSelYear}`, SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }}
+                      sx={{ width: 180, '& .MuiSelect-select': { textAlign: 'center' } }}
+                    >
+                      {(() => {
+                        // Start three months earlier than now, and produce a 7-year (84 month) range
+                        const start = new Date();
+                        start.setMonth(start.getMonth() - 3);
+                        const totalMonths = 7 * 12; // 7 years
+                        const opts = [];
+                        for (let i = 0; i < totalMonths; i++) {
+                          const d = new Date(start.getFullYear(), start.getMonth() + i, 1);
+                          const y = d.getFullYear();
+                          const m = d.getMonth() + 1;
+                          const val = `${y}-${pad2(m)}`;
+                          const label = `${new Date(y, m - 1, 1).toLocaleString(undefined, { month: 'short' }).toUpperCase()}${'\u00A0\u00A0\u00A0\u00A0'}/${'\u00A0\u00A0\u00A0\u00A0'}${y}`;
+                          opts.push(<MenuItem key={val} value={val} sx={{ textAlign: 'center' }}>{label}</MenuItem>);
+                        }
+                        return opts;
+                      })()}
+                    </TextField>
+                    
+                  </Box>
 
+                  {/* Transfers/mode group aligned under To */}
+                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 4 }, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: { xs: 1, md: 0 }, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
+                    <TextField select size="small" value={transportMode} onChange={(e) => { const val = e.target.value; if (val !== null) setTransportMode(val); }} SelectProps={{ renderValue: (selected) => { if (!selected) return ''; return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1); }, SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                      <MenuItem value="all" sx={{ textAlign: 'center' }}>All</MenuItem>
+                      <MenuItem value="bus" sx={{ textAlign: 'center' }}>Bus</MenuItem>
+                      <MenuItem value="train" sx={{ textAlign: 'center' }}>Train</MenuItem>
+                    </TextField>
+                    <TextField label="Transfers" select size="small" value={maxTransfers} onChange={(e) => { const v = Number(e.target.value); setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: 90, ml: 1, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                      {[0,1,2,3,4,5].map((n) => (<MenuItem key={n} value={n} sx={{ textAlign: 'center' }}>{n}</MenuItem>))}
+                    </TextField>
+                  </Box>
+                </Box>
           {geoError && (
             <Box sx={{ mt: 1 }}>
               <Alert severity="error">{geoError}</Alert>
