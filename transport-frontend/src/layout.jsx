@@ -165,8 +165,8 @@ export default function AppLayout({ children }) {
 								sx={{ letterSpacing: 0.4 }}
 								component="h1"
 							>
-								Lancaster Transport
-							</Typography>
+									Lancashire Transport
+								</Typography>
 							<Stack direction="row" spacing={1.5} alignItems="center">
 								<Button
 									component={RouterLink}
