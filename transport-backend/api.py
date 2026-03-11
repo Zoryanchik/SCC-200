@@ -2478,6 +2478,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             best_delay = delay
             best_jid = j_id
 
+    # Clamp negative delays to zero at the source of computation so
+    # callers don't have to special-case early/negative values.
+    if best_delay is not None and best_delay < 0:
+        best_delay = 0
     if return_jid:
         return (best_delay, best_jid)
     return best_delay
@@ -2822,8 +2826,15 @@ def _recompute_journey_delay_map_once() -> None:
             final_delay = feed_delay if feed_delay is not None else computed_delay
             if final_delay is None:
                 continue
+            # Coerce to int and clamp negative delays to 0 (we don't show "Early")
+            try:
+                d = int(final_delay)
+            except Exception:
+                continue
+            if d < 0:
+                d = 0
             # Store integer seconds
-            temp_map[int(j_id)] = int(final_delay)
+            temp_map[int(j_id)] = d
         except Exception:
             continue
 
@@ -3374,6 +3385,15 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         except Exception:
             town_map = {}
 
+    # Build a fast lookup of stop_index -> classification so callers
+    # can attach human-friendly station classes (hub/interchange/local/request_stop)
+    # to every stop returned in the journey legs. This uses the
+    # station_classifier module which operates on the MergedData object.
+    try:
+        classification_lookup = classify_to_lookup(merged)
+    except Exception:
+        classification_lookup = {}
+
     def _display_name(idx: int) -> str:
         base = _stop_name(idx)
         try:
@@ -3420,6 +3440,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if first_coord:
             to_loc["lat"] = first_coord[0]
             to_loc["lon"] = first_coord[1]
+        # Attach classification when we can resolve the merged stop index
+        try:
+            cls = classification_lookup.get(first_int)
+            if cls:
+                to_loc["classification"] = cls
+        except Exception:
+            pass
 
         # Adjust the arrival at the first stop to be the vehicle's
         # departure minus a boarding buffer when the next leg is a
@@ -3486,6 +3513,19 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if curr_coord:
             to_loc["lat"] = curr_coord[0]
             to_loc["lon"] = curr_coord[1]
+        # Attach classification meta to stops when available
+        try:
+            fcls = classification_lookup.get(prev_int)
+            if fcls:
+                from_loc["classification"] = fcls
+        except Exception:
+            pass
+        try:
+            tcls = classification_lookup.get(curr_int)
+            if tcls:
+                to_loc["classification"] = tcls
+        except Exception:
+            pass
 
         leg = {
             "mode": transport,
@@ -3592,6 +3632,12 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if last_coord:
             from_loc["lat"] = last_coord[0]
             from_loc["lon"] = last_coord[1]
+        try:
+            lcls = classification_lookup.get(last_int)
+            if lcls:
+                from_loc["classification"] = lcls
+        except Exception:
+            pass
         legs.append({
             "mode": "walking",
             "from_stop": from_loc,
