@@ -533,6 +533,7 @@ const JourneyRouteLayer = ({ segments }) => {
 							<>
 								{/* Cyan underlay/frame so route lines (vehicle and walking) have a cyan outline */}
 								<Polyline
+									pane="routePane"
 									key={`${seg._normKey}-frame`}
 									positions={actualCoords}
 									pathOptions={{
@@ -546,6 +547,7 @@ const JourneyRouteLayer = ({ segments }) => {
 								/>
 								{/* Main overlay line */}
 								<Polyline
+									pane="routePane"
 									key={seg._normKey}
 									positions={actualCoords}
 									pathOptions={{
@@ -561,11 +563,13 @@ const JourneyRouteLayer = ({ segments }) => {
 								{isWalk && actualCoords && actualCoords.length >= 2 && (
 									<>
 										<CircleMarker
+										pane="transferPane"
 											center={actualCoords[0]}
 											radius={4}
 											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
 										/>
 										<CircleMarker
+										pane="transferPane"
 											center={actualCoords[actualCoords.length - 1]}
 											radius={4}
 											pathOptions={{ color: '#1f2937', weight: 1, fillColor: '#1f2937', fillOpacity: 1 }}
@@ -594,6 +598,7 @@ const JourneyRouteLayer = ({ segments }) => {
 								}
 								return pts.map((p, idx) => (
 									<CircleMarker
+										pane="transferPane"
 										key={`transfer-${idx}`}
 										center={p}
 										radius={6}
@@ -604,6 +609,7 @@ const JourneyRouteLayer = ({ segments }) => {
 				{/* Origin dot */}
 				{displaySegments[0]?.coords?.[0] && (
 					<CircleMarker
+						pane="endpointPane"
 						center={displaySegments[0].coords[0]}
 						radius={7}
 						pathOptions={{ color: '#fff', weight: 2, fillColor: '#10B981', fillOpacity: 1 }}
@@ -616,6 +622,7 @@ const JourneyRouteLayer = ({ segments }) => {
 					if (!pt) return null;
 					return (
 						<CircleMarker
+							pane="endpointPane"
 							center={pt}
 							radius={7}
 							pathOptions={{ color: '#fff', weight: 2, fillColor: '#d32f2f', fillOpacity: 1 }}
@@ -640,6 +647,26 @@ const MapController = ({ onReady, onMoveEnd }) => {
 	});
 
 	useEffect(() => {
+		// Create dedicated panes so we can control z-order between
+		// route polylines (routePane) and transfer/endpoint markers
+		// (transferPane). This ensures transfer stop markers render
+		// above route tracks regardless of render order.
+		try {
+			if (!map.getPane('routePane')) {
+				map.createPane('routePane');
+				map.getPane('routePane').style.zIndex = 400;
+			}
+			if (!map.getPane('transferPane')) {
+				map.createPane('transferPane');
+				map.getPane('transferPane').style.zIndex = 650;
+			}
+			if (!map.getPane('endpointPane')) {
+				map.createPane('endpointPane');
+				map.getPane('endpointPane').style.zIndex = 700;
+			}
+		} catch (e) {
+			// ignore if map not ready
+		}
 		onReady(map);
 		// Fire initial center on mount so the hook receives coordinates immediately
 		if (onMoveEnd) {
