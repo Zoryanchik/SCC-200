@@ -2767,6 +2767,37 @@ def _recompute_journey_delay_map_once() -> None:
         _delay_map_ts = time.time()
         _delay_map_version += 1
 
+    # After updating the delay map version, proactively rebuild the
+    # delay-aware routers for today's AM and PM buckets in a background
+    # thread so the first user request doesn't pay the build latency.
+    def _prebuild_routers_for_today():
+        try:
+            today = datetime.now().date().isoformat()
+            # Representative times for AM and PM buckets
+            am_seconds = 8 * 3600
+            pm_seconds = 18 * 3600
+            # Request with apply_delay=True so get_router_for_date will
+            # build and cache the adjusted router for the current
+            # _delay_map_version.
+            try:
+                get_router_for_date(today, start_time=am_seconds, apply_delay=True)
+            except Exception as e:
+                logger.debug('Prebuild AM router failed: %s', e)
+            try:
+                get_router_for_date(today, start_time=pm_seconds, apply_delay=True)
+            except Exception as e:
+                logger.debug('Prebuild PM router failed: %s', e)
+        except Exception:
+            # Swallow errors — this is a best-effort background task.
+            logger.exception('Error in _prebuild_routers_for_today')
+
+    try:
+        t = threading.Thread(target=_prebuild_routers_for_today, daemon=True)
+        t.start()
+    except Exception:
+        # If background thread creation fails, continue without prebuilding.
+        logger.exception('Failed to start prebuild thread for routers')
+
 
 def _delay_updater_loop(stop_event: threading.Event):
     """Background loop to periodically refresh the delay map."""
