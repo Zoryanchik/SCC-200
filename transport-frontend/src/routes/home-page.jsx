@@ -988,9 +988,9 @@ export default function HomePage() {
               const firstSrc = firstOpt ? Object.values(firstOpt.sources)[0] : null;
               const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
               const ljid = plan?.meta?.logged_journey_id ?? null;
-              // If no logged_journey id, select immediately
+              // If no logged_journey id, do not auto-select — leave selection to user
               if (!ljid) {
-                setSelectedRouteIdx(0);
+                setSelectedRouteIdx(null);
                 setIsSearching(false);
                 return;
               }
@@ -998,13 +998,13 @@ export default function HomePage() {
               const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(ljid)}`;
               const resp = await fetch(url);
               if (!resp.ok) {
-                setSelectedRouteIdx(0);
+                setSelectedRouteIdx(null);
                 setIsSearching(false);
                 return;
               }
               const data = await resp.json();
               if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
-                setSelectedRouteIdx(0);
+                setSelectedRouteIdx(null);
                 setIsSearching(false);
                 return;
               }
@@ -1132,7 +1132,7 @@ export default function HomePage() {
               };
               const norm = normalizeCoords(data.coords);
               if (!Array.isArray(norm) || norm.length < 2) {
-                setSelectedRouteIdx(0);
+                setSelectedRouteIdx(null);
                 setIsSearching(false);
                 return;
               }
@@ -1143,14 +1143,14 @@ export default function HomePage() {
               // Background: try to replace crude [from,to] walking segments
               // with OSRM foot-profile geometry for a better visual.
               void fetchWalkingForOption(0);
-              setSelectedRouteIdx(0);
+              // Do not auto-select the prefetched geometry — let the user pick
               setIsSearching(false);
               return;
             } catch (e) {
-              // If anything fails, fall back to selecting immediately
+              // If prefetch fails, clear any selection and continue — user may select a route
               // eslint-disable-next-line no-console
               console.warn('Prefetch smoothed geometry failed', e);
-              setSelectedRouteIdx(0);
+              setSelectedRouteIdx(null);
               setIsSearching(false);
               return;
             }
@@ -1168,7 +1168,7 @@ export default function HomePage() {
       // by clearing routeOptions (the JSX below already shows a message when routeOptions.length === 0).
       if (displayOptions.length === 0) {
         setRouteOptions([]);
-        setSelectedRouteIdx(0);
+        setSelectedRouteIdx(null);
         setIsSearching(false);
         return;
       }
@@ -1190,18 +1190,19 @@ export default function HomePage() {
         const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
         const ljid = plan?.meta?.logged_journey_id ?? null;
         if (!ljid) {
-          setSelectedRouteIdx(0);
+          // Do not auto-select; user must choose which route to display
+          setSelectedRouteIdx(null);
         } else {
           const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050';
           const url = `${API_BASE.replace(/\/$/, '')}/route/geometry?logged_journey_id=${encodeURIComponent(ljid)}`;
           const resp = await fetch(url);
           if (!resp.ok) {
-            setSelectedRouteIdx(0);
+            setSelectedRouteIdx(null);
           } else {
             const data = await resp.json();
-            if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
-              setSelectedRouteIdx(0);
-            } else {
+              if (!data || !Array.isArray(data.coords) || data.coords.length < 2) {
+                setSelectedRouteIdx(null);
+              } else {
               const normalizeCoords = (raw) => {
                 if (!Array.isArray(raw)) return [];
                 const out = [];
@@ -1216,7 +1217,7 @@ export default function HomePage() {
               };
               const norm = normalizeCoords(data.coords);
               if (!Array.isArray(norm) || norm.length < 2) {
-                setSelectedRouteIdx(0);
+                setSelectedRouteIdx(null);
               } else {
                 // Attempt to split the smoothed full-route coords into per-leg
                 // segments using the plan's leg endpoints so walking legs stay
@@ -1269,16 +1270,15 @@ export default function HomePage() {
                 setRouteOptions(newOptions);
                 // Background: attempt to fetch OSRM walking geometry for small walk segments
                 void fetchWalkingForOption(0);
-                setSelectedRouteIdx(0);
               }
             }
           }
         }
       } catch (e) {
-        // Fallback: select immediately
+        // Prefetch failed — clear any selection and continue (user will select)
         // eslint-disable-next-line no-console
         console.warn('Prefetch smoothed geometry failed', e);
-        setSelectedRouteIdx(0);
+        setSelectedRouteIdx(null);
       }
       // Background: prefetch smoothed geometry for remaining options so
       // vehicle legs follow roads when possible. This updates routeOptions
