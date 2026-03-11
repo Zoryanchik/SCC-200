@@ -321,7 +321,7 @@ class RaptorRouter:
                                 self._debug_events = []
                             self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
         for stop, _ in final_list:
-            if reach_stops[stop][1] < math.inf:
+            if reach_stops[stop][1] < math.inf and reach_stops[stop][2] != WALKING:
                 self.found = True
                 break
         self.recursive_raptor(
