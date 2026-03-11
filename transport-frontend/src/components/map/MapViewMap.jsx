@@ -35,124 +35,92 @@ L.Marker.prototype.options.icon = DefaultIcon;
  * @param {string|null} [label] - for bus markers, the route/line number to display on the icon
  */
 const createCustomIcon = (type, color, label = null, bearing = null) => {
-	const size = 28;
-	const c = size / 2; // 14
-	const r = c - 1.5; // 12.5
+	// --- Layout constants ---
+	// The arrow tip extends `arrowH` px beyond the circle rim.
+	// The canvas is a square padded so the tip never clips at ANY rotation angle,
+	// because the tip traces a circle of radius (r + arrowH) around the center.
+	const r = 12;        // badge circle radius
+	const arrowH = 10;   // how far the arrow tip protrudes past the circle rim
+	const arrowW = 8;    // arrowhead half-width at its base (wider = more visible)
+	const PAD = 4;       // minimum gap between any element and the SVG edge
 
-	let innerSvg;
-	let bgFill, strokeColor, strokeWidth;
-	let extraTop = 0;
+	// tipDist = max distance from center to any element (the arrow tip)
+	const tipDist = r + arrowH;
+	const cx = tipDist + PAD;   // canvas center = circle center (24)
+	const S = cx * 2;           // total SVG canvas size (48) — equal on all sides
 
-	if (type === 'bus' && label) {
-		// Solid coloured badge with white route number — add a small nose/pointer
-		// at the top so rotated icons show heading clearly while the label
-		// text remains counter-rotated and upright.
-		bgFill = color;
-		strokeColor = 'white';
-		strokeWidth = 1.5;
-		const text = String(label).substring(0, 4);
-		const fontSize = text.length >= 4 ? 7 : text.length === 3 ? 8.5 : 10;
-		// slightly larger triangular pointer (nose) positioned just outside
-		// the top of the badge so it reads as a directional cue.
-		const ptrHalf = 6; // half-width of the pointer base
-		const ptrLeft = (c - ptrHalf).toFixed(2);
-		const ptrRight = (c + ptrHalf).toFixed(2);
-		// Move the triangle outward by an additional 2px so its tip sits
-		// slightly further above the badge while remaining visually attached.
-		const ptrTipY_num = (c - r - 6);
-		const ptrBaseY_num = (c - r + 0);
-		const ptrTipY = ptrTipY_num.toFixed(2);
-		const ptrBaseY = ptrBaseY_num.toFixed(2);
-
-	// If the pointer tip extends above the SVG viewport, add generous
-	// top-padding so the triangular nose isn't clipped even after
-	// rotations. Use a larger safety margin to avoid off-by-small
-	// rendering differences across browsers/leaflet.
-	extraTop = ptrTipY_num < 0 ? Math.ceil(Math.abs(ptrTipY_num) + 12) : extraTop;
-		// Pointer should match the badge fill and stroke so it looks attached
-		innerSvg = `
-				<polygon points="${c},${ptrTipY} ${ptrLeft},${ptrBaseY} ${ptrRight},${ptrBaseY}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
-				<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${text}</text>`;
-	} else if (type === 'bus') {
-		// Unlabelled bus: white badge with coloured stroke and a pointer nose
-		bgFill = 'white';
-		strokeColor = color;
-		strokeWidth = 2;
-		const ptrHalf = 6;
-		const ptrLeft = (c - ptrHalf).toFixed(2);
-		const ptrRight = (c + ptrHalf).toFixed(2);
-		const ptrTipY_num = (c - r - 6);
-		const ptrBaseY_num = (c - r + 0);
-		const ptrTipY = ptrTipY_num.toFixed(2);
-		const ptrBaseY = ptrBaseY_num.toFixed(2);
-
-		// If the pointer tip extends above the SVG viewport, add generous
-		// top-padding so the triangular nose isn't clipped even after
-		// rotations. Use a larger safety margin to avoid off-by-small
-		// rendering differences across browsers/leaflet.
-		extraTop = ptrTipY_num < 0 ? Math.ceil(Math.abs(ptrTipY_num) + 12) : extraTop;
-
-		// Draw the small bus icon centered inside the badge using positions
-		// relative to the circle center so mock data (no bearing) stays centered.
-		const busRectX = (c - 6).toFixed(2);
-		const busRectY = (c - 5).toFixed(2);
-		const busRectW = 12;
-		const busRectH = 5;
-		const wheelY = (c + 3).toFixed(2);
-		const wheelLeftX = (c - 3).toFixed(2);
-		const wheelRightX = (c + 3).toFixed(2);
-
-		innerSvg = `
-				<polygon points="${c},${ptrTipY} ${ptrLeft},${ptrBaseY} ${ptrRight},${ptrBaseY}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
-				<rect x="${busRectX}" y="${busRectY}" width="${busRectW}" height="${busRectH}" fill="none" stroke="${color}" stroke-width="1.5" rx="1"/>
-				<circle cx="${wheelLeftX}" cy="${wheelY}" r="1.5" fill="${color}"/>
-				<circle cx="${wheelRightX}" cy="${wheelY}" r="1.5" fill="${color}"/>`;
-	} else {
-		bgFill = 'white';
-		strokeColor = color;
-		strokeWidth = 2;
-		innerSvg = `<path d="M14 8l-5 3v7h10v-7z" fill="none" stroke="${color}" stroke-width="1.5"/>` +
-			`<line x1="9" y1="18" x2="19" y2="18" stroke="${color}" stroke-width="1.5"/>`;
-	}
-
-	// If a numeric bearing is provided, rotate the icon group while keeping
-	// any text elements counter-rotated so labels remain upright/readable.
 	const rot = (bearing != null && !Number.isNaN(Number(bearing))) ? Number(bearing) : null;
-	// If we added extra top padding to accommodate the pointer, increase
-	// the SVG viewport height and shift the viewBox so the triangle isn't
-	// clipped. Adjust the Leaflet icon anchor accordingly so the badge
-	// still pins to the same map coordinate.
-	const extraTopFinal = typeof extraTop !== 'undefined' ? extraTop : 0;
-	const viewBoxY = -extraTopFinal;
-	const svgHeight = size + extraTopFinal;
-	const iconSizeY = svgHeight;
-	const iconAnchorY = c + extraTopFinal;
+	const hasBearing = rot !== null;
 
-	let svg = '';
-	if (rot !== null) {
-		svg = `<svg width="${size}" height="${svgHeight}" viewBox="0 ${viewBoxY} ${size} ${svgHeight}" xmlns="http://www.w3.org/2000/svg">` +
-			`<g transform="rotate(${rot} ${c} ${c})">` +
-			`<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>` +
-			`${innerSvg}` +
-			`</g>`;
-		// If there's text, counter-rotate it so it stays upright.
-		if (innerSvg && innerSvg.includes('<text')) {
-			svg = svg.replace('<text ', `<g transform='rotate(${ -rot } ${c} ${c})'><text `).replace('</text>', '</text></g>');
+	let bgFill, strokeColor, strokeWidth;
+	// staticContent: rendered OUTSIDE the rotating group → always upright (labels, icons)
+	let staticContent = '';
+	// arrowSvg: rendered INSIDE the rotating group → rotates with bearing
+	let arrowSvg = '';
+
+	if (type === 'bus') {
+		if (label) {
+			bgFill = color;
+			strokeColor = 'white';
+			strokeWidth = 2;
+			const text = String(label).substring(0, 4);
+			const fontSize = text.length >= 4 ? 8 : text.length === 3 ? 9.5 : 11;
+			staticContent = `<text x="${cx}" y="${cx + 0.5}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Helvetica,sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${text}</text>`;
+		} else {
+			bgFill = 'white';
+			strokeColor = color;
+			strokeWidth = 2;
+			// Small bus silhouette (upright, not rotated)
+			staticContent = `<rect x="${cx - 5}" y="${cx - 4}" width="10" height="6" rx="1.5" fill="none" stroke="${color}" stroke-width="1.5"/>` +
+				`<line x1="${cx - 5}" y1="${cx - 1}" x2="${cx + 5}" y2="${cx - 1}" stroke="${color}" stroke-width="0.8"/>` +
+				`<circle cx="${cx - 2.5}" cy="${cx + 4}" r="1.5" fill="${color}"/>` +
+				`<circle cx="${cx + 2.5}" cy="${cx + 4}" r="1.5" fill="${color}"/>`;
 		}
-		svg += `</svg>`;
+
+		if (hasBearing) {
+			// Chevron arrow pointing UP (before rotation).
+			// Base corners are buried inside the circle fill to hide the join.
+			// A concave notch at the midpoint of the base gives it a proper
+			// arrowhead / chevron shape rather than a plain triangle.
+			const tipY    = cx - r - arrowH;       // sharp tip above circle
+			const baseY   = cx - r + 3;             // base buried inside circle
+			const notchY  = baseY - arrowH * 0.42;  // concave notch pulls base inward
+			const arrowColor  = label ? 'white' : color;
+			const arrowStroke = label ? color  : 'white';
+			// Points: tip → right-base → notch-center → left-base → back to tip
+			const pts = `${cx},${tipY} ${cx + arrowW},${baseY} ${cx},${notchY} ${cx - arrowW},${baseY}`;
+			arrowSvg = `<polygon points="${pts}" fill="${arrowColor}" stroke="${arrowStroke}" stroke-width="1.2" stroke-linejoin="round"/>`;
+		}
 	} else {
-		svg = `<svg width="${size}" height="${svgHeight}" viewBox="0 ${viewBoxY} ${size} ${svgHeight}" xmlns="http://www.w3.org/2000/svg">` +
-			`<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>` +
-			`${innerSvg}` +
-			`</svg>`;
+		// Train marker
+		bgFill = 'white';
+		strokeColor = color;
+		strokeWidth = 2;
+		staticContent = `<path d="M${cx} ${cx - 5.5}l-4 2.5v5.5h8v-5.5z" fill="none" stroke="${color}" stroke-width="1.5"/>` +
+			`<line x1="${cx - 4}" y1="${cx + 2}" x2="${cx + 4}" y2="${cx + 2}" stroke="${color}" stroke-width="1.5"/>`;
 	}
+
+	// Circle element (shared: sits on top of arrow base when bearing present)
+	const circleEl = `<circle cx="${cx}" cy="${cx}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>`;
+
+	// Assemble SVG:
+	//  - rotating group (arrow + circle) → direction tracks bearing
+	//  - static group (text/icon) → always upright, never counter-rotated via brittle string hacks
+	let innerHtml;
+	if (hasBearing) {
+		innerHtml = `<g transform="rotate(${rot} ${cx} ${cx})">${arrowSvg}${circleEl}</g>${staticContent}`;
+	} else {
+		innerHtml = `${circleEl}${staticContent}`;
+	}
+
+	const svg = `<svg width="${S}" height="${S}" viewBox="0 0 ${S} ${S}" xmlns="http://www.w3.org/2000/svg">${innerHtml}</svg>`;
 
 	return L.divIcon({
 		html: svg,
 		className: 'custom-marker-icon',
-		iconSize: [size, iconSizeY || size],
-		iconAnchor: [c, iconAnchorY || c],
-		popupAnchor: [0, -(iconAnchorY || c)]
+		iconSize: [S, S],
+		iconAnchor: [cx, cx],
+		popupAnchor: [0, -(cx + 2)],
 	});
 };
 
