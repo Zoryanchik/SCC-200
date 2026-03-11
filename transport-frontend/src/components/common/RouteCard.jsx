@@ -91,25 +91,60 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               {/* Left column: arrival + duration */}
               <Box sx={{ flex: 1 }}>
                 <Stack spacing={0.5}>
-                  {typeof route?.initialDepartureSecs === 'number' && Number.isFinite(route.initialDepartureSecs) && Number.isFinite(route.totalSeconds) && (
-                    (() => {
-                      const arr = Math.floor(route.initialDepartureSecs + route.totalSeconds);
-                      const secsOfDay = ((arr % 86400) + 86400) % 86400; // normalize
-                      const hh = Math.floor(secsOfDay / 3600).toString().padStart(2, '0');
-                      const mm = Math.floor((secsOfDay % 3600) / 60).toString().padStart(2, '0');
-                      const arrivalStr = `${hh}:${mm}`;
-                      return (
-                        <>
-                          <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
-                            Arrival
-                          </Typography>
-                          <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
-                            {arrivalStr}
-                          </Typography>
-                        </>
-                      );
-                    })()
-                  )}
+                  {/* Arrival: use the last step's arrival time from the routing result */}
+                  {(() => {
+                    // Get the arrival time from the last step — this is the exact value
+                    // from the routing result, including any day offset suffix.
+                    const lastStep = Array.isArray(route.steps) && route.steps.length > 0
+                      ? route.steps[route.steps.length - 1]
+                      : null;
+                    // Pick the best available arrival string from the last step
+                    const rawArrival = lastStep?.arrival_time_with_offset
+                      || lastStep?.scheduled_arrival_time
+                      || route.finalArrivalWithOffset
+                      || null;
+                    if (!rawArrival) return null;
+
+                    // Parse: strip seconds from "HH:MM:SS" → "HH:MM", keep "(+Nd)" suffix
+                    let timeDisplay = rawArrival;
+                    let dayLabel = '';
+                    try {
+                      // Extract day-shift suffix like "(+1d)"
+                      const dm = rawArrival.match(/\(\s*\+\s*(\d+)\s*d\s*\)/i);
+                      if (dm && dm[1]) {
+                        const n = Number(dm[1]);
+                        dayLabel = n === 1 ? ' (+1 day)' : ` (+${n} days)`;
+                      }
+                      // Also check route.dayShift as fallback
+                      if (!dayLabel && route.dayShift > 0) {
+                        dayLabel = route.dayShift === 1 ? ' (+1 day)' : ` (+${route.dayShift} days)`;
+                      }
+                      // Strip the "(+Nd)" part and seconds from the time
+                      const core = rawArrival.split('(')[0].trim();
+                      const parts = core.split(':');
+                      timeDisplay = parts.length >= 2 ? `${parts[0]}:${parts[1]}` : core;
+                    } catch (e) {
+                      // keep rawArrival as-is
+                    }
+
+                    return (
+                      <>
+                        <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
+                          Arrival
+                        </Typography>
+                        {(() => {
+                          const arrivalColor = (route && typeof route.isEarliestArrival !== 'undefined')
+                            ? (route.isEarliestArrival ? '#4CBB17' : '#FF8787')
+                            : (isSelected ? '#00bcd4' : '#ffffff');
+                          return (
+                            <Typography fontWeight={700} sx={() => ({ color: arrivalColor })}>
+                              {timeDisplay}{dayLabel && <span style={{ fontWeight: 600, fontSize: '0.8em', marginLeft: 4 }}>{dayLabel}</span>}
+                            </Typography>
+                          );
+                        })()}
+                      </>
+                    );
+                  })()}
 
                   <Typography
                     variant="caption"
@@ -117,12 +152,16 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   >
                     Duration
                   </Typography>
-                  <Typography
-                    fontWeight={700}
-                    sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}
-                  >
-                    {route.duration}
-                  </Typography>
+                  {(() => {
+                    const durColor = (route && typeof route.isFastestDuration !== 'undefined')
+                      ? (route.isFastestDuration ? '#4CBB17' : '#FF8787')
+                      : (isSelected ? '#00bcd4' : '#ffffff');
+                    return (
+                      <Typography fontWeight={700} sx={() => ({ color: durColor })}>
+                        {route.duration}
+                      </Typography>
+                    );
+                  })()}
                 </Stack>
               </Box>
 
@@ -132,16 +171,30 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
                     Transfer
                   </Typography>
-                  <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
-                    {route.transfers == null ? '—' : (route.transfers === 0 ? 'None' : String(route.transfers))}
-                  </Typography>
+                  {(() => {
+                    const trColor = (route && typeof route.isFewestTransfers !== 'undefined')
+                      ? (route.isFewestTransfers ? '#4CBB17' : '#FF8787')
+                      : (isSelected ? '#00bcd4' : '#ffffff');
+                    return (
+                      <Typography fontWeight={700} sx={() => ({ color: trColor })}>
+                        {route.transfers == null ? '—' : (route.transfers === 0 ? 'None' : String(route.transfers))}
+                      </Typography>
+                    );
+                  })()}
 
                   <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
                     Walk
                   </Typography>
-                  <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
-                    {totalWalkMinutes > 0 ? `${totalWalkMinutes} min` : '0 min'}
-                  </Typography>
+                  {(() => {
+                    const wColor = (route && typeof route.isLeastWalk !== 'undefined')
+                      ? (route.isLeastWalk ? '#4CBB17' : '#FF8787')
+                      : (isSelected ? '#00bcd4' : '#ffffff');
+                    return (
+                      <Typography fontWeight={700} sx={() => ({ color: wColor })}>
+                        {totalWalkMinutes > 0 ? `${totalWalkMinutes} min` : '0 min'}
+                      </Typography>
+                    );
+                  })()}
                 </Stack>
               </Box>
 
@@ -199,24 +252,32 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
             <Box key={idx}>
               {/* Show starting stop for the first step */}
               {idx === 0 && step.from && (
-                <Typography variant="body1" fontWeight={800} sx={{ mb: 0.5, color: (theme) => theme.palette.mode === 'light' ? theme.palette.grey[800] : '#f5f5dc' }}>
-                  <Box
-                    component="span"
-                    sx={(theme) => ({
-                      textDecoration: 'underline',
-                      color: isSelected
-                        ? (theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc')
-                        : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
-                    })}
-                  >
-                    {step.from}
-                    {step.from_classification && (
-                      <Box component="span" sx={{ ml: 0 }}>
-                        <ClassificationInfo classification={step.from_classification} />
-                      </Box>
-                    )}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
+                  <Typography variant="body1" fontWeight={800} sx={{ color: (theme) => theme.palette.mode === 'light' ? theme.palette.grey[800] : '#f5f5dc', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <Box
+                      component="span"
+                      sx={(theme) => ({
+                        textDecoration: 'underline',
+                        color: isSelected
+                          ? (theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc')
+                          : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
+                      })}
+                    >
+                      {step.from}
+                      {step.from_classification && (
+                        <Box component="span" sx={{ ml: 0 }}>
+                          <ClassificationInfo classification={step.from_classification} />
+                        </Box>
+                      )}
+                    </Box>
+                  </Typography>
+
+                  <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
+                    <Typography variant="body2" fontWeight={700} sx={(theme) => ({ color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), fontSize: '1.05rem', lineHeight: 1 })}>
+                      {step.departure_time_with_offset ? step.departure_time_with_offset : ''}
+                    </Typography>
                   </Box>
-                </Typography>
+                </Box>
               )}
 
               {/* Mode + duration line with a downward indicator */}
@@ -226,38 +287,43 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   <Box sx={{ width: 6, bgcolor: isSelected ? '#00bcd4' : (theme) => (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]), borderRadius: 3, minHeight: 36 }} />
                 </Box>
                 <Box sx={{ flex: 1 }}>
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                    <Typography fontWeight={800} textTransform="capitalize" variant="body1">
-                      {step.type === 'walk' ? 'Walk' : step.type === 'bus' ? 'Bus' : step.type}
-                    </Typography>
-                    {step.type === 'bus' && step.route && (
-                      <Typography
-                        variant="body1"
-                        fontWeight={700}
-                        component="span"
-                        sx={(theme) => ({
-                          display: 'inline-block',
-                          px: 0.6,
-                          py: 0.15,
-                          borderRadius: 1,
-                          backgroundColor: isSelected ? theme.palette.primary.main : 'transparent',
-                          // In dark mode: unselected Line matches unselected location colour (grey[400]); selected Line is white.
-                          color: theme.palette.mode === 'dark'
-                            ? (isSelected ? '#ffffff' : theme.palette.grey[400])
-                            : (isSelected ? theme.palette.text.primary : theme.palette.grey[800]),
-                        })}
-                      >
-                        Line {step.route}
+                  {/* Mode + duration row: left side shows mode/line, right side shows duration (aligned right) */}
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" justifyContent="space-between">
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                      <Typography fontWeight={800} textTransform="capitalize" variant="body1" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {step.type === 'walk' ? 'Walk' : step.type === 'bus' ? 'Bus' : step.type}
                       </Typography>
-                    )}
-                    <Typography
-                      variant="body2"
-                      component="span"
-                      fontWeight={700}
-                      sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
-                    >
-                      {step.duration}
-                    </Typography>
+                      {step.type === 'bus' && step.route && (
+                        <Typography
+                          variant="body1"
+                          fontWeight={700}
+                          component="span"
+                          sx={(theme) => ({
+                            display: 'inline-block',
+                            px: 0.6,
+                            py: 0.15,
+                            borderRadius: 1,
+                            backgroundColor: isSelected ? theme.palette.primary.main : 'transparent',
+                            color: theme.palette.mode === 'dark'
+                              ? (isSelected ? '#ffffff' : theme.palette.grey[400])
+                              : (isSelected ? theme.palette.text.primary : theme.palette.grey[800]),
+                          })}
+                        >
+                          Line {step.route}
+                        </Typography>
+                      )}
+                    </Box>
+
+                    <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
+                      <Typography
+                        variant="body2"
+                        component="span"
+                        fontWeight={700}
+                        sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
+                      >
+                        {step.duration}
+                      </Typography>
+                    </Box>
                   </Stack>
 
                   {/* For walk show arrival; for vehicles show service and dep/arr */}
@@ -294,7 +360,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
               {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
               {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
-              {step.type !== 'walk' ? ' (planned)' : ''}
+              {/* removed '(planned)' label per UX request */}
                         </Typography>
                       )}
                     </>
@@ -320,24 +386,54 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
 
               {/* Destination stop for this step */}
               {step.to && (
-                <Typography variant="body1" fontWeight={800} sx={{ mt: 0.5, mb: 1, color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc' }}>
-                  <Box
-                    component="span"
-                    sx={(theme) => ({
-                      textDecoration: 'underline',
-                      color: isSelected
-                        ? (theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc')
-                        : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
-                    })}
-                  >
-                    {step.to}
-                    {step.to_classification && (
-                      <Box component="span" sx={{ ml: 0 }}>
-                        <ClassificationInfo classification={step.to_classification} />
+                /* Only show right-aligned arrival time for the final step (destination). Intermediate stops render without a right-aligned time. */
+                (idx === (Array.isArray(route.steps) ? route.steps.length - 1 : 0)) ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 0.5, mb: 1 }}>
+                    <Typography variant="body1" fontWeight={800} sx={{ color: (theme) => theme.palette.mode === 'light' ? theme.palette.grey[800] : '#f5f5dc', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <Box
+                        component="span"
+                        sx={(theme) => ({
+                          textDecoration: 'underline',
+                          color: isSelected
+                            ? (theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc')
+                            : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
+                        })}
+                      >
+                        {step.to}
+                        {step.to_classification && (
+                          <Box component="span" sx={{ ml: 0 }}>
+                            <ClassificationInfo classification={step.to_classification} />
+                          </Box>
+                        )}
                       </Box>
-                    )}
+                    </Typography>
+
+                    <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
+                      <Typography variant="body2" fontWeight={700} sx={(theme) => ({ color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), fontSize: '1.05rem', lineHeight: 1 })}>
+                        {step.arrival_time_with_offset ? step.arrival_time_with_offset : ''}
+                      </Typography>
+                    </Box>
                   </Box>
-                </Typography>
+                ) : (
+                  <Typography variant="body1" fontWeight={800} sx={{ mt: 0.5, mb: 1, color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc' }}>
+                    <Box
+                      component="span"
+                      sx={(theme) => ({
+                        textDecoration: 'underline',
+                        color: isSelected
+                          ? (theme.palette.mode === 'light' ? '#8B5E3C' : '#f5f5dc')
+                          : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
+                      })}
+                    >
+                      {step.to}
+                      {step.to_classification && (
+                        <Box component="span" sx={{ ml: 0 }}>
+                          <ClassificationInfo classification={step.to_classification} />
+                        </Box>
+                      )}
+                    </Box>
+                  </Typography>
+                )
               )}
             </Box>
           ))}
