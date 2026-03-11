@@ -143,6 +143,11 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     })}
                   >
                     {step.from}
+                    {step.from_classification && (
+                      <Box component="span" sx={{ ml: 1, fontSize: '0.75rem', fontWeight: 600, color: (theme) => theme.palette.text.secondary }}>
+                        • {step.from_classification}
+                      </Box>
+                    )}
                   </Box>
                 </Typography>
               )}
@@ -259,6 +264,11 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     })}
                   >
                     {step.to}
+                    {step.to_classification && (
+                      <Box component="span" sx={{ ml: 1, fontSize: '0.75rem', fontWeight: 600, color: (theme) => theme.palette.text.secondary }}>
+                        • {step.to_classification}
+                      </Box>
+                    )}
                   </Box>
                 </Typography>
               )}
