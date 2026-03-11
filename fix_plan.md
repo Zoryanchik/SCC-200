@@ -16,8 +16,8 @@ Updated: 2026-03-05
 - [x] Add search to map page to avoid scrolling
 - [x] After searching, display the route on the map
 - [x] Show multiple route options from a search so the user can choose and select one
-- [ ] When sharing location, show closest bus stops and nearest bus (check map page)
-- [ ] Map page: remove weather, favourite routes, and "schedule for nearest bus" sections
+- [x] When sharing location, show closest bus stops and nearest bus (check map page)
+- [x] Map page: remove weather, favourite routes, and "schedule for nearest bus" sections *(map page never had these)*
 - [x] Pricing: figure out pricing model (prices vary by time, stop, etc.)
 - [x] Estimated cost for route
 - [ ] Check milestone deliverables

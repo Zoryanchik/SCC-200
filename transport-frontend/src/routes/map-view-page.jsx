@@ -560,7 +560,7 @@ sx={{ borderRadius: '10px' }}
 /
 >
 <Chip
-label={`${(nearestStop.distance / 1000).toFixed(1)} km away`}
+label={`${(nearestStop.distance / 1000).toFixed(1)} km · ${formatWalkTime(nearestStop.distance)}`}
 color="warning"
 variant="outlined"
 sx={{ borderRadius: '10px' }}
