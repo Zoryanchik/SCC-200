@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Marker, Popup, useMap } from 'react-leaflet';
+import { Marker, Popup, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { useBusStops } from '../../hooks/useBusStops';
 import { fetchBusArrivals } from '../../services/busStopsApi';
@@ -233,6 +233,16 @@ function BusStopMarker({ stop, zoom = 16, isRouteActive }) {
       icon={icon}
       data-testid={`bus-stop-marker-${stop.id}`}
     >
+      {stop.lines && stop.lines.length > 0 && (
+        <Tooltip
+          permanent={zoom >= 16}
+          direction="right"
+          offset={[8, -10]}
+          className="bus-lines-tooltip"
+        >
+          {stop.lines.slice(0, 4).join(' · ')}
+        </Tooltip>
+      )}
       <Popup
         closeOnClick={false}
         eventHandlers={{
