@@ -2841,6 +2841,56 @@ _delay_map_ts: float = 0.0
 _delay_map_version: int = 0
 # Update interval in seconds (default 180s == 3min)
 _DELAY_UPDATE_INTERVAL = int(os.environ.get('DELAY_UPDATE_INTERVAL', '180'))
+# How many historical delay-aware router versions to keep in the in-memory
+# cache. Older versions will be pruned to avoid unbounded memory growth when
+# the live delay map increments frequently. Set via env var
+# ROUTER_CACHE_MAX_VERSIONS (default: 3).
+_ROUTER_CACHE_MAX_VERSIONS = int(os.environ.get('ROUTER_CACHE_MAX_VERSIONS', '3'))
+
+
+def _prune_router_cache_for_date_bucket(date_str: str, bucket: str, keep: int = None) -> None:
+    """Prune old router cache entries for a specific (date, bucket).
+
+    Keeps only the newest `keep` versions for keys shaped (date_str, bucket, version).
+    Older entries are deleted from `_router_cache` while holding
+    `_router_cache_lock`.
+    """
+    if keep is None:
+        keep = _ROUTER_CACHE_MAX_VERSIONS
+    with _router_cache_lock:
+        # Collect keys that match (date_str, bucket, version)
+        matches = []
+        for k in list(_router_cache.keys()):
+            if isinstance(k, tuple) and len(k) == 3 and k[0] == date_str and k[1] == bucket:
+                try:
+                    ver = int(k[2])
+                except Exception:
+                    continue
+                matches.append((ver, k))
+        if len(matches) <= keep:
+            return
+        matches.sort()
+        # Remove oldest entries beyond the newest `keep`
+        to_remove = matches[0: max(0, len(matches) - keep)]
+        for _, key in to_remove:
+            try:
+                del _router_cache[key]
+            except KeyError:
+                pass
+
+
+def _set_router_cache(key, value):
+    """Set an entry in the router cache and prune old versions if needed."""
+    with _router_cache_lock:
+        _router_cache[key] = value
+    # If this cache key includes a version (date, bucket, version) then prune
+    # old versions for that date/bucket to keep memory bounded.
+    if isinstance(key, tuple) and len(key) == 3:
+        try:
+            date_str, bucket, _ver = key
+            _prune_router_cache_for_date_bucket(date_str, bucket, keep=_ROUTER_CACHE_MAX_VERSIONS)
+        except Exception:
+            pass
 
 
 def _recompute_journey_delay_map_once() -> None:
@@ -2983,13 +3033,35 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         # existing (non-delayed) router if present. Only schedule a
         # background build when we have a fallback to serve.
         if apply_delay and date_str == today_str:
-            if fallback_key in _router_cache:
-                # If not already building this key, mark it and schedule
-                # a background build after releasing the lock.
+            # Prefer the newest existing delay-aware router (older versions)
+            # if available. This allows serving a previously-built adjusted
+            # router while the very latest version is being built. If no
+            # adjusted router is present, fall back to the unadjusted router
+            # (fallback_key) if present; otherwise require a synchronous build.
+            best_old_key = None
+            best_old_ver = -1
+            for k in list(_router_cache.keys()):
+                if isinstance(k, tuple) and len(k) == 3 and k[0] == date_str and k[1] == bucket:
+                    try:
+                        ver = int(k[2])
+                    except Exception:
+                        continue
+                    # Pick the newest version less than or equal to current
+                    if ver <= _delay_map_version and ver > best_old_ver:
+                        best_old_ver = ver
+                        best_old_key = k
+            if best_old_key is not None:
+                # Use the best older adjusted router as fallback
+                fallback = _router_cache.get(best_old_key)
+                # Also schedule a background build for the current version
                 if cache_key not in _background_builds:
                     _background_builds.add(cache_key)
                     schedule_bg = True
-                # Prepare the fallback to return after lock is released
+            elif fallback_key in _router_cache:
+                # No adjusted router exists; use the unadjusted router as fallback
+                if cache_key not in _background_builds:
+                    _background_builds.add(cache_key)
+                    schedule_bg = True
                 fallback = _router_cache[fallback_key]
             else:
                 # No fallback available; fall back to synchronous behaviour
@@ -3024,15 +3096,13 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                                     new_jt.append((sid, at, dt))
                                 adj_merged.journey_times[j_idx] = new_jt
                         adj_router = RaptorRouter(adj_merged)
-                        with _router_cache_lock:
-                            _router_cache[key] = (adj_merged, adj_router, walking)
+                        _set_router_cache(key, (adj_merged, adj_router, walking))
                         return
                     except Exception:
                         # Fall through to caching the unadjusted router
                         pass
                 # If no delays or adjustment failed, cache the unadjusted router
-                with _router_cache_lock:
-                    _router_cache[key] = (merged, router, walking)
+                _set_router_cache(key, (merged, router, walking))
             finally:
                 with _router_cache_lock:
                     _background_builds.discard(key)
@@ -3105,14 +3175,14 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                         new_jt.append((sid, at, dt))
                     adj_merged.journey_times[j_idx] = new_jt
             router = RaptorRouter(adj_merged)
-            _router_cache[cache_key] = (adj_merged, router, walking)
+            _set_router_cache(cache_key, (adj_merged, router, walking))
             return adj_merged, router, walking
         except Exception:
             # Fall back to unadjusted merged/router on any failure
-            _router_cache[cache_key] = (merged, router, walking)
+            _set_router_cache(cache_key, (merged, router, walking))
             return merged, router, walking
 
-    _router_cache[cache_key] = (merged, router, walking)
+    _set_router_cache(cache_key, (merged, router, walking))
     return merged, router, walking
 
 from fastapi import Request
