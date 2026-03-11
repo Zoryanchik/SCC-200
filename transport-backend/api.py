@@ -140,7 +140,8 @@ async def lifespan(app: FastAPI):
         globals()['_base_init_attempted'] = True
     # Configure and start the WebSocket/STOMP live-updates broker
     try:
-        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10))
+        # Poll for live updates every 20s and use a 20s HTTP timeout for feed fetches
+        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=20), poll_interval=20.0)
         await ws_broker.start_polling()
     except Exception as exc:  # pragma: no cover
         logger.warning("WebSocket broker startup failed: %s", exc)
@@ -2498,7 +2499,7 @@ def _fetch_all_live_buses() -> list:
         return _live_delay_cache["data"]
     try:
         from bus_live import BusLive
-        bl = BusLive(timeout=10)
+        bl = BusLive(timeout=20)
         # Fetch with a very wide bounding box to get everything
         results = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
         _live_delay_cache["data"] = results
@@ -2524,7 +2525,11 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
     line_q = line_name.strip()
     buses = _fetch_all_live_buses()
     delays: list[int] = []
-    for line_ref, dest, lat_v, lon_v, _op, delay_s, origin_dep in buses:
+    for item in buses:
+        if len(item) == 7:
+            line_ref, dest, lat_v, lon_v, _op, delay_s, origin_dep = item
+        else:
+            line_ref, dest, lat_v, lon_v, _op, delay_s, origin_dep, _bearing = item
         # Exact short line name match
         short = (line_ref or "").split(":")[-1].strip()
         if short != line_q:
@@ -2582,7 +2587,13 @@ async def bus_live_operator(
         )
 
     out = []
-    for line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep in results:
+    for item in results:
+        # Support both legacy 7-tuples and new 8-tuples with bearing
+        if len(item) == 7:
+            line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep = item
+            bearing = None
+        else:
+            line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep, bearing = item
         computed = None
         if delay_s is None:
             try:
@@ -2598,6 +2609,7 @@ async def bus_live_operator(
             "operator": _operator,
             "delay_minutes": round(final_delay / 60, 1) if final_delay is not None else None,
             "status": _bus_delay_status(final_delay),
+            "bearing": bearing,
         })
     return out
 
@@ -2704,6 +2716,8 @@ async def bus_arrivals(stop_code: str, limit: int = 5):
 # Global cache for (merged, router, walking) by (date, AM/PM bucket)
 _router_cache = {}
 _router_cache_lock = threading.Lock()
+# Track background builds in progress (cache_key set)
+_background_builds = set()
 # Base init state: _base_cache holds the cached base data when
 # initialization succeeds, and _base_init_attempted indicates whether
 # we've already tried initialisation once. This prevents repeated,
@@ -2745,7 +2759,12 @@ def _recompute_journey_delay_map_once() -> None:
     except Exception:
         merged = None
 
-    for line_ref, dest, lat_v, lon_v, _op, feed_delay, origin_dep in buses:
+    for item in buses:
+        # support legacy 7-tuples and new 8-tuples (with bearing)
+        if len(item) == 7:
+            line_ref, dest, lat_v, lon_v, _op, feed_delay, origin_dep = item
+        else:
+            line_ref, dest, lat_v, lon_v, _op, feed_delay, origin_dep, _bearing = item
         try:
             # Ask the matching function for both delay and journey id
             matched = _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid=True, origin_dep_secs=origin_dep)
@@ -2830,87 +2849,156 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         cache_key = (date_str, bucket, _delay_map_version)
     else:
         cache_key = (date_str, bucket)
+    # First, attempt a fast lookup under the router cache lock. If the
+    # requested adjusted router (today + current delay version) is present,
+    # return it immediately. If it's missing but a fallback unadjusted
+    # router exists, schedule a background build of the adjusted router and
+    # return the fallback so requests are non-blocking. If no fallback is
+    # available, fall back to the original synchronous build behaviour.
+    today_str = datetime.now().date().isoformat()
+    fallback_key = (date_str, bucket)
+    need_sync_build = False
+    schedule_bg = False
+    fallback = None
     with _router_cache_lock:
         if cache_key in _router_cache:
             return _router_cache[cache_key]
-        # If base data hasn't been initialised yet, try once. If a
-        # previous attempt already ran and failed, avoid re-running
-        # initialise_base to prevent noisy repeated initialisation logs
-        # and excessive work.
-        global _base_init_attempted
-        # If initialization is already running in the background, do not
-        # attempt a duplicate synchronous initialize_base() here — return
-        # an error so callers can respond with 503. This avoids the
-        # "Initializing Transport Backend System" header being printed
-        # multiple times and prevents concurrent heavy work.
-        if _base_cache is None and not _base_init_attempted:
-            from main import initialize_base
+        # If caller asked for a delay-aware router for today, prefer to
+        # build the adjusted router in the background and return the
+        # existing (non-delayed) router if present. Only schedule a
+        # background build when we have a fallback to serve.
+        if apply_delay and date_str == today_str:
+            if fallback_key in _router_cache:
+                # If not already building this key, mark it and schedule
+                # a background build after releasing the lock.
+                if cache_key not in _background_builds:
+                    _background_builds.add(cache_key)
+                    schedule_bg = True
+                # Prepare the fallback to return after lock is released
+                fallback = _router_cache[fallback_key]
+            else:
+                # No fallback available; fall back to synchronous behaviour
+                need_sync_build = True
+        # For non-delay or non-today requests, proceed to build synchronously
+        # below (but do not hold the lock while performing heavy work).
+
+    # If we scheduled a background build, do it without blocking this
+    # request (background thread will populate the cache when ready).
+    if schedule_bg:
+        def _bg_build_and_cache(key, dstr, stime):
             try:
-                _base_cache = initialize_base()
-                # Merge prebuilt cache from init
-                if _base_cache and "prebuilt_cache" in _base_cache:
-                    _router_cache.update(_base_cache["prebuilt_cache"])
-                # Check again after merging prebuilt
+                # Obtain the base (non-delayed) merged/router/walking so we
+                # can apply delays and rebuild the adjusted router.
+                try:
+                    merged, router, walking = get_router_for_date(dstr, start_time=stime, apply_delay=False)
+                except Exception:
+                    # If we can't obtain the base router, abort gracefully.
+                    return
+                # Apply live delays if present and rebuild
+                if _journey_delay_map:
+                    try:
+                        from raptor_router import RaptorRouter
+                        adj_merged = copy.deepcopy(merged)
+                        for j_idx, delta in list(_journey_delay_map.items()):
+                            if 0 <= j_idx < len(adj_merged.journey_times):
+                                jt = adj_merged.journey_times[j_idx]
+                                new_jt = []
+                                for sid, atime, dtime in jt:
+                                    at = atime + delta if atime is not None else None
+                                    dt = dtime + delta if dtime is not None else None
+                                    new_jt.append((sid, at, dt))
+                                adj_merged.journey_times[j_idx] = new_jt
+                        adj_router = RaptorRouter(adj_merged)
+                        with _router_cache_lock:
+                            _router_cache[key] = (adj_merged, adj_router, walking)
+                        return
+                    except Exception:
+                        # Fall through to caching the unadjusted router
+                        pass
+                # If no delays or adjustment failed, cache the unadjusted router
+                with _router_cache_lock:
+                    _router_cache[key] = (merged, router, walking)
+            finally:
+                with _router_cache_lock:
+                    _background_builds.discard(key)
+
+        try:
+            t = threading.Thread(target=_bg_build_and_cache, args=(cache_key, date_str, start_time), daemon=True)
+            t.start()
+        except Exception:
+            logger.exception('Failed to start background build thread for cache_key %s', cache_key)
+        # Return the prepared fallback value (non-delayed router) so callers
+        # are not blocked; the background thread will populate the adjusted
+        # router when ready.
+        return fallback
+
+    # At this point either we need a synchronous build (no fallback) or the
+    # request is for a non-delay router. Perform the original synchronous
+    # build behaviour (this may be heavy).
+    global _base_init_attempted
+    # If initialization hasn't run yet, run it synchronously (same as before)
+    if _base_cache is None and not _base_init_attempted:
+        from main import initialize_base
+        try:
+            _base_cache = initialize_base()
+            if _base_cache and "prebuilt_cache" in _base_cache:
+                _router_cache.update(_base_cache["prebuilt_cache"])
+            # If the cache was populated during init, return it
+            with _router_cache_lock:
                 if cache_key in _router_cache:
                     return _router_cache[cache_key]
-            except Exception:
-                # Record that we've attempted initialisation so we don't
-                # repeatedly try on every request. Subsequent callers
-                # will receive an exception and can respond with 503.
-                _base_init_attempted = True
-                raise
-            finally:
-                _base_init_attempted = True
-        elif _base_cache is None and _base_init_attempted:
-            # A previous attempt failed. Try a single re-attempt if
-            # `main.initialize_base` is available at runtime (tests may
-            # patch it). If this re-attempt fails, raise a RuntimeError
-            # to preserve the original behaviour.
-            try:
-                from main import initialize_base
-                if callable(initialize_base):
-                    _base_cache = initialize_base()
-                    if _base_cache and "prebuilt_cache" in _base_cache:
-                        _router_cache.update(_base_cache["prebuilt_cache"])
+        except Exception:
+            _base_init_attempted = True
+            raise
+        finally:
+            _base_init_attempted = True
+    elif _base_cache is None and _base_init_attempted:
+        try:
+            from main import initialize_base
+            if callable(initialize_base):
+                _base_cache = initialize_base()
+                if _base_cache and "prebuilt_cache" in _base_cache:
+                    _router_cache.update(_base_cache["prebuilt_cache"])
+                with _router_cache_lock:
                     if cache_key in _router_cache:
                         return _router_cache[cache_key]
-            except Exception:
-                raise RuntimeError("Backend base initialisation previously failed")
-        loader = _base_cache["loader"]
-        walking_raw = _base_cache["walking_raw"]
-        al = _base_cache.get("atco_loader")
-        from main import build_for_date
-        # Build the merged data / router for this date (potentially heavy)
-        merged, router, walking = build_for_date(
-            loader, walking_raw, date_str, start_time=start_time,
-            atco_loader=al)
-        # If we're asked to apply today's delay map, modify a deep copy
-        # of the merged timetable by adding per-journey delays and then
-        # rebuild the router from that adjusted merged object.
-        if apply_delay and date_str == today_str and _journey_delay_map:
-            try:
-                from raptor_router import RaptorRouter
-                adj_merged = copy.deepcopy(merged)
-                # Apply delays (per journey index) to every scheduled time
-                for j_idx, delta in list(_journey_delay_map.items()):
-                    if 0 <= j_idx < len(adj_merged.journey_times):
-                        jt = adj_merged.journey_times[j_idx]
-                        new_jt = []
-                        for sid, atime, dtime in jt:
-                            at = atime + delta if atime is not None else None
-                            dt = dtime + delta if dtime is not None else None
-                            new_jt.append((sid, at, dt))
-                        adj_merged.journey_times[j_idx] = new_jt
-                router = RaptorRouter(adj_merged)
-                _router_cache[cache_key] = (adj_merged, router, walking)
-                return adj_merged, router, walking
-            except Exception:
-                # Fall back to unadjusted merged/router on any failure
-                _router_cache[cache_key] = (merged, router, walking)
-                return merged, router, walking
+        except Exception:
+            raise RuntimeError("Backend base initialisation previously failed")
+    loader = _base_cache["loader"]
+    walking_raw = _base_cache["walking_raw"]
+    al = _base_cache.get("atco_loader")
+    from main import build_for_date
+    # Build the merged data / router for this date (potentially heavy)
+    merged, router, walking = build_for_date(
+        loader, walking_raw, date_str, start_time=start_time,
+        atco_loader=al)
+    # If we're asked to apply today's delay map, modify a deep copy
+    # of the merged timetable by adding per-journey delays and then
+    # rebuild the router from that adjusted merged object.
+    if apply_delay and date_str == today_str and _journey_delay_map:
+        try:
+            from raptor_router import RaptorRouter
+            adj_merged = copy.deepcopy(merged)
+            # Apply delays (per journey index) to every scheduled time
+            for j_idx, delta in list(_journey_delay_map.items()):
+                if 0 <= j_idx < len(adj_merged.journey_times):
+                    jt = adj_merged.journey_times[j_idx]
+                    new_jt = []
+                    for sid, atime, dtime in jt:
+                        at = atime + delta if atime is not None else None
+                        dt = dtime + delta if dtime is not None else None
+                        new_jt.append((sid, at, dt))
+                    adj_merged.journey_times[j_idx] = new_jt
+            router = RaptorRouter(adj_merged)
+            _router_cache[cache_key] = (adj_merged, router, walking)
+            return adj_merged, router, walking
+        except Exception:
+            # Fall back to unadjusted merged/router on any failure
+            _router_cache[cache_key] = (merged, router, walking)
+            return merged, router, walking
 
-        _router_cache[cache_key] = (merged, router, walking)
-        return merged, router, walking
+    _router_cache[cache_key] = (merged, router, walking)
+    return merged, router, walking
 
 from fastapi import Request
 from fastapi.responses import JSONResponse

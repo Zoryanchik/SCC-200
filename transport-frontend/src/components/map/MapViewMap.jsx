@@ -34,29 +34,79 @@ L.Marker.prototype.options.icon = DefaultIcon;
  * @param {string} color  - hex/named CSS colour
  * @param {string|null} [label] - for bus markers, the route/line number to display on the icon
  */
-const createCustomIcon = (type, color, label = null) => {
+const createCustomIcon = (type, color, label = null, bearing = null) => {
 	const size = 28;
 	const c = size / 2; // 14
 	const r = c - 1.5; // 12.5
 
 	let innerSvg;
 	let bgFill, strokeColor, strokeWidth;
+	let extraTop = 0;
 
 	if (type === 'bus' && label) {
-		// Solid coloured badge with white route number — easy to read at a glance
+		// Solid coloured badge with white route number — add a small nose/pointer
+		// at the top so rotated icons show heading clearly while the label
+		// text remains counter-rotated and upright.
 		bgFill = color;
 		strokeColor = 'white';
 		strokeWidth = 1.5;
 		const text = String(label).substring(0, 4);
 		const fontSize = text.length >= 4 ? 7 : text.length === 3 ? 8.5 : 10;
-		innerSvg = `<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${text}</text>`;
+		// slightly larger triangular pointer (nose) positioned just outside
+		// the top of the badge so it reads as a directional cue.
+		const ptrHalf = 6; // half-width of the pointer base
+		const ptrLeft = (c - ptrHalf).toFixed(2);
+		const ptrRight = (c + ptrHalf).toFixed(2);
+		// Move the triangle outward by an additional 2px so its tip sits
+		// slightly further above the badge while remaining visually attached.
+		const ptrTipY_num = (c - r - 6);
+		const ptrBaseY_num = (c - r + 0);
+		const ptrTipY = ptrTipY_num.toFixed(2);
+		const ptrBaseY = ptrBaseY_num.toFixed(2);
+
+	// If the pointer tip extends above the SVG viewport, add generous
+	// top-padding so the triangular nose isn't clipped even after
+	// rotations. Use a larger safety margin to avoid off-by-small
+	// rendering differences across browsers/leaflet.
+	extraTop = ptrTipY_num < 0 ? Math.ceil(Math.abs(ptrTipY_num) + 12) : extraTop;
+		// Pointer should match the badge fill and stroke so it looks attached
+		innerSvg = `
+				<polygon points="${c},${ptrTipY} ${ptrLeft},${ptrBaseY} ${ptrRight},${ptrBaseY}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+				<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="bold" fill="white">${text}</text>`;
 	} else if (type === 'bus') {
+		// Unlabelled bus: white badge with coloured stroke and a pointer nose
 		bgFill = 'white';
 		strokeColor = color;
 		strokeWidth = 2;
-		innerSvg = `<path d="M8 10h12v5H8z" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>` +
-			`<circle cx="10.5" cy="17" r="1.5" fill="${color}"/>` +
-			`<circle cx="17.5" cy="17" r="1.5" fill="${color}"/>`;
+		const ptrHalf = 6;
+		const ptrLeft = (c - ptrHalf).toFixed(2);
+		const ptrRight = (c + ptrHalf).toFixed(2);
+		const ptrTipY_num = (c - r - 6);
+		const ptrBaseY_num = (c - r + 0);
+		const ptrTipY = ptrTipY_num.toFixed(2);
+		const ptrBaseY = ptrBaseY_num.toFixed(2);
+
+		// If the pointer tip extends above the SVG viewport, add generous
+		// top-padding so the triangular nose isn't clipped even after
+		// rotations. Use a larger safety margin to avoid off-by-small
+		// rendering differences across browsers/leaflet.
+		extraTop = ptrTipY_num < 0 ? Math.ceil(Math.abs(ptrTipY_num) + 12) : extraTop;
+
+		// Draw the small bus icon centered inside the badge using positions
+		// relative to the circle center so mock data (no bearing) stays centered.
+		const busRectX = (c - 6).toFixed(2);
+		const busRectY = (c - 5).toFixed(2);
+		const busRectW = 12;
+		const busRectH = 5;
+		const wheelY = (c + 3).toFixed(2);
+		const wheelLeftX = (c - 3).toFixed(2);
+		const wheelRightX = (c + 3).toFixed(2);
+
+		innerSvg = `
+				<polygon points="${c},${ptrTipY} ${ptrLeft},${ptrBaseY} ${ptrRight},${ptrBaseY}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+				<rect x="${busRectX}" y="${busRectY}" width="${busRectW}" height="${busRectH}" fill="none" stroke="${color}" stroke-width="1.5" rx="1"/>
+				<circle cx="${wheelLeftX}" cy="${wheelY}" r="1.5" fill="${color}"/>
+				<circle cx="${wheelRightX}" cy="${wheelY}" r="1.5" fill="${color}"/>`;
 	} else {
 		bgFill = 'white';
 		strokeColor = color;
@@ -65,17 +115,44 @@ const createCustomIcon = (type, color, label = null) => {
 			`<line x1="9" y1="18" x2="19" y2="18" stroke="${color}" stroke-width="1.5"/>`;
 	}
 
-	const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
-		<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>
-		${innerSvg}
-	</svg>`;
+	// If a numeric bearing is provided, rotate the icon group while keeping
+	// any text elements counter-rotated so labels remain upright/readable.
+	const rot = (bearing != null && !Number.isNaN(Number(bearing))) ? Number(bearing) : null;
+	// If we added extra top padding to accommodate the pointer, increase
+	// the SVG viewport height and shift the viewBox so the triangle isn't
+	// clipped. Adjust the Leaflet icon anchor accordingly so the badge
+	// still pins to the same map coordinate.
+	const extraTopFinal = typeof extraTop !== 'undefined' ? extraTop : 0;
+	const viewBoxY = -extraTopFinal;
+	const svgHeight = size + extraTopFinal;
+	const iconSizeY = svgHeight;
+	const iconAnchorY = c + extraTopFinal;
+
+	let svg = '';
+	if (rot !== null) {
+		svg = `<svg width="${size}" height="${svgHeight}" viewBox="0 ${viewBoxY} ${size} ${svgHeight}" xmlns="http://www.w3.org/2000/svg">` +
+			`<g transform="rotate(${rot} ${c} ${c})">` +
+			`<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>` +
+			`${innerSvg}` +
+			`</g>`;
+		// If there's text, counter-rotate it so it stays upright.
+		if (innerSvg && innerSvg.includes('<text')) {
+			svg = svg.replace('<text ', `<g transform='rotate(${ -rot } ${c} ${c})'><text `).replace('</text>', '</text></g>');
+		}
+		svg += `</svg>`;
+	} else {
+		svg = `<svg width="${size}" height="${svgHeight}" viewBox="0 ${viewBoxY} ${size} ${svgHeight}" xmlns="http://www.w3.org/2000/svg">` +
+			`<circle cx="${c}" cy="${c}" r="${r}" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>` +
+			`${innerSvg}` +
+			`</svg>`;
+	}
 
 	return L.divIcon({
 		html: svg,
 		className: 'custom-marker-icon',
-		iconSize: [size, size],
-		iconAnchor: [c, c],
-		popupAnchor: [0, -c]
+		iconSize: [size, iconSizeY || size],
+		iconAnchor: [c, iconAnchorY || c],
+		popupAnchor: [0, -(iconAnchorY || c)]
 	});
 };
 
@@ -149,7 +226,7 @@ const busIconColor = (delayMinutes) => {
 	return '#1976d2';                                // on time / early → blue
 };
 
-const TRAIN_ICON = createCustomIcon('train', '#2e7d32');
+const TRAIN_ICON = createCustomIcon('train', '#2e7d32', null, null);
 const USER_ICON = createUserIcon();
 
 /**
@@ -822,7 +899,7 @@ export default function MapViewMap({
 							key={marker.id}
 							position={marker.position}
 							icon={marker.type === 'bus'
-							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null)
+							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
 								click: () => onOpenPopup(marker.id)
@@ -908,12 +985,19 @@ export default function MapViewMap({
 												</Typography>
 											</Box>
 										)}
+										{/* Bearing value intentionally hidden from popup to avoid clutter; icon shows heading visually */}
 										{marker.meta && Object.keys(marker.meta).length > 0 && (
 											<Box sx={{ mt: 1 }}>
 												{Object.entries(marker.meta)
 													.filter(([k]) => {
 														const kk = String(k).toLowerCase();
-														return !['lat', 'lon', 'latitude', 'longitude', 'operator', 'operator_name', 'operatorref', 'operator_ref', 'operatorname', 'delay_minutes', 'delayminutes', 'status'].includes(kk);
+														// Exclude coordinate/operator/delay/status and any bearing-like fields
+														return ![
+															'lat', 'lon', 'latitude', 'longitude',
+															'operator', 'operator_name', 'operatorname', 'operator_ref', 'operatorref', 'operatorname',
+															'delay_minutes', 'delayminutes', 'status',
+															'bearing', 'bearing_degrees', 'bearingdegrees', 'heading', 'course'
+														].includes(kk);
 													})
 													.map(([key, value]) => (
 														<Typography key={key} variant="body2" sx={{ mb: 0.5 }}>

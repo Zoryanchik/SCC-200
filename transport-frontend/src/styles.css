@@ -221,3 +221,10 @@ body.high-contrast a:focus-visible {
     font-weight: 700;
   }
 }
+
+/* Ensure custom leaflet divIcons can overflow so pointer noses are not clipped */
+.custom-marker-icon,
+.custom-user-marker-icon,
+.endpoint-div-icon {
+  overflow: visible !important;
+}

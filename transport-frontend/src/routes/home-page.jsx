@@ -475,7 +475,7 @@ export default function HomePage() {
     refreshInterval: 10000,
     debounceMs: 800,
   });
-  const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 30000);
+  const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 180000);
   const { data: liveBusUpdate } = useLiveUpdates("bus");
 
   // Update markers when real bus API data arrives
@@ -532,6 +532,7 @@ export default function HomePage() {
             routeNumber: bus.routeNumber || bus.route || bus.line,
             delayMinutes,
             operator: operatorName,
+            bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? null,
             meta: meta,
           });
         });
@@ -1383,11 +1384,11 @@ export default function HomePage() {
               {/* Date/time/transfers moved below the search inputs */}
             </Stack>
 
-            <Stack
-              direction={{ xs: "column", md: "row" }}
-              spacing={2}
-              alignItems={{ md: "flex-start" }}
-            >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={2}
+                  alignItems={{ md: "flex-start" }}
+                >
                 {/* Leftmost: quick 'use my location' for the From field - always visible */}
                 <IconButton
                   aria-label="Use my location"
@@ -1459,8 +1460,10 @@ export default function HomePage() {
                       }}
                       sx={{
                         "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                          "& fieldset": { borderColor: '#00BCD4' },
+                          "&:hover fieldset": { borderColor: '#00BCD4' },
+                          "&.Mui-focused fieldset": { borderColor: '#00BCD4' },
+                          boxShadow: 'none',
                         },
                         "& .MuiInputBase-input": {
                           color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
@@ -1569,8 +1572,10 @@ export default function HomePage() {
                       }}
                       sx={{
                         "& .MuiOutlinedInput-root": {
-                          "& fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,0.7)" : undefined },
-                          "&:hover fieldset": { borderColor: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined },
+                          "& fieldset": { borderColor: '#00BCD4' },
+                          "&:hover fieldset": { borderColor: '#00BCD4' },
+                          "&.Mui-focused fieldset": { borderColor: '#00BCD4' },
+                          boxShadow: 'none',
                         },
                         "& .MuiInputBase-input": {
                           color: (theme) => theme.palette.mode === "dark" ? "#fff" : undefined,
@@ -1606,7 +1611,7 @@ export default function HomePage() {
               value={departureDate}
               onChange={(e) => setDepartureDate(e.target.value)}
               InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 140 }}
+              sx={{ minWidth: 140, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
             />
             <TextField
               label="Time"
@@ -1615,7 +1620,7 @@ export default function HomePage() {
               value={departureClock}
               onChange={(e) => setDepartureClock(e.target.value)}
               InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 110 }}
+              sx={{ minWidth: 110, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
             />
             <TextField
               label="Transfers"
@@ -1627,7 +1632,7 @@ export default function HomePage() {
                 // clamp to 0..5 defensively
                 setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0);
               }}
-              sx={{ width: 110 }}
+              sx={{ width: 110, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
             >
               {[0,1,2,3,4,5].map((n) => (
                 <MenuItem key={n} value={n}>{n}</MenuItem>
@@ -1641,7 +1646,7 @@ export default function HomePage() {
                 const val = e.target.value;
                 if (val !== null) setTransportMode(val);
               }}
-              sx={{ ml: 1, minWidth: 120, maxWidth: 180 }}
+              sx={{ ml: 1, minWidth: 120, maxWidth: 180, "& .MuiOutlinedInput-root": { "& fieldset": { borderColor: '#00BCD4' }, "&:hover fieldset": { borderColor: '#00BCD4' }, "&.Mui-focused fieldset": { borderColor: '#00BCD4' }, }, }}
               SelectProps={{
                 renderValue: (selected) => {
                   if (!selected) return '';

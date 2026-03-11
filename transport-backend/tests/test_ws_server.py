@@ -409,7 +409,7 @@ class TestStompBroker:
         b = StompBroker()
         mock_bl = MagicMock()
         mock_bl.get_bus_live.return_value = [
-            ("1", "Lancaster", 54.046, -2.798, "SCCU", None, None),
+            ("1", "Lancaster", 54.046, -2.798, "SCCU", None, None, None),
         ]
         b.configure(bus_live_factory=lambda: mock_bl, poll_interval=1)
 

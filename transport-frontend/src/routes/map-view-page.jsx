@@ -78,7 +78,7 @@ lon: mapCenter.lon,
 refreshInterval: 30000,
 debounceMs: 800,
 });
-const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 30000);
+const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
 const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 

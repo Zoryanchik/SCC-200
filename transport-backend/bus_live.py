@@ -3,6 +3,7 @@ import ssl
 import urllib.request
 import socket
 from urllib.parse import urlparse
+import logging
 try:
     # Prefer lxml for faster, more robust XML parsing when available
     from lxml import etree as ET
@@ -12,6 +13,8 @@ except Exception:
     _USING_LXML = False
 from datetime import datetime
 from typing import List, Tuple, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_iso_duration(s: str) -> Optional[int]:
@@ -41,6 +44,45 @@ def _parse_iso_dt(s: str) -> Optional[datetime]:
         return datetime.fromisoformat(s.replace('Z', '+00:00'))
     except Exception:
         return None
+
+
+def _extract_bearing_from_element(el: ET.Element) -> tuple[Optional[float], Optional[str]]:
+    """Search element and its descendants for a tag or attribute likely containing a bearing.
+
+    Returns (bearing_value, matched_tag_name) where matched_tag_name is the
+    element tag or attribute name that produced the value (for logging/debug).
+    """
+    if el is None:
+        return None, None
+    # Candidate substrings to match common variants
+    candidates = ("bearing", "bearingdegrees", "heading", "course")
+    # Check element text and descendants
+    for child in el.iter():
+        try:
+            tag = child.tag if isinstance(child.tag, str) else ''
+        except Exception:
+            tag = ''
+        low = tag.lower()
+        if any(c in low for c in candidates):
+            txt = (child.text or '').strip()
+            if txt:
+                try:
+                    return float(txt), tag
+                except Exception:
+                    continue
+        # check attributes on the child
+        try:
+            for ak, av in (child.attrib or {}).items():
+                if any(c in ak.lower() for c in candidates):
+                    if av and av.strip():
+                        try:
+                            return float(av.strip()), ak
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+    # No bearing-like field found
+    return None, None
 
 
 
@@ -237,13 +279,27 @@ class BusLive:
                             origin_dep_secs = origin_dt.hour * 3600 + origin_dt.minute * 60 + origin_dt.second
                     # --------------------------------------------------------
 
+                    # extract optional bearing (may be present under VehicleLocation or elsewhere)
+                    bearing = None
+                    matched_tag = None
+                    if vl is not None:
+                        bearing, matched_tag = _extract_bearing_from_element(vl)
+                    if bearing is None:
+                        # try searching the whole MonitoredVehicleJourney subtree
+                        bearing, matched_tag = _extract_bearing_from_element(mvj)
+
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs))
+                        # Return an 8-tuple (bearing may be None).
+                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs, bearing))
+                        if bearing is not None:
+                            logger.debug(
+                                f"Vehicle live feed: line={line_ref}, dest={dest}, lat={lat_v}, lon={lon_v}, bearing={bearing} (matched={matched_tag})"
+                            )
 
         return results
 
 
-def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=10):
+def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=20):
     """Convenience wrapper for BusLive.get_bus_live."""
     bl = BusLive(urls=urls, timeout=timeout)
     return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol)
@@ -290,7 +346,12 @@ def main():
 
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
-    for i, (line, dest, lat, lon, operator, delay_s, origin_dep) in enumerate(display_results):
+    for i, item in enumerate(display_results):
+        # support both 7-tuple and 8-tuple (with bearing)
+        if len(item) == 7:
+            line, dest, lat, lon, operator, delay_s, origin_dep = item
+        else:
+            line, dest, lat, lon, operator, delay_s, origin_dep, bearing = item
         delay_str = f", delay={delay_s}s" if delay_s is not None else ""
         origin_str = ""
         if origin_dep is not None:

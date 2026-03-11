@@ -136,7 +136,7 @@ export const useLiveBusLocations = (
  * @param {string} stationCode - Station CRS code
  * @param {number} refreshInterval - Refresh interval in milliseconds (default: 30000)
  */
-export const useLiveDepartures = (stationCode, refreshInterval = 30000) => {
+export const useLiveDepartures = (stationCode, refreshInterval = 180000) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -173,7 +173,7 @@ export const useLiveDepartures = (stationCode, refreshInterval = 30000) => {
  * @param {string} stopCode - NaPTAN stop code
  * @param {number} refreshInterval - Refresh interval in milliseconds (default: 20000)
  */
-export const useBusArrivals = (stopCode, refreshInterval = 20000) => {
+export const useBusArrivals = (stopCode, refreshInterval = 180000) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
