@@ -18,19 +18,72 @@ import { useBusStops } from "../hooks/useBusStops";
 const MapViewMap = lazy(() => import("../components/map/MapViewMap"));
 
 
-// Mock data for instant display
+// Static mock stops / trains shown before API data loads
 const MOCK_MARKERS = [
-{ id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
-{ id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
-{ id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
-{ id: 4, position: [54.045000, -2.810000], name: "Greyhound Bus Park", type: "bus", status: "Delayed 2 mins" },
-{ id: 5, position: [53.995000, -2.700000], name: "Morecambe Station", type: "train", status: "On time" },
-{ id: 6, position: [53.990000, -2.750000], name: "Morecambe Bus Station", type: "bus", status: "On time" },
-{ id: 7, position: [53.760000, -2.700000], name: "Preston Bus Station", type: "bus", status: "On time" },
-{ id: 8, position: [53.750000, -2.680000], name: "Preston Train Station", type: "train", status: "Delayed 5 mins" },
-{ id: 9, position: [54.080000, -2.700000], name: "Carnforth Station", type: "train", status: "On time" },
-{ id: 10, position: [54.120000, -2.650000], name: "Kendal Bus Station", type: "bus", status: "On time" },
+  { id: 't1', position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
+  { id: 't2', position: [53.995000, -2.700000], name: "Morecambe Station",        type: "train", status: "On time" },
+  { id: 't3', position: [54.080000, -2.700000], name: "Carnforth Station",         type: "train", status: "On time" },
 ];
+
+// Animated mock buses — each follows a short looping route around Lancaster.
+// `waypoints` is a closed loop of [lat, lon] the bus cycles through.
+const MOCK_BUS_ROUTES = [
+  {
+    id: 'mock-bus-1', routeNumber: '1', operator: 'Demo Buses', delayMinutes: 0,
+    waypoints: [
+      [54.0480, -2.8010], [54.0510, -2.7980], [54.0540, -2.8020],
+      [54.0520, -2.8060], [54.0490, -2.8050], [54.0480, -2.8010],
+    ],
+  },
+  {
+    id: 'mock-bus-2', routeNumber: '2', operator: 'Demo Buses', delayMinutes: 4,
+    waypoints: [
+      [54.0460, -2.7990], [54.0440, -2.8040], [54.0430, -2.8090],
+      [54.0460, -2.8120], [54.0490, -2.8080], [54.0460, -2.7990],
+    ],
+  },
+  {
+    id: 'mock-bus-3', routeNumber: 'X4', operator: 'Demo Buses', delayMinutes: 12,
+    waypoints: [
+      [54.0530, -2.7950], [54.0560, -2.7900], [54.0580, -2.7960],
+      [54.0550, -2.8010], [54.0530, -2.7980], [54.0530, -2.7950],
+    ],
+  },
+  {
+    id: 'mock-bus-4', routeNumber: '41', operator: 'Demo Buses', delayMinutes: 0,
+    waypoints: [
+      [54.0420, -2.8000], [54.0400, -2.7950], [54.0380, -2.8000],
+      [54.0400, -2.8050], [54.0420, -2.8000],
+    ],
+  },
+];
+
+/**
+ * Compute bearing in degrees (0 = north, clockwise) from point A to point B.
+ */
+function calcBearing([lat1, lon1], [lat2, lon2]) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLon = toRad(lon2 - lon1);
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const y = Math.sin(dLon) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Interpolate between two waypoints [lat,lon] by fraction t ∈ [0,1].
+ */
+function lerpWaypoint([lat1, lon1], [lat2, lon2], t) {
+  return [lat1 + (lat2 - lat1) * t, lon1 + (lon2 - lon1) * t];
+}
+
+// Each bus travels along its route at a fixed speed; the phase encodes
+// how far along the full route (0–1) the bus has progressed.
+// Different initial phases so buses don't all start at waypoint 0.
+const INITIAL_PHASES = { 'mock-bus-1': 0.0, 'mock-bus-2': 0.35, 'mock-bus-3': 0.6, 'mock-bus-4': 0.15 };
+// Speed: fraction of full route per second
+const BUS_SPEED = 0.012;
 
 // Default map center (Lancaster)
 const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
@@ -83,16 +136,61 @@ const { data: trainDepartures, loading: trainLoading, error: trainError } = useL
 const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 
-// Update markers when real API data arrives
-useEffect(() => {
-console.log('Bus API Response:', { busLocations, busError });
-console.log('Train API Response:', { trainDepartures, trainError });
+// Track whether real API data has ever arrived so we know when to stop the mock animation.
+const [hasRealData, setHasRealData] = useState(false);
 
+// Animated mock buses — runs until the real API returns data.
+useEffect(() => {
+  if (hasRealData) return; // stop as soon as real data takes over
+  const phases = { ...INITIAL_PHASES };
+  const TICK_MS = 100; // update every 100 ms → smooth movement
+
+  const intervalId = setInterval(() => {
+    const mockBusMarkers = MOCK_BUS_ROUTES.map((route) => {
+      // Advance phase
+      phases[route.id] = (phases[route.id] + BUS_SPEED * (TICK_MS / 1000)) % 1;
+      const phase = phases[route.id];
+
+      // Which segment are we on?
+      const wps = route.waypoints;
+      const segCount = wps.length - 1;
+      const globalT = phase * segCount;
+      const segIdx = Math.min(Math.floor(globalT), segCount - 1);
+      const t = globalT - segIdx;
+
+      const from = wps[segIdx];
+      const to = wps[segIdx + 1];
+      const position = lerpWaypoint(from, to, t);
+      const bearing = calcBearing(from, to);
+
+      const dm = route.delayMinutes;
+      const status = dm >= 10 ? `Delayed ${dm} mins` : dm >= 2 ? `Delayed ${dm} mins` : 'On time';
+
+      return {
+        id: route.id,
+        type: 'bus',
+        name: `Bus ${route.routeNumber}`,
+        routeNumber: route.routeNumber,
+        operator: route.operator,
+        delayMinutes: dm,
+        status,
+        bearing,
+        position,
+      };
+    });
+
+    setMarkers([...MOCK_MARKERS, ...mockBusMarkers]);
+  }, TICK_MS);
+
+  return () => clearInterval(intervalId);
+}, [hasRealData]);
+
+// Update markers when real API data arrives; stops the mock animation once data is available.
+useEffect(() => {
 // Only update if we have real data from the API
 if ((Array.isArray(busLocations) && busLocations.length > 0) || 
     (Array.isArray(trainDepartures) && trainDepartures.length > 0)) {
 
-console.log('Received real data from API, updating markers...');
 const newMarkers = [];
 let id = 1;
 
@@ -140,6 +238,7 @@ if (Array.isArray(trainDepartures)) {
 }
 
 setMarkers(newMarkers);
+setHasRealData(true);
 setApiError(null);
 } else if (busError || trainError) {
 // Show error message but keep mock data
