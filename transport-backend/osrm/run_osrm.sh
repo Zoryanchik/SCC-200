@@ -19,7 +19,7 @@ if [ "${1:-}" = "-d" ]; then
   shift
 fi
 
-NETWORK_NAME="${NETWORK_NAME:-scc200-net}"
+NETWORK_NAME="${NETWORK_NAME:-scc200-net-edillocnon}"
 
 PBF_URL="${1:-$PBF_URL_DEFAULT}"
 DATA_DIR="${2:-$DATA_DIR_DEFAULT}"
@@ -130,9 +130,9 @@ else
 fi
 
 # Choose run flags depending on detach mode. Name the container so other
-# containers can reach it as 'scc200-osrm'. When detached, keep the
+# containers can reach it as 'transport-osrm'. When detached, keep the
 # container persistent (don't use --rm) so it remains on the network.
-CONTAINER_NAME="scc200-osrm"
+CONTAINER_NAME="transport-osrm-edillocnon"
 MOUNT_OPTS=""
 if [ "$RUNTIME" = "podman" ]; then
   if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then

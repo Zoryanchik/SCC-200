@@ -703,7 +703,9 @@ export default function MapViewMap({
 		onMapReady,
  		onMoveEnd,
  		sideContent,
- 		showSideOverlay = true,
+		showSideOverlay = true,
+		/** show or hide currently-active route overlays (from useRouteLine) */
+		showRouteLines = true,
 	/** Route geometry from journey planner. Array of {id, name, coords, color} */
 	journeyRoute = null,
 }) {
@@ -711,6 +713,19 @@ export default function MapViewMap({
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
 	const { activeRoutes, toggleRoute, isActive, clearRoutes } = useRouteLine();
+
+	// Debugging: log when showRouteLines changes and when we clear routes
+	React.useEffect(() => {
+		try {
+			console.debug('[MapViewMap] showRouteLines=', showRouteLines, 'activeRoutes.size=', activeRoutes?.size);
+		} catch (e) {
+			// ignore
+		}
+		if (!showRouteLines && activeRoutes && activeRoutes.size > 0) {
+			console.debug('[MapViewMap] showRouteLines false → clearing active routes (size)', activeRoutes.size);
+			clearRoutes();
+		}
+	}, [showRouteLines, clearRoutes, activeRoutes]);
 	const { highContrast } = useAccessibility();
 
 	// High-contrast mode → CartoDB Positron (clean, light, high-legibility labels)
@@ -830,7 +845,7 @@ export default function MapViewMap({
 						attribution={tileAttribution}
 						url={tileUrl}
 					/>				{/* Clear-routes button — floated bottom-left, only when routes are active */}
-				{activeRoutes.size > 0 && (
+				{showRouteLines && activeRoutes.size > 0 && (
 					<Box
 						component="button"
 						onClick={(e) => { e.stopPropagation(); clearRoutes(); }}
@@ -858,9 +873,12 @@ export default function MapViewMap({
 					</Box>
 				)}					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
 					<BusStopLayer onToggleRoute={toggleRoute} isRouteActive={isActive} />
-					<RouteLineLayer activeRoutes={activeRoutes} />
+					{showRouteLines && <RouteLineLayer activeRoutes={activeRoutes} />}
 				{/* Journey-plan route overlay */}
-				<JourneyRouteLayer segments={journeyRoute} />
+				{(function(){
+					try { console.debug('[MapViewMap] journeyRoute segments=', Array.isArray(journeyRoute) ? journeyRoute.length : journeyRoute); } catch(e) {}
+					return (showRouteLines && Array.isArray(journeyRoute) && journeyRoute.length > 0) ? <JourneyRouteLayer segments={journeyRoute} /> : null;
+				})()}
 				{/* Developer debug overlay removed - rely on JourneyRouteLayer smoothing and styling */}
 					{filteredMarkers.map((marker) => (
 						<Marker

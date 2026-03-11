@@ -82,8 +82,8 @@ If you need custom DB locations, set `BUS_DB_DSN`, `TRAIN_DB_DSN`, and
 ```
 
 This will extract/customize the map (if needed) and start a container
-named `scc200-osrm` that listens on container port `5012`. By default the
-script attaches the container to the `scc200-net` network so other
+named `transport-osrm-edillocnon` that listens on container port `5012`. By default the
+script attaches the container to the `scc200-net-edillocnon` network so other
 containers can reach it by name.
 
 2. Start the backend container (build if necessary):
@@ -93,8 +93,8 @@ containers can reach it by name.
 ```
 
 `run_backend.sh` calls `start_container.sh` which by default places the
-backend container on the same user network (`scc200-net`) and injects the
-environment variable `OSRM_URL=http://scc200-osrm:5012` into the backend
+backend container on the same user network (`scc200-net-edillocnon`) and injects the
+environment variable `OSRM_URL=http://transport-osrm-edillocnon:5012` into the backend
 container so it talks to OSRM by container name. The backend exposes port
 `5050` on the host by default (host:5050 -> container:5050).
 
@@ -158,19 +158,18 @@ From the repository root:
 
 ```zsh
 # start Postgres + backend (builds the backend image)
-docker compose -f docker-compose.postgres.yml up --build
+docker compose -f docker-compose.yml up --build
 
 # bring the services down (stops and removes containers but preserves DB volume)
-docker compose -f docker-compose.postgres.yml down
+docker compose -f docker-compose.yml down
 ```
 
 The compose file defines:
-
-- `postgres` — Postgres 15 listening on host port `127.0.0.1:5011` (container
+`postgres` — Postgres 15 listening on host port `127.0.0.1:5011` (container
 	port `5011`). The data is persisted in a named volume `transport-postgres-data`.
-- `backend` — the transport backend built from `transport-backend/` and attached
+`backend` — the transport backend built from `transport-backend/` and attached
 	to the same network; the backend is configured by default to use the
-	container hostname `transport-postgres-local` so it connects to the DB using
+	container hostname `transport-postgres-edillocnon` so it connects to the DB using
 	the service name. If you prefer host networking or a different DSN set
 	`BUS_DB_DSN`, `TRAIN_DB_DSN` and `WALK_DB_DSN` in the environment (or
 	override them in your compose file).
@@ -198,9 +197,9 @@ cd transport-backend
 ./scripts/build_osrm.sh --sample
 
 # from the repo root: bring up Postgres, backend, and OSRM
-docker compose -f docker-compose.postgres.yml up --build
+docker compose -f docker-compose.yml up --build
 ```
 
 When OSRM is running the backend will be configured (by default) with
-`OSRM_URL=http://scc200-osrm:5012` so it addresses the local OSRM service by
+`OSRM_URL=http://transport-osrm:5012` so it addresses the local OSRM service by
 container name.

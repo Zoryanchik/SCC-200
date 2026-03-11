@@ -9,7 +9,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 
 IMAGE=transport-backend:local
-CONTAINER=transport-backend-local
+CONTAINER=transport-backend-edillocnon
 CACHE_DIR="$HERE/cache"
 
 USE_SHELL=0
@@ -47,13 +47,13 @@ echo "Using container runtime: $RUNTIME"
 
 # Delegate container build/start to the helper which handles SELinux labels
 # Default network for backend to join so it can reach the OSRM container by
-# name. This matches the network used by run_osrm.sh (scc200-net) unless
+# name. This matches the network used by run_osrm.sh (scc200-net-edillocnon) unless
 # overridden by the user via NETWORK_NAME.
-NETWORK_NAME="${NETWORK_NAME:-scc200-net}"
+NETWORK_NAME="${NETWORK_NAME:-scc200-net-edillocnon}"
 # If OSRM_URL isn't set in the environment, point it to the named container
 # so the backend inside the container can reach OSRM when both are on the
 # same user network.
-export OSRM_URL="${OSRM_URL:-http://scc200-osrm:5012}"
+export OSRM_URL="${OSRM_URL:-http://transport-osrm-edillocnon:5012}"
 export NETWORK_NAME
 
 "$HERE/start_container.sh"

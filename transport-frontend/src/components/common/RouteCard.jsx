@@ -88,56 +88,64 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
       {/* Header (fixed) */}
       <Stack spacing={1.5} sx={{ flex: '0 0 auto' }}>
             <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-            <Stack spacing={0.5}>
-              {/* Small label above the duration number */}
-              <Typography
-                variant="caption"
-                sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mb: 0.25 })}
-              >
-                Duration:
-              </Typography>
-              <Typography
-                fontWeight={700}
-                sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}
-              >
-                {route.duration}
-              </Typography>
-              {/* Arrival caption and computed arrival time (if available) */}
-              {typeof route?.initialDepartureSecs === 'number' && Number.isFinite(route.initialDepartureSecs) && Number.isFinite(route.totalSeconds) && (
-                (() => {
-                  const arr = Math.floor(route.initialDepartureSecs + route.totalSeconds);
-                  const secsOfDay = ((arr % 86400) + 86400) % 86400; // normalize
-                  const hh = Math.floor(secsOfDay / 3600).toString().padStart(2, '0');
-                  const mm = Math.floor((secsOfDay % 3600) / 60).toString().padStart(2, '0');
-                  const arrivalStr = `${hh}:${mm}`;
-                  return (
-                    <>
-                      <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
-                        Arrives at:
-                      </Typography>
-                      <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
-                        {arrivalStr}
-                      </Typography>
-                    </>
-                  );
-                })()
-              )}
-                <Typography
-                  variant="caption"
-                  sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
-                >
-                {route.transfers === 0 ? 'Direct' : `${route.transfers || 0} transfer${(route.transfers || 0) !== 1 ? 's' : ''}`}
-              </Typography>
-              {totalWalkMinutes > 0 && (
+              {/* Left column: arrival + duration */}
+              <Box sx={{ flex: 1 }}>
+                <Stack spacing={0.5}>
+                  {typeof route?.initialDepartureSecs === 'number' && Number.isFinite(route.initialDepartureSecs) && Number.isFinite(route.totalSeconds) && (
+                    (() => {
+                      const arr = Math.floor(route.initialDepartureSecs + route.totalSeconds);
+                      const secsOfDay = ((arr % 86400) + 86400) % 86400; // normalize
+                      const hh = Math.floor(secsOfDay / 3600).toString().padStart(2, '0');
+                      const mm = Math.floor((secsOfDay % 3600) / 60).toString().padStart(2, '0');
+                      const arrivalStr = `${hh}:${mm}`;
+                      return (
+                        <>
+                          <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
+                            Arrival
+                          </Typography>
+                          <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
+                            {arrivalStr}
+                          </Typography>
+                        </>
+                      );
+                    })()
+                  )}
+
                   <Typography
                     variant="caption"
-                    sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
+                    sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mb: 0.25 })}
                   >
-                    Walk time: {totalWalkMinutes} min
+                    Duration
                   </Typography>
-              )}
-            </Stack>
-            <Stack alignItems="flex-end" spacing={0.5}>
+                  <Typography
+                    fontWeight={700}
+                    sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}
+                  >
+                    {route.duration}
+                  </Typography>
+                </Stack>
+              </Box>
+
+              {/* Middle column: transfers and walk time (styled like arrival/duration) */}
+              <Box sx={{ flex: 1, display: 'flex', justifyContent: 'flex-start', ml: '-6px' }}>
+                <Stack spacing={0.5} alignItems="flex-start">
+                  <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
+                    Transfer
+                  </Typography>
+                  <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
+                    {route.transfers == null ? '—' : (route.transfers === 0 ? 'None' : String(route.transfers))}
+                  </Typography>
+
+                  <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
+                    Walk
+                  </Typography>
+                  <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
+                    {totalWalkMinutes > 0 ? `${totalWalkMinutes} min` : '0 min'}
+                  </Typography>
+                </Stack>
+              </Box>
+
+              <Stack alignItems="flex-end" spacing={0.5}>
               {route.price && (
                 <>
                   <Typography

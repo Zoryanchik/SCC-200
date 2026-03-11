@@ -5,14 +5,22 @@ services:
     build:
       context: ./transport-backend
       dockerfile: Dockerfile
+    container_name: transport-backend-edillocnon
     ports:
       - "5050:5050"
     environment:
-      - PYTHONUNBUFFERED=1
+      PYTHONUNBUFFERED: "1"
+      BUS_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
+      TRAIN_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
+      WALK_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
+      OSRM_URL: "http://transport-osrm-edillocnon:5012"
     volumes:
-      - ./transport-backend:/app:delegated
+      - ./transport-backend/cache:/app/cache
     depends_on:
       - osrm
+    networks:
+      - scc200-net-edillocnon
+
 
   frontend:
     build:
@@ -25,6 +33,8 @@ services:
     volumes:
       - ./transport-frontend:/app:delegated
     command: ["sh", "-c", "npm run dev -- --host 0.0.0.0 --port 5075"]
+    networks:
+      - scc200-net-edillocnon
 
   osrm:
     image: osrm/osrm-backend:5.26
@@ -33,3 +43,33 @@ services:
     restart: unless-stopped
     ports:
       - "5012:5012"
+    container_name: transport-osrm-edillocnon
+    environment:
+      OSRM_DATA_PATH: /data/nw-england.osrm
+    volumes:
+      - ./osrm/data:/data
+    command: ["sh", "-c", "osrm-routed --algorithm mld -p 5012 ${OSRM_DATA_PATH}"]
+    networks:
+      - scc200-net-edillocnon
+  
+  postgres:
+    image: postgres:15
+    container_name: transport-postgres-edillocnon
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpass
+      POSTGRES_DB: transport
+    ports:
+      - "127.0.0.1:5011:5011"
+    volumes:
+      - transport-postgres-data:/var/lib/postgresql/data
+    command: ["postgres", "-c", "port=5011"]
+    networks:
+      - scc200-net-edillocnon
+
+networks:
+  scc200-net-edillocnon:
+    driver: bridge
+
+volumes:
+  transport-postgres-data:

@@ -5,13 +5,13 @@ set -euo pipefail
 # Usage: ./run_pgsql.sh
 # Environment overrides:
 #   ENGINE (docker|podman)  - default: podman
-#   CONTAINER_NAME           - default: transport-postgres-local
+#   CONTAINER_NAME           - default: transport-postgres
 #   IMAGE                    - default: postgres:15
 #   HOST_PORT                - default: 5011
 #   PG_USER / PG_PASS / PG_DB - defaults provided below
 
 ENGINE=${ENGINE:-podman}
-CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-local}
+CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-edillocnon}
 IMAGE=${IMAGE:-docker.io/library/postgres:15}
 HOST_PORT=${HOST_PORT:-5011}
 CONTAINER_PORT=${CONTAINER_PORT:-5011}
@@ -57,9 +57,9 @@ else
     # the postgres entrypoint to override the default 5432.
     # Attach the Postgres container to the user network so other containers
     # (for example the transport-backend container) can reach it by name.
-    # The default network name mirrors the backend's default (scc200-net) and
+    # The default network name mirrors the backend's default (scc200-net-edillocnon) and
     # can be overridden with NETWORK_NAME in the environment.
-    NETWORK_NAME="${NETWORK_NAME:-scc200-net}"
+    NETWORK_NAME="${NETWORK_NAME:-scc200-net-edillocnon}"
     if ! ${ENGINE} network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
         echo "Creating network: ${NETWORK_NAME}"
         ${ENGINE} network create "${NETWORK_NAME}" || true

@@ -14,7 +14,7 @@ PGPORT=${PGPORT:-5011}
 PGUSER=${PGUSER:-pguser}
 PGPASS=${PGPASS:-pgpass}
 PGDB=${PGDB:-transport}
-CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-local}
+CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-edillocnon}
 BACKUP_DIR="$(dirname "$0")/../backups"
 
 DO_BACKUP=0

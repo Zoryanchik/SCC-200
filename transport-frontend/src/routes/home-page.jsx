@@ -1833,6 +1833,7 @@ export default function HomePage() {
             onMoveEnd={handleMoveEnd}
             sideContent={suggestedRoutesPanel}
             showSideOverlay={showSuggested}
+            showRouteLines={typeof selectedRouteIdx === 'number' && showSuggested}
             journeyRoute={journeyRoute}
           />
         </Suspense>

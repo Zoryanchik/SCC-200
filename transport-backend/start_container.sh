@@ -9,7 +9,7 @@ cd "$HERE"
 
 
 IMAGE=transport-backend:local
-CONTAINER=transport-backend-local
+CONTAINER=transport-backend-edillocnon
 CACHE_DIR="$HERE/cache"
 
 # Default memory to allocate to the backend container. Can be overridden
@@ -40,7 +40,7 @@ PG_USER="${PG_USER:-pguser}"
 PG_PASS="${PG_PASS:-pgpass}"
 PG_DB="${PG_DB:-transport}"
 PG_PORT="${PG_PORT:-5011}"
-PG_HOST="${PG_HOST:-transport-postgres-local}"
+PG_HOST="${PG_HOST:-transport-postgres-edillocnon}"
 
 # Detect container runtime: prefer podman, fall back to docker
 if command -v podman >/dev/null 2>&1; then
@@ -90,9 +90,9 @@ fi
 
 # Network configuration. By default we place the backend on the same
 # user network used by the OSRM container so containers can reach each
-# other by name (default: scc200-net). Override by setting NETWORK_NAME
+# other by name (default: scc200-net-edillocnon). Override by setting NETWORK_NAME
 # in the environment before calling this script.
-NETWORK_NAME="${NETWORK_NAME:-scc200-net}"
+NETWORK_NAME="${NETWORK_NAME:-scc200-net-edillocnon}"
 
 # Allow override to run container with host network (useful on Linux when
 # you want the container to access host services directly). Set USE_HOST_NETWORK=1
@@ -112,7 +112,7 @@ if [ "${USE_HOST_NETWORK:-0}" = "1" ]; then
   # When using host networking we don't publish ports
 else
   # Ensure the network exists and attach the container to it so other
-  # containers (for example scc200-osrm) can be reached by name.
+  # containers (for example transport-osrm) can be reached by name.
   if ! $RUNTIME network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
     echo "Creating network: $NETWORK_NAME"
     $RUNTIME network create "$NETWORK_NAME" || true
@@ -129,12 +129,12 @@ else
   # use the container hostname; otherwise use 127.0.0.1 so host-local Postgres
   # remains reachable.
   # Prefer detecting the Postgres container by name (works across runtimes).
-  if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'transport-postgres-local'; then
+  if $RUNTIME ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'transport-postgres-edillocnon'; then
     # Try to resolve the Postgres container's IP on the user network. Some
     # container runtimes (or macOS host setups) do not provide DNS name
     # resolution by container name inside containers, so using the container
     # IP is more reliable for connectivity.
-    POSTGRES_IP=$($RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' transport-postgres-local 2>/dev/null || true)
+  POSTGRES_IP=$($RUNTIME inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' transport-postgres-edillocnon 2>/dev/null || true)
     if [ -n "${POSTGRES_IP}" ]; then
       TARGET_HOST="$POSTGRES_IP"
       echo "Found Postgres container IP ${POSTGRES_IP} — using host: $TARGET_HOST"

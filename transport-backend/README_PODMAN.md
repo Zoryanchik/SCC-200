@@ -12,14 +12,15 @@ podman build -t transport-backend:local .
 Run (foreground):
 
 ```bash
-podman run --rm -p 5050:5050 --name transport-backend transport-backend:local
+# run with the renamed container name
+podman run --rm -p 5050:5050 --name transport-backend-edillocnon transport-backend:local
 # visit http://localhost:5050/health
 ```
 
 Run (detached) with persistent cache directory:
 
 ```bash
-podman run -d --name transport-backend -p 5050:5050 -v "$(pwd)/cache":/app/cache transport-backend:local
+podman run -d --name transport-backend-edillocnon -p 5050:5050 -v "$(pwd)/cache":/app/cache transport-backend:local
 ```
 
 Mac users: start the podman VM once if using Podman Machine:
