@@ -98,9 +98,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               </Typography>
               <Typography
                 fontWeight={700}
-                sx={() => ({
-                  color: '#ffffff',
-                })}
+                sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}
               >
                 {route.duration}
               </Typography>
@@ -117,7 +115,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                       <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
                         Arrives at:
                       </Typography>
-                      <Typography fontWeight={700} sx={() => ({ color: '#ffffff' })}>
+                      <Typography fontWeight={700} sx={() => ({ color: isSelected ? '#00bcd4' : '#ffffff' })}>
                         {arrivalStr}
                       </Typography>
                     </>
