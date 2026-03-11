@@ -298,10 +298,6 @@ const JourneyRouteLayer = ({ segments }) => {
 	});
 
 	useEffect(() => {
-		// DEV-LOG: inspect the incoming segments prop to verify coords shape (after normalization/densify)
-		// eslint-disable-next-line no-console
-		console.debug('[DEBUG] JourneyRouteLayer display segments:', Array.isArray(displaySegments) ? displaySegments.map(s => ({ id: s.id, coordsLen: (s.coords || []).length, key: s._normKey, mode: s.mode })) : displaySegments);
-
 		if (!displaySegments || displaySegments.length === 0) return;
 		const allCoords = displaySegments.flatMap((s) => s.coords || []);
 		if (allCoords.length < 2) return;

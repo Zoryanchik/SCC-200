@@ -439,6 +439,7 @@ def route_geometry(logged_journey_id: str):
 
     # 2) For each leg, try to determine stop ATCO sequence using external journey_id
     coords_accum = []
+    per_leg_coords = []  # per-leg coordinate arrays for precise frontend splitting
     osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
     walking_coords = None
     if globals().get('_base_cache'):
@@ -501,6 +502,9 @@ def route_geometry(logged_journey_id: str):
         # 6) Append leg_coords (if any) to accumulator
         if leg_coords:
             coords_accum.extend(leg_coords)
+            per_leg_coords.append(leg_coords)
+        else:
+            per_leg_coords.append(None)
 
     if not coords_accum:
         # Final fallback: try to construct an OSRM route from the
@@ -606,7 +610,11 @@ def route_geometry(logged_journey_id: str):
         except Exception:
             pass
         return {"error": "no_geometry_available"}
-    return {"coords": coords_accum, "source": "osrm"}
+    # Include per_leg_coords so the frontend can map geometry to journey
+    # plan legs without fragile distance-based splitting.  Only include
+    # non-empty per-leg arrays.
+    plc = [lc for lc in per_leg_coords if lc] if per_leg_coords else []
+    return {"coords": coords_accum, "source": "osrm", "per_leg_coords": plc}
 
 
 # --- Geometry assembly endpoint helpers -------------------------------
@@ -712,6 +720,36 @@ def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float
         return {"error": "no_geometry_available"}
     except Exception:
         return {"error": "failed"}
+
+
+@app.get("/route/leg-geometry")
+def route_leg_geometry(from_lat: float, from_lon: float,
+                       to_lat: float, to_lon: float,
+                       mode: str = "driving"):
+    """Return road-following OSRM geometry for a single journey leg.
+
+    Query params:
+      from_lat, from_lon – start point
+      to_lat, to_lon     – end point
+      mode               – 'walking' | 'bus' | 'train' | 'driving' (default)
+
+    Walking legs use the OSRM *foot* profile; all others use *driving*.
+    Response: {"coords": [[lat, lon], ...], "source": "osrm"} or {"error": "..."}
+    """
+    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+    profile = 'foot' if mode == 'walking' else 'driving'
+    try:
+        coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
+        coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
+                                                 profile=profile)
+        if coords and len(coords) >= 2:
+            return {"coords": coords, "source": "osrm"}
+        # Fall back to a straight line between the two points
+        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
+                "source": "linear"}
+    except Exception:
+        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
+                "source": "linear"}
 
 
 def _fetch_route_tracks(route_id: str):
