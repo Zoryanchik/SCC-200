@@ -250,6 +250,12 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
         <Stack spacing={1}>
           {route.steps?.map((step, idx) => (
             <Box key={idx}>
+              {/* whether this step currently has a real-time delay/expected time */}
+              {(() => {
+                // keep a small inline helper in scope for styling decisions
+                // (we can't declare `const` at top-level JSX easily)
+                return null;
+              })()}
               {/* Show starting stop for the first step */}
               {idx === 0 && step.from && (
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
@@ -273,9 +279,23 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                   </Typography>
 
                   <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
-                    <Typography variant="body2" fontWeight={700} sx={(theme) => ({ color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), fontSize: '1.05rem', lineHeight: 1 })}>
-                      {step.departure_time_with_offset ? step.departure_time_with_offset : ''}
-                    </Typography>
+                    {(() => {
+                      const isDelayed = step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset);
+                      return (
+                        <Typography
+                          variant="body2"
+                          fontWeight={700}
+                          sx={(theme) => ({
+                            color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                            fontSize: '1.05rem',
+                            lineHeight: 1,
+                            textDecoration: isDelayed && step.realtime_departure_time_with_offset ? 'line-through' : 'none',
+                          })}
+                        >
+                          {step.departure_time_with_offset ? step.departure_time_with_offset : ''}
+                        </Typography>
+                      );
+                    })()}
                   </Box>
                 </Box>
               )}
@@ -351,24 +371,29 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                           </Typography>
                       )}
                       {(step.departure_time_with_offset || step.arrival_time_with_offset) && (
-                        <Typography
-                          variant="caption"
-                          data-testid={`step-time-${idx}`}
-                          sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
-                          fontWeight={400}
-                        >
+                        (() => {
+                          const isDelayed = step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset);
+                          return (
+                            <Typography
+                              variant="caption"
+                              data-testid={`step-time-${idx}`}
+                              sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), textDecoration: isDelayed ? 'line-through' : 'none' })}
+                              fontWeight={400}
+                            >
               {step.departure_time_with_offset ? `Dep ${step.departure_time_with_offset}` : ''}
               {step.departure_time_with_offset && step.arrival_time_with_offset ? '  •  ' : ''}
               {step.arrival_time_with_offset ? `Arr ${step.arrival_time_with_offset}` : ''}
               {/* removed '(planned)' label per UX request */}
-                        </Typography>
+                            </Typography>
+                          );
+                        })()
                       )}
                     </>
                   )}
 
                   {/* Realtime / status indicators (kept below the times) */}
                   {step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset) && (
-                    <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.5 }}>
+                      <Typography variant="caption" fontWeight={700} color={step.delay_seconds > 0 ? "error.main" : "success.main"} data-testid={`step-realtime-${idx}`} sx={{ display: "block", mt: 0.5 }}>
                       {step.realtime_departure_time_with_offset ? `Dep ${step.realtime_departure_time_with_offset}` : ""}
                       {step.realtime_departure_time_with_offset && step.realtime_arrival_time_with_offset ? "  •  " : ""}
                       {step.realtime_arrival_time_with_offset ? `Arr ${step.realtime_arrival_time_with_offset}` : ""}
@@ -409,9 +434,23 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                     </Typography>
 
                     <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
-                      <Typography variant="body2" fontWeight={700} sx={(theme) => ({ color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), fontSize: '1.05rem', lineHeight: 1 })}>
-                        {step.arrival_time_with_offset ? step.arrival_time_with_offset : ''}
-                      </Typography>
+                      {(() => {
+                        const isDelayed = step.delay_seconds != null && step.delay_seconds !== 0 && (step.realtime_departure_time_with_offset || step.realtime_arrival_time_with_offset);
+                        return (
+                          <Typography
+                            variant="body2"
+                            fontWeight={700}
+                            sx={(theme) => ({
+                              color: isSelected ? '#00bcd4' : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                              fontSize: '1.05rem',
+                              lineHeight: 1,
+                              textDecoration: isDelayed && step.realtime_arrival_time_with_offset ? 'line-through' : 'none',
+                            })}
+                          >
+                            {step.arrival_time_with_offset ? step.arrival_time_with_offset : ''}
+                          </Typography>
+                        );
+                      })()}
                     </Box>
                   </Box>
                 ) : (

@@ -374,10 +374,20 @@ class BusLoader:
             rs_id = rs.attrib.get('id', '')
             waypoints = []
             for rl in rs.findall(f'{ns}RouteLink'):
+                # Mapping elements sometimes appear under Track/Mapping,
+                # sometimes directly under RouteLink, and some providers
+                # nest Location nodes in slightly different ways. Be
+                # tolerant: look for Track/Mapping first, then a direct
+                # Mapping child, and finally fall back to any Track node.
                 mapping = rl.find(f'{ns}Track/{ns}Mapping')
                 if mapping is None:
+                    mapping = rl.find(f'{ns}Mapping') or rl.find(f'{ns}Track')
+                if mapping is None:
                     continue
-                for loc in mapping.findall(f'{ns}Location'):
+                # Find Location nodes anywhere under the mapping/track
+                # element (handles both direct children and nested
+                # Translation wrappers).
+                for loc in mapping.findall(f'.//{ns}Location'):
                     # TXC files vary: some providers wrap coords in
                     # <Translation><Latitude> / <Longitude></Translation>
                     # while others place <Latitude> and <Longitude>
