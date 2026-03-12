@@ -4,7 +4,7 @@ import {
   createBrowserRouter,
   RouterProvider,
 } from "react-router-dom";
-import App from "./app";
+import App from "./App";
 import ErrorPage from './error-page';
 import AppLayout from './layout';
 import { AccessibilityProvider } from './contexts/AccessibilityContext';
