@@ -363,9 +363,9 @@ const fetchGeometryForLegs = async (legs) => {
 export default function HomePage() {
   const LABEL_DESCRIPTIONS = {
     'EA': 'Earliest Arrival',
-    'E·A': 'Earliest Arrival',
+    'E·ARR': 'Earliest Arrival',
     'ED': 'Earliest Departure',
-    'E·D': 'Earliest Departure',
+    'E·DEP': 'Earliest Departure',
     'FASTEST': 'Smallest Total Time',
     'ECO': 'Prefer Walking',
     'GREEDY': 'Least Transfers',
@@ -374,8 +374,8 @@ export default function HomePage() {
   };
   // Colour map used for label chips — keep in sync with the chip rendering
   const LABEL_COLORS = {
-    'E·A': '#FFF8E1',
-    'E·D': '#E0BBE4',
+    'E·ARR': '#FFF8E1',
+    'E·DEP': '#E0BBE4',
     'FASTEST': '#87CEEB',
     'ECO': '#C6F6D5',
     'GREEDY': '#FF7F50',
@@ -895,7 +895,7 @@ export default function HomePage() {
 
       // Desired display order (human-friendly)
       const routerOrder = [
-        { key: 'main', label: 'E·A' },
+        { key: 'main', label: 'E·ARR' },
         { key: 'eco', label: 'Eco' },
         { key: 'cosy', label: 'COSY' },
         { key: 'lazy', label: 'LAZY' },
@@ -996,10 +996,10 @@ export default function HomePage() {
 
       const options = Array.from(optionsMap.values());
 
-      // Add special labels:
-      // - "E·D": mark options with the earliest initial departure
-      // - "FASTEST": mark options with the smallest totalSeconds
-      // - "E·A": mark options with the earliest arrival
+  // Add special labels:
+  // - "E·DEP": mark options with the earliest initial departure
+  // - "FASTEST": mark options with the smallest totalSeconds
+  // - "E·ARR": mark options with the earliest arrival
       //
       // Helper: compute departure seconds (day-shift aware) from a source or card
       const getDepSecs = (o) => {
@@ -1045,7 +1045,7 @@ export default function HomePage() {
       };
 
       try {
-        // E·D: earliest departure
+          // E·DEP: earliest departure
         const withInit = options.map((o) => ({ opt: o, init: getDepSecs(o) }));
         const initVals = withInit.map((w) => w.init).filter((v) => Number.isFinite(v));
         if (initVals.length > 0) {
@@ -1053,7 +1053,7 @@ export default function HomePage() {
           const INIT_TOL = 10; // seconds tolerance for earliest-departure ties
           for (const w of withInit) {
             if (Number.isFinite(w.init) && Math.abs(w.init - minInit) <= INIT_TOL) {
-              if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
+              if (!w.opt.labels.includes('E·DEP')) w.opt.labels.unshift('E·DEP');
             }
           }
         }
@@ -1070,7 +1070,7 @@ export default function HomePage() {
           }
         }
 
-        // E·A: earliest arrival
+  // E·ARR: earliest arrival
         try {
           const withArr = options.map((o) => ({ opt: o, arr: getArrSecs(o) }));
           const arrVals = withArr.map((w) => w.arr).filter((v) => Number.isFinite(v));
@@ -1079,7 +1079,7 @@ export default function HomePage() {
             const EPS_A = 10; // seconds tolerance for ties
             for (const w of withArr) {
               if (Number.isFinite(w.arr) && Math.abs(w.arr - minArr) <= EPS_A) {
-                if (!w.opt.labels.includes('E·A')) w.opt.labels.unshift('E·A');
+                if (!w.opt.labels.includes('E·ARR')) w.opt.labels.unshift('E·ARR');
               }
             }
           }
@@ -1087,9 +1087,9 @@ export default function HomePage() {
             // ignore arrival computation failures
           }
       } catch (e) {
-        // don't block rendering on label computation failures
-        // eslint-disable-next-line no-console
-        console.warn('Failed to compute E·D/FASTEST labels', e);
+  // don't block rendering on label computation failures
+  // eslint-disable-next-line no-console
+  console.warn('Failed to compute E·DEP/FASTEST labels', e);
       }
 
       // If compare returned no routes for any router, fall back to a single
@@ -1104,18 +1104,18 @@ export default function HomePage() {
           const mainCard = journeyToRouteCard(mainJourney);
           if (mainCard) {
             // Build a single-option array compatible with the compare flow so
-            // label computation (E·D / FASTEST) runs consistently.
+            // label computation (E·DEP / FASTEST) runs consistently.
             const singleOpt = {
               id: 1,
               card: { ...mainCard, id: 1 },
               routeGeometries: attachEndpoints(mainJourney),
-              labels: ['E·A'],
-              label: 'E·A',
-              sources: { 'E·A': mainJourney },
+              labels: ['E·ARR'],
+              label: 'E·ARR',
+              sources: { 'E·ARR': mainJourney },
             };
 
             const optionsArr = [singleOpt];
-            // Compute E·D / FASTEST labels for this single option as well
+            // Compute E·DEP / FASTEST labels for this single option as well
             // (reuse helpers defined above if in scope, else inline)
             try {
               const withInit = optionsArr.map((o) => ({ opt: o, init: (() => {
@@ -1132,7 +1132,7 @@ export default function HomePage() {
                 const minInit = Math.min(...initVals);
                 for (const w of withInit) {
                   if (Number.isFinite(w.init) && Math.abs(w.init - minInit) <= 10) {
-                      if (!w.opt.labels.includes('E·D')) w.opt.labels.unshift('E·D');
+                      if (!w.opt.labels.includes('E·DEP')) w.opt.labels.unshift('E·DEP');
                     }
                 }
               }
@@ -1561,12 +1561,12 @@ export default function HomePage() {
                     {(() => {
                       // enforce requested display order and colours
                       const rawLabels = Array.isArray(opt.labels) ? opt.labels : [opt.label];
-                      const ORDER = ['E·A', 'E·D', 'FASTEST', 'ECO', 'GREEDY', 'COSY', 'LAZY'];
+                      const ORDER = ['E·ARR', 'E·DEP', 'FASTEST', 'ECO', 'GREEDY', 'COSY', 'LAZY'];
                       const orderKey = (s) => String(s || '').toUpperCase();
                       const ORDER_UP = ORDER.map((o) => o.toUpperCase());
                       const colorMap = {
-                        'E·A': '#FFF8E1', // light ivory
-                        'E·D': '#E0BBE4', // lilac
+                        'E·ARR': '#FFF8E1', // light ivory
+                        'E·DEP': '#E0BBE4', // lilac
                         'FASTEST': '#87CEEB', // sky blue
                         'ECO': '#C6F6D5', // mint (soft)
                         'GREEDY': '#FF7F50', // coral
