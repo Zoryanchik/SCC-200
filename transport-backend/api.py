@@ -1337,7 +1337,8 @@ async def search_stops(
             logger.warning("Stop DB lookup failed: %s", exc)
 
         try:
-            location_results = geocode_locations(q, limit)
+            # Geocoding is blocking (network + rate-limited); run in a thread
+            location_results = await asyncio.to_thread(geocode_locations, q, limit)
         except Exception as exc:
             logger.warning("Geocoding lookup failed: %s", exc)
             location_results = []
@@ -1348,7 +1349,7 @@ async def search_stops(
         # Street") where the default county bias would filter out results.
         if not (stop_results or location_results):
             try:
-                location_results = geocode_locations(q, limit, county=None)
+                location_results = await asyncio.to_thread(geocode_locations, q, limit, None)
             except Exception:
                 location_results = []
 
@@ -1395,7 +1396,7 @@ async def search_stops(
                 # Use display name or name as the geocode query, prefer including town if present
                 query_text = display or name
                 try:
-                    candidates = geocode_locations(query_text, 1)
+                    candidates = await asyncio.to_thread(geocode_locations, query_text, 1)
                     if candidates:
                         c = candidates[0]
                         stop['lat'] = c.get('lat')
@@ -3974,9 +3975,14 @@ async def journey_plan(request: JourneyPlanRequest):
                          else {"bus", "train"})
         start_seconds = seconds_since_midnight(time_str)
 
-        merged, router, walking = get_router_for_date(
-            date_str, start_time=start_seconds)
-        result = router.route(
+        # Run potentially-heavy router construction and routing in a thread
+        # so we don't block the ASGI event loop (keeps WebSocket/live updates responsive).
+        merged, router, walking = await asyncio.to_thread(
+            get_router_for_date, date_str, start_time=start_seconds
+        )
+        result = await asyncio.to_thread(
+            router.route,
+            # pass the same keyword args through to the threaded call
             n_transfer_limit=max_transfers,
             walking=walking,
             start_time=start_seconds,
@@ -4016,9 +4022,10 @@ async def compare_routers(request: JourneyPlanRequest):
                          else {"bus", "train"})
         start_seconds = seconds_since_midnight(time_str)
 
-        # Build / fetch merged data + main router + walking helper
-        merged, main_router, walking = get_router_for_date(
-            date_str, start_time=start_seconds)
+        # Build / fetch merged data + main router + walking helper in a thread
+        merged, main_router, walking = await asyncio.to_thread(
+            get_router_for_date, date_str, start_time=start_seconds
+        )
 
         # Lazily construct optional routers (eco, cosy, lazy, greedy).
         # optional routers: eco, cosy, lazy, greedy
@@ -4156,9 +4163,12 @@ async def get_route(request: RouteRequest):
         max_transfers = request.max_transfers
         allowed_modes = {request.mode} if request.mode in ("bus", "train") else {"bus", "train"}
         start_seconds = seconds_since_midnight(time_str)
-        merged, router, walking = get_router_for_date(
-            date_str, start_time=start_seconds)
-        result = router.route(
+        # Run router construction and routing in a thread to avoid blocking
+        merged, router, walking = await asyncio.to_thread(
+            get_router_for_date, date_str, start_time=start_seconds
+        )
+        result = await asyncio.to_thread(
+            router.route,
             n_transfer_limit=max_transfers,
             walking=walking,
             start_time=start_seconds,

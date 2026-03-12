@@ -36,7 +36,7 @@ class MergedData:
         when *atco_loader* is ``None``.
     """
 
-    def __init__(self, datasets, atco_loader=None, stop_name_fn=None):
+    def __init__(self, datasets, atco_loader=None, stop_name_fn=None, build_flatten=True):
         # Keep a reference for callers that need coord/name lookups later
         self.atco = atco_loader
 
@@ -65,6 +65,19 @@ class MergedData:
         # Store mappers per group for stop-code resolution later
         self._group_mappers = []   # [(stop_offset, stop_count, map_stops), ...]
 
+        # Local aliases to avoid repeated attribute lookups in hot loops
+        route_stops_local = self.route_stops
+        route_journeys_local = self.route_journeys
+        journey_times_local = self.journey_times
+        stop_to_routes_local = self.stop_to_routes
+        journey_to_route_local = self.journey_to_route
+        route_metadata_local = self.route_metadata
+        journey_metadata_local = self.journey_metadata
+        route_tracks_local = self.route_tracks
+        journey_mode_local = self._journey_mode
+        stop_mode_local = self._stop_mode
+        group_mappers_local = self._group_mappers
+
         for data, time_offset in datasets:
             if data is None:
                 data = _Empty()
@@ -80,53 +93,53 @@ class MergedData:
 
             # --- route_stops: remap stop ids ---
             for route in data.route_stops:
-                self.route_stops.append([sid + stop_offset for sid in route])
+                route_stops_local.append([sid + stop_offset for sid in route])
 
             # --- route_journeys: remap journey ids ---
             for rj in data.route_journeys:
-                self.route_journeys.append([jid + journey_offset for jid in rj])
+                route_journeys_local.append([jid + journey_offset for jid in rj])
 
             # --- journey_times: remap stop ids + shift times ---
             for jt in data.journey_times:
-                self.journey_times.append([
+                journey_times_local.append([
                     (sid + stop_offset, atime + time_offset, dtime + time_offset)
                     for sid, atime, dtime in jt
                 ])
 
             # --- stop_to_routes: remap route ids ---
             for routes_for_stop in data.stop_to_routes:
-                self.stop_to_routes.append([rid + route_offset for rid in routes_for_stop])
+                stop_to_routes_local.append([rid + route_offset for rid in routes_for_stop])
 
             # --- journey_to_route: remap route ids ---
             for r in data.journey_to_route:
-                self.journey_to_route.append(
+                journey_to_route_local.append(
                     (r + route_offset) if (r is not None and r >= 0) else -1
                 )
 
             # --- metadata (copy as-is) ---
-            self.route_metadata.extend(
+            route_metadata_local.extend(
                 getattr(data, "route_metadata", []) or [None] * n_routes
             )
-            self.journey_metadata.extend(
+            journey_metadata_local.extend(
                 getattr(data, "journey_metadata", []) or [None] * n_journeys
             )
 
             # --- route_tracks (copy as-is, no remapping needed) ---
-            self.route_tracks.extend(
+            route_tracks_local.extend(
                 getattr(data, "route_tracks", []) or [[] for _ in range(n_routes)]
             )
 
             # Record the transport mode for every journey in this group
-            self._journey_mode.extend([mode] * n_journeys)
+            journey_mode_local.extend([mode] * n_journeys)
 
             # Record the transport mode for each stop contributed by this
             # data group so the merged stop index space has an associated
             # mode value per stop (exactly like journey mode above).
-            self._stop_mode.extend([mode] * n_stops)
+            stop_mode_local.extend([mode] * n_stops)
 
             # Mapper bookkeeping
             mapper = getattr(data, "map_stops", None)
-            self._group_mappers.append((stop_offset, n_stops, mapper))
+            group_mappers_local.append((stop_offset, n_stops, mapper))
 
             # Advance offsets
             route_offset += n_routes
@@ -167,30 +180,59 @@ class MergedData:
             name = name_map.get(code) if code else None
             self.stop_metadata.append(name or code or "")
 
+        # --- build flattened route->journey mapping for faster iteration ---
+        # Many downstream algorithms iterate all journey ids for a route.
+        # Creating a flat array with per-route offsets avoids nested list
+        # overhead and can be faster in hot loops. This step is optional
+        # for benchmarking (controlled by *build_flatten*).
+        if build_flatten:
+            flat = []
+            offsets = [0]
+            for r in route_journeys_local:
+                flat.extend(r)
+                offsets.append(len(flat))
+            self._flat_route_journeys = flat
+            self._route_journey_offsets = offsets
+        else:
+            # Provide empty structures when disabled so callers can still
+            # access attributes without conditional checks.
+            self._flat_route_journeys = []
+            self._route_journey_offsets = [0]
+
         # --- precompute journey_stop_index ----------------------------
         self.journey_stop_index = []
-        for jt in self.journey_times:
+        jsi_append = self.journey_stop_index.append
+        for jt in journey_times_local:
             idx = {}
-            for pos, (sid, _a, _d) in enumerate(jt):
+            # local reference for speed
+            idx_set = idx.__setitem__
+            for pos, triplet in enumerate(jt):
+                sid = triplet[0]
                 if sid not in idx:
-                    idx[sid] = pos
-            self.journey_stop_index.append(idx)
+                    idx_set(sid, pos)
+            jsi_append(idx)
 
         # --- precompute route_stop_departures -------------------------
+        # --- precompute route_stop_departures -------------------------
+        from collections import defaultdict
         self.route_stop_departures = []
-        for _r_idx, journey_ids in enumerate(self.route_journeys):
-            stop_map = {}
+        rsd_append = self.route_stop_departures.append
+        jsi_local = self.journey_stop_index
+        jt_local = journey_times_local
+        for _r_idx, journey_ids in enumerate(route_journeys_local):
+            stop_map = defaultdict(list)
             for j_id in journey_ids:
-                if j_id >= len(self.journey_times):
+                if j_id >= len(jt_local):
                     continue
-                jt = self.journey_times[j_id]
-                jsi = self.journey_stop_index[j_id]
+                jt = jt_local[j_id]
+                jsi = jsi_local[j_id]
                 for sid, pos in jsi.items():
                     dep_time = jt[pos][2]
-                    stop_map.setdefault(sid, []).append((dep_time, j_id))
-            for s in stop_map:
-                stop_map[s].sort()
-            self.route_stop_departures.append(stop_map)
+                    stop_map[sid].append((dep_time, j_id))
+            # sort departure lists
+            for s, lst in stop_map.items():
+                lst.sort()
+            rsd_append(dict(stop_map))
 
         # In-memory store for logged journeys (populated by router)
         # Keyed by a generated id (string) -> dict with journey details
