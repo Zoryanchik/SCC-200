@@ -14,6 +14,7 @@ import zipfile
 from bus_data import BusData
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # Use lxml for faster XML parsing (~2-3x vs stdlib ElementTree)
 try:
@@ -1270,13 +1271,17 @@ class BusLoader:
 
         conn = self._connect(self.db_path)
         cur = conn.cursor()
+        t0 = time.perf_counter()
 
         # 1. Load serviced org working-day ranges
+        t1 = time.perf_counter()
         service_ranges = {}   # service_code -> [(start, end), ...]
         for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_serviced_org_working_days"):
             service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
+    # timing log removed
 
         # 1b. Load service operating periods (coarse outer boundary)
+        t1b = time.perf_counter()
         svc_periods = {}  # service_code -> (start_date | None, end_date | None)
         for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
             try:
@@ -1285,22 +1290,28 @@ class BusLoader:
             except ValueError:
                 sp_s, sp_e = None, None
             svc_periods[svc] = (sp_s, sp_e)
+    # timing log removed
 
         # 1c. Hard ceiling for open-ended services: use the latest
         #     explicitly-defined end date anywhere in the DB.
+        t1c = time.perf_counter()
         row = cur.execute(
             "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
         ).fetchone()
         max_end_str = row[0] if row and row[0] else None
         hard_ceiling = _date.fromisoformat(max_end_str) if max_end_str else None
+    # timing log removed
 
         # 2. Determine which journeys operate on this date
+        t2 = time.perf_counter()
         valid_journeys = set()
         cur.execute(
             "SELECT journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working "
             "FROM bus_journey_operating_profile"
         )
-        for j_id, svc_code, dow_mask, op_start, op_end, org_ref, org_working in cur.fetchall():
+        rows = cur.fetchall()
+    # timing log removed
+        for j_id, svc_code, dow_mask, op_start, op_end, org_ref, org_working in rows:
             # a) Date range check — journey-level, with service-period fallback
             try:
                 s = _date.fromisoformat(op_start) if op_start else None
@@ -1338,105 +1349,173 @@ class BusLoader:
 
             valid_journeys.add(j_id)
 
+
         conn.close()
+    # timing log removed
 
         if not valid_journeys:
             # Return an empty BusData
             return BusData(num_routes=0, num_journeys=0, num_stops=0)
 
         # 3. Build BusData filtering to valid_journeys only
+        t3_start = time.perf_counter()
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
         # Use temp table for valid journey IDs - much faster than IN(...) with thousands of values
+        t3a = time.perf_counter()
         cur.execute("CREATE TEMP TABLE _valid_journeys (journey_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_journeys (journey_id) FROM STDIN") as copy:
             for jid in valid_journeys:
                 copy.write_row((jid,))
+    # timing log removed
 
         # Figure out which routes are still needed
+        t3b = time.perf_counter()
         cur.execute(
             "SELECT DISTINCT route_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
         )
         valid_routes = {r[0] for r in cur.fetchall()}
+    # timing log removed
 
         # Create temp table for valid routes too
+        t3c = time.perf_counter()
         cur.execute("CREATE TEMP TABLE _valid_routes (route_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_routes (route_id) FROM STDIN") as copy:
             for rid in valid_routes:
                 copy.write_row((rid,))
+    # timing log removed
 
         # Count for sizing
         num_routes = len(valid_routes)
         num_journeys = len(valid_journeys)
+        t3d = time.perf_counter()
         cur.execute("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
         num_stops = cur.fetchone()[0] or 0
+    # timing log removed
 
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
 
         # 3a. route_stops — only routes that have valid journeys (use JOIN)
+        # Inline mapping to avoid repeated lookups inside BusData.add_route_stop
+        t3a2 = time.perf_counter()
         cur.execute(
             "SELECT rs.route_id, rs.atco_code FROM bus_route_stops rs "
             "JOIN _valid_routes vr ON rs.route_id = vr.route_id "
             "ORDER BY rs.route_id, rs.stop_order"
         )
         current_route = None
-        stops_buf = []
-        for route_id, atco_code in cur.fetchall():
+        rows = cur.fetchall()
+        # Local refs for speed
+        map_stops_get = bd.map_stops.get_int
+        ensure_stop = bd._ensure_stop_capacity
+        map_routes_get = bd.map_routes.get_int
+        ensure_route = bd._ensure_route_capacity
+        for route_id, atco_code in rows:
             if route_id != current_route:
                 if current_route is not None:
-                    bd.add_route_stop(current_route, stops_buf)
+                    # previous route finished
+                    bd.route_stops[r_int] = stops_buf
                 current_route = route_id
+                # map route id once
+                r_int = map_routes_get(route_id)
+                ensure_route(r_int)
                 stops_buf = []
-            stops_buf.append(atco_code)
+            s_int = map_stops_get(atco_code)
+            ensure_stop(s_int)
+            stops_buf.append(s_int)
+            # update reverse mapping: add route to stop list (no membership test — each route seen once)
+            bd.stop_to_routes[s_int].append(r_int)
         if current_route is not None:
-            bd.add_route_stop(current_route, stops_buf)
+            bd.route_stops[r_int] = stops_buf
+    # timing log removed
 
         # 3b. journey_routes — only valid journeys (use JOIN)
+        # Inline mapping to avoid repeated mapping calls in BusData.add_route_journeys
+        t3b2 = time.perf_counter()
         cur.execute(
             "SELECT jr.route_id, jr.journey_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id "
             "ORDER BY jr.route_id"
         )
         current_route = None
+        rows = cur.fetchall()
+        map_journeys_get = bd.map_journeys.get_int
+        ensure_journey = bd._ensure_journey_capacity
+        map_routes_get = bd.map_routes.get_int
+        ensure_route = bd._ensure_route_capacity
         journeys_buf = []
-        for route_id, journey_id in cur.fetchall():
+        for route_id, journey_id in rows:
             if route_id != current_route:
                 if current_route is not None:
-                    bd.add_route_journeys(current_route, journeys_buf)
+                    bd.route_journeys[r_int] = journeys_buf
                 current_route = route_id
+                r_int = map_routes_get(route_id)
+                ensure_route(r_int)
                 journeys_buf = []
-            journeys_buf.append(journey_id)
+            j_int = map_journeys_get(journey_id)
+            if j_int is None:
+                j_int = map_journeys_get(journey_id) or map_journeys_get(journey_id)
+            j_int = map_journeys_get(journey_id) if j_int is None else j_int
+            # Ensure journey capacity and set reverse mapping
+            ensure_journey(j_int)
+            bd.journey_to_route[j_int] = r_int
+            journeys_buf.append(j_int)
         if current_route is not None:
-            bd.add_route_journeys(current_route, journeys_buf)
+            bd.route_journeys[r_int] = journeys_buf
+    # timing log removed
 
         # 3c. journey_times — only valid journeys (use JOIN)
+        # Optimize: map ATCO codes to ints here and populate bd.journey_times
+        # directly to avoid repeated mapping inside BusData.add_journey_times.
+        t3c2 = time.perf_counter()
         cur.execute(
             "SELECT jt.journey_id, jt.atco_code, jt.arrival_time FROM bus_journey_times jt "
             "JOIN _valid_journeys vj ON jt.journey_id = vj.journey_id "
             "ORDER BY jt.journey_id, jt.arrival_time"
         )
+        rows = cur.fetchall()
+        # Local references for speed
+        map_stops_get = bd.map_stops.get_int
+        ensure_stop = bd._ensure_stop_capacity
+        map_journeys_code_to_int = bd.map_journeys.code_to_int.get
+        map_journeys_get = bd.map_journeys.get_int
+        ensure_journey = bd._ensure_journey_capacity
+
         current_journey = None
-        times_buf = []
-        for journey_id, atco_code, arrival_time in cur.fetchall():
+        mapped_buf = []
+        j_int = None
+        for journey_id, atco_code, arrival_time in rows:
             if journey_id != current_journey:
                 if current_journey is not None:
-                    bd.add_journey_times(current_journey, times_buf)
+                    # store the completed journey times list
+                    bd.journey_times[j_int] = mapped_buf
                 current_journey = journey_id
-                times_buf = []
-            times_buf.append((atco_code, arrival_time))
+                mapped_buf = []
+                # prefer existing mapping to avoid reassigning ints
+                j_int = map_journeys_code_to_int(journey_id)
+                if j_int is None:
+                    j_int = map_journeys_get(journey_id)
+                ensure_journey(j_int)
+            # map stop code once and ensure capacity
+            s_int = map_stops_get(atco_code)
+            ensure_stop(s_int)
+            mapped_buf.append((s_int, arrival_time, arrival_time))
         if current_journey is not None:
-            bd.add_journey_times(current_journey, times_buf)
+            bd.journey_times[j_int] = mapped_buf
+    # timing log removed
 
         # 3d. metadata (use JOIN)
+        t3d2 = time.perf_counter()
         cur.execute(
             "SELECT jr.journey_id, jr.route_id, jr.line_name, jr.destination_display "
             "FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
         )
         route_line_names = {}
-        for journey_id, route_id, line_name, destination_display in cur.fetchall():
+        rows = cur.fetchall()
+        for journey_id, route_id, line_name, destination_display in rows:
             j_int = bd.map_journeys.code_to_int.get(journey_id)
             if j_int is not None:
                 bd.journey_metadata[j_int] = {
@@ -1455,9 +1534,11 @@ class BusLoader:
                     "route_id":  route_id,
                     "line_name": line_name,
                 }
+    # timing log removed
 
         # 3e. route tracks — only routes that have valid journeys
         try:
+            t3e2 = time.perf_counter()
             cur.execute(
                 "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_tracks rt "
                 "JOIN _valid_routes vr ON rt.route_id = vr.route_id "
@@ -1465,19 +1546,26 @@ class BusLoader:
             )
             current_route = None
             track_buf = []
-            for route_id, lat, lon in cur.fetchall():
+            rows = cur.fetchall()
+            map_routes_get = bd.map_routes.get_int
+            ensure_route = bd._ensure_route_capacity
+            for route_id, lat, lon in rows:
                 if route_id != current_route:
                     if current_route is not None:
-                        bd.add_route_track(current_route, track_buf)
+                        bd.route_tracks[r_int] = track_buf
                     current_route = route_id
+                    r_int = map_routes_get(route_id)
+                    ensure_route(r_int)
                     track_buf = []
                 track_buf.append((lat, lon))
             if current_route is not None:
-                bd.add_route_track(current_route, track_buf)
+                bd.route_tracks[r_int] = track_buf
+            # timing log removed
         except Exception:
             pass  # table may not exist in older DBs
 
         conn.commit()  # commit to drop temp tables
+    # timing log removed
         conn.close()
         return bd
 
