@@ -7,6 +7,7 @@ Updated: 2026-03-05
 ## Open Tasks
 
 ## High Priority
+- [ ] use Issue in github
 - [x] Implement frontend for routing (journey results display)
 - [x] Auto input user location as start point
 - [x] Allow arbitrary start date-time input in fronttend
