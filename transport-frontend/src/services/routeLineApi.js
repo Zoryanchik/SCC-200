@@ -118,6 +118,67 @@ export async function fetchRouteLineWithFallback(line) {
 }
 
 /**
+ * Fetch route line data but reject on network errors or non-OK HTTP statuses.
+ * This variant does NOT fall back to mock data — callers can use this when
+ * they need to treat failures (including timeouts) as errors.
+ *
+ * @param {string} line
+ * @param {object} [opts] - optional settings: { timeoutMs: number, signal: AbortSignal }
+ */
+export async function fetchRouteLineNoFallback(line, opts = {}) {
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 5000;
+  const controller = new AbortController();
+  const signal = opts.signal || controller.signal;
+
+  // if the caller didn't provide a signal, create an internal timeout
+  let timeout = null;
+  if (!opts.signal) {
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/routes/line/${encodeURIComponent(line)}`, { signal });
+    if (timeout) clearTimeout(timeout);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (timeout) clearTimeout(timeout);
+    throw err;
+  }
+}
+
+/**
+ * Fetch a short label/metadata for a route. This calls the backend's
+ * `/routes/label/:line` endpoint and throws on failure or timeout.
+ *
+ * @param {string} line
+ * @param {object} [opts] - optional settings: { timeoutMs: number, signal: AbortSignal }
+ */
+export async function fetchRouteLabel(line, opts = {}) {
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 5000;
+  const controller = new AbortController();
+  const signal = opts.signal || controller.signal;
+
+  let timeout = null;
+  if (!opts.signal) {
+    timeout = setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/routes/label/${encodeURIComponent(line)}`, { signal });
+    if (timeout) clearTimeout(timeout);
+    // Treat 404 as "no label available" (not a fatal error) so callers
+    // that only need geometry can proceed. Other HTTP errors remain fatal.
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (timeout) clearTimeout(timeout);
+    throw err;
+  }
+}
+
+/**
  * Convert an array of stop objects `{ lat, lon, … }` into
  * `[[lat, lon], …]` pairs that Leaflet Polyline understands.
  *

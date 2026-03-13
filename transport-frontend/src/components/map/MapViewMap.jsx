@@ -12,7 +12,7 @@ import React, { useEffect } from "react";
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
-import { fetchRouteLineWithFallback, stopsToLatLngs } from '../../services/routeLineApi';
+import { fetchRouteLineWithFallback, fetchRouteLineNoFallback, fetchRouteLabel, stopsToLatLngs } from '../../services/routeLineApi';
 import Grid from "@mui/material/Grid";
 import { useAccessibility } from "../../contexts/AccessibilityContext";
 
@@ -748,6 +748,51 @@ const makeTrainMarker = marker => {
 	})}</>
 }
 
+// Adaptive popup that places the popup to left/right/top depending on
+// marker screen position so it remains visible without forcing a map pan/zoom.
+function AdaptivePopup({ marker, onClose, children }) {
+	const map = useMap();
+	const [opts, setOpts] = React.useState({
+		offset: [0, -12],
+		autoPan: true,
+		keepInView: true,
+		autoPanPadding: [28, 28],
+		maxWidth: 360,
+	});
+
+	React.useEffect(() => {
+		try {
+			if (!map || !marker || !marker.position) return;
+			const size = map.getSize();
+			const pt = map.latLngToContainerPoint(marker.position);
+			const edgeMargin = 120; // px from edge where we consider side placement
+			// Default: above marker with small pan
+			let next = { offset: [0, -12], autoPan: true, keepInView: true, autoPanPadding: [28, 28], maxWidth: 360 };
+			if (pt.x < edgeMargin) {
+				// Marker near left edge → show popup to the right of marker, avoid panning
+				next = { offset: [140, 0], autoPan: false, keepInView: false, maxWidth: 320 };
+			} else if (pt.x > (size.x - edgeMargin)) {
+				// Marker near right edge → show popup to the left
+				next = { offset: [-140, 0], autoPan: false, keepInView: false, maxWidth: 320 };
+			} else if (pt.y < edgeMargin) {
+				// Marker near top edge → show below marker
+				next = { offset: [0, 20], autoPan: false, keepInView: false, maxWidth: 320 };
+			}
+			setOpts(next);
+		} catch (e) {
+			// ignore
+		}
+	}, [map, marker && marker.position]);
+
+	return (
+		<Popup onClose={onClose} autoClose={false} closeButton={false} {...opts}>
+			<Box onClick={() => { try { onClose && onClose(); } catch (e) { /* ignore */ } }} sx={{ cursor: 'pointer' }}>
+				{children}
+			</Box>
+		</Popup>
+	);
+}
+
 export default function MapViewMap({
 	filteredMarkers,
 	openPopupId,
@@ -771,7 +816,23 @@ export default function MapViewMap({
 		showRouteLines = true,
 	/** Route geometry from journey planner. Array of {id, name, coords, color} */
 	journeyRoute = null,
+	// Optional companion callback: called with a stable signature string when
+// a popup is opened. Parent may use this to verify the popup still refers
+// to the same logical vehicle after data refreshes.
+	onOpenPopupSignature = null,
 }) {
+
+// Helper: create a compact signature for a marker that changes when the
+// logical vehicle changes. Prefer backend-provided identifiers (journey id,
+// vehicle ref) and fall back to route number + quantized position.
+const makeMarkerSignature = (m) => {
+	try {
+		const meta = m && m.meta ? m.meta : {};
+		return meta.logged_journey_id || meta.journey_id || meta.vehicle_journey_code || meta.vehicle_ref || meta.vehicleId || m.routeNumber || `${String(m.id)}|${Math.round((m.position?.[0]||0)*1e5)}|${Math.round((m.position?.[1]||0)*1e5)}`;
+	} catch (e) {
+		return String(m && m.id);
+	}
+};
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
@@ -779,6 +840,8 @@ export default function MapViewMap({
 
 	// Selected vehicle track overlay shown when user clicks a live vehicle marker.
 	const [selectedVehicleTrack, setSelectedVehicleTrack] = React.useState(null);
+	const [loadingPopupId, setLoadingPopupId] = React.useState(null);
+	const [loadingError, setLoadingError] = React.useState(null);
 
 	// Debugging: log when showRouteLines changes and when we clear routes
 	React.useEffect(() => {
@@ -803,6 +866,28 @@ export default function MapViewMap({
 			// ignore
 		}
 	}, [activeRoutes]);
+
+	// If the underlying markers change such that the currently-selected
+	// vehicle no longer exists (disappeared from the feed), hide its
+	// track and any open popup/loading indicator. This keeps the UI in
+	// sync with live data updates.
+	React.useEffect(() => {
+		try {
+			const ids = new Set((filteredMarkers || []).map((m) => m && m.id));
+			if (selectedVehicleTrack && !ids.has(selectedVehicleTrack.id)) {
+				setSelectedVehicleTrack(null);
+			}
+			if (openPopupId && !ids.has(openPopupId)) {
+				try { onClosePopup(); } catch (e) { /* ignore */ }
+			}
+			if (loadingPopupId && !ids.has(loadingPopupId)) {
+				setLoadingPopupId(null);
+				setLoadingError(null);
+			}
+		} catch (e) {
+			// ignore
+		}
+	}, [filteredMarkers, selectedVehicleTrack, openPopupId, loadingPopupId, onClosePopup]);
 	const { highContrast } = useAccessibility();
 
 	// Debug toggle mirrored from MapViewPage: when set in localStorage under
@@ -997,9 +1082,13 @@ export default function MapViewMap({
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
-								click: async () => {
-									// open popup immediately
-									try { onOpenPopup(marker.id); } catch (e) { /* ignore */ }
+								click: async (e) => {
+									// Prevent the click from bubbling to the map which
+									// would trigger MapClickClearHandler (clearing routes)
+									// and potential UI state changes that can make the
+									// marker disappear during selection.
+									try { e && e.originalEvent && e.originalEvent.stopPropagation(); } catch (err) { /* ignore */ }
+
 									// If the same vehicle is already selected, toggle it off
 									try {
 										if (selectedVehicleTrack && selectedVehicleTrack.id === marker.id) {
@@ -1007,34 +1096,90 @@ export default function MapViewMap({
 											return;
 										}
 									} catch (e) { /* ignore */ }
+
 									if (marker.type === 'bus') {
+										const line = marker.routeNumber || marker.route || null;
+										if (!line) return;
+
+										// Prefer cached route data when available to avoid hitting the
+										// potentially expensive /routes/line endpoint on first click.
+										const cached = routeDataCache[String(line)];
+										const timeoutMs = 10000; // increased from 5000ms to 10000ms
+										const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+										// Show a small loading popup so users see feedback while the label (or route) requests are in flight.
+										try { setLoadingError(null); } catch (e) { /* ignore */ }
+										try { setLoadingPopupId(marker.id); } catch (e) { /* ignore */ }
+
 										try {
-											const line = marker.routeNumber || marker.route || null;
-											if (!line) return;
-											// Prefer cached data (prefetched) to avoid falling back to mock on first click
-											let routeData = routeDataCache[String(line)];
-											if (!routeData) {
-												routeData = await fetchRouteLineWithFallback(String(line));
-												// cache result for future clicks
+											if (cached) {
+												// We have the route geometry cached — use it immediately.
+												const routeData = cached;
 												setRouteDataCache((prev) => ({ ...prev, [String(line)]: routeData }));
+												// Proceed to selection logic below using the cached routeData.
+												var __routeData_local = routeData;
+												// Fetch label asynchronously (do not block display of route).
+												(async () => {
+													try {
+														const controllerLabel = new AbortController();
+														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
+														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
+														clearTimeout(tlabel);
+														// Attach label to the selectedVehicleTrack if still selected
+														setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, label: labelData } : prev);
+													} catch (err) {
+														// label fetch non-fatal — log and ignore
+														// eslint-disable-next-line no-console
+														console.warn('[map] fetchRouteLabel failed (cached) for line=', line, err && err.message ? err.message : err);
+													}
+												})();
+											} else {
+												// No cache: fetch route first (strict), then request label.
+												const controller = new AbortController();
+												const timeout = setTimeout(() => controller.abort(), timeoutMs);
+												let routeData = null;
+												try {
+													routeData = await fetchRouteLineNoFallback(String(line), { signal: controller.signal, timeoutMs });
+													// Cache for future clicks
+													setRouteDataCache((prev) => ({ ...prev, [String(line)]: routeData }));
+												} finally {
+													clearTimeout(timeout);
+												}
+												var __routeData_local = routeData;
+												// Fetch label asynchronously (non-fatal)
+												(async () => {
+													try {
+														const controllerLabel = new AbortController();
+														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
+														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
+														clearTimeout(tlabel);
+														setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, label: labelData } : prev);
+													} catch (err) {
+														// non-fatal label fetch
+														// eslint-disable-next-line no-console
+														console.warn('[map] fetchRouteLabel failed (post-route) for line=', line, err && err.message ? err.message : err);
+													}
+												})();
 											}
-											if (!routeData || !Array.isArray(routeData.variants) || routeData.variants.length === 0) {
+								
+											// After either path above, selection logic will run using __routeData_local
+
+											// Use the route data populated above (from cache or fetch)
+											const routeData = __routeData_local;
+
+												if (!routeData || !Array.isArray(routeData.variants) || routeData.variants.length === 0) {
 												setSelectedVehicleTrack(null);
 												return;
 											}
 
-											// Prefer an explicit mapping included in the live marker metadata
-											// (the bus feed / backend augmentation often attaches route_id,
-											// journey_id or similar fields when computing delays). If present
-											// use that to pick the exact variant instead of nearest-geometry.
+											// Now proceed with the existing selection logic (prefer meta mapping,
+											// then optionally nearest-geometry when debugShowAllBuses is enabled).
 											let metaRouteId = null;
 											if (marker.meta) {
 												metaRouteId = marker.meta.route_id || marker.meta.routeId || marker.meta.route || marker.meta.logged_journey_id || marker.meta.journey_id || marker.meta.journeyId || null;
 											}
 
 											const pos = marker.position;
-											// If we have an explicit route_id from the marker metadata, try to
-											// find a matching variant immediately and use its geometry.
+
 											if (metaRouteId) {
 												const match = routeData.variants.find(v => v && (v.route_id === metaRouteId || String(v.route_id) === String(metaRouteId)));
 												if (match) {
@@ -1043,25 +1188,28 @@ export default function MapViewMap({
 													if (Array.isArray(geom) && geom.length >= 2) {
 														const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes);
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops });
+														// Label will be attached asynchronously when/if the fetch completes.
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops, label: null });
+														try { 
+															// Notify parent of the popup open and its signature (optional)
+															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+															onOpenPopup(marker.id);
+														} catch (e) { /* ignore */ }
 														return;
 													}
-													// If geometry absent but stops present, render stops-only polyline
 													if (stops.length >= 2) {
 														const norm = stops.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes);
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops });
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops, label: null });
+														try { 
+															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+															onOpenPopup(marker.id);
+														} catch (e) { /* ignore */ }
 														return;
 													}
 												}
 											}
 
-
-											// If no explicit mapping was provided, only fall back to
-											// nearest-geometry when developer debug mode is enabled.
-											// This avoids the UI picking an unrelated route variant
-											// purely based on geometric proximity when the server
-											// hasn't provided an authoritative id.
 											let best = null;
 											if (metaRouteId || debugShowAllBuses) {
 												for (const variant of routeData.variants) {
@@ -1085,32 +1233,46 @@ export default function MapViewMap({
 													return;
 												}
 											} else {
-												// No authoritative mapping and not in debug mode:
-												// do not attempt to guess the variant by geometry.
 												setSelectedVehicleTrack(null);
 												return;
 											}
 
 											const color = busIconColor(marker.delayMinutes);
-											// include stops if variant provides them
 											const stops = Array.isArray(best.variant && best.variant.stops) ? stopsToLatLngs(best.variant.stops) : [];
-											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops });
+											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
+											try { 
+												try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+												onOpenPopup(marker.id);
+											} catch (e) { /* ignore */ }
 										} catch (e) {
+											// If either request failed or timed out, ensure no partial UI is shown.
 											setSelectedVehicleTrack(null);
+											try {
+												const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+												// eslint-disable-next-line no-console
+												console.warn(`[map] route/label fetch failed for line=${line} marker=${marker.id}:`, e, `took=${Math.round(t1-t0)}ms`);
+												setLoadingError({ id: marker.id, message: (e && e.message) ? e.message : String(e) });
+											} catch (ee) { /* ignore */ }
+										} finally {
+											try { setLoadingPopupId(null); } catch (e) { /* ignore */ }
 										}
 									}
 								}
 							}}
 						>
-							{openPopupId === marker.id && (
-								<Popup
-									onClose={onClosePopup}
-									autoClose={false}
-								>
+							{/* Show popup when openPopupId matches (successful fetch) or when loadingPopupId matches (in-progress) */}
+							{(openPopupId === marker.id || loadingPopupId === marker.id) && (
+								<AdaptivePopup marker={marker} onClose={onClosePopup}>
 									<Box sx={{ minWidth: '200px', pb: 1 }}>
 										<Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
 											{marker.name}
 										</Typography>
+										{loadingPopupId === marker.id && (
+											<Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+												<CircularProgress size={18} />
+												<Typography variant="body2">Loading route…</Typography>
+											</Box>
+										)}
 										<Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.5 }}>
 											{marker.type === 'bus' ? '\u{01f68c} Bus' : '\u{01f682} Train'}
 										</Typography>
@@ -1213,9 +1375,29 @@ export default function MapViewMap({
 													{selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) && selectedVehicleTrack.coords.length >= 2 && (
 														<>
 															{/* Cyan underlay/frame so the vehicle track has a cyan outline */}
-															<Polyline pane="routePane" positions={selectedVehicleTrack.coords} pathOptions={{ color: '#00ffff', weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }} />
+															<Polyline
+																pane="routePane"
+																positions={selectedVehicleTrack.coords}
+																pathOptions={{ color: '#00ffff', weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }}
+																eventHandlers={{
+																	click: () => {
+																		try { setSelectedVehicleTrack(null); } catch (e) { /* ignore */ }
+																		try { onClosePopup(); } catch (e) { /* ignore */ }
+																	}
+																}}
+															/>
 															{/* Main coloured track */}
-															<Polyline pane="routePane" positions={selectedVehicleTrack.coords} pathOptions={{ color: selectedVehicleTrack.color || '#1a73e8', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }} />
+															<Polyline
+																pane="routePane"
+																positions={selectedVehicleTrack.coords}
+																pathOptions={{ color: selectedVehicleTrack.color || '#1a73e8', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }}
+																eventHandlers={{
+																	click: () => {
+																		try { setSelectedVehicleTrack(null); } catch (e) { /* ignore */ }
+																		try { onClosePopup(); } catch (e) { /* ignore */ }
+																	}
+																}}
+															/>
 															{/* Render stop markers snapped to the displayed polyline so they lie exactly on the track */}
 															{Array.isArray(selectedVehicleTrack.stops) && selectedVehicleTrack.stops.length > 0 && selectedVehicleTrack.coords.length >= 2 && (
 																selectedVehicleTrack.stops.map((s, si) => {
@@ -1240,7 +1422,7 @@ export default function MapViewMap({
 											</Box>
 										)}
 									</Box>
-								</Popup>
+								</AdaptivePopup>
 							)}
 						</Marker>
 					))}

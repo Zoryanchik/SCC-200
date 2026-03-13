@@ -34,8 +34,7 @@ const MOCK_BUS_ROUTES = [
       [54.0480, -2.8010], [54.0510, -2.7980], [54.0540, -2.8020],
       [54.0520, -2.8060], [54.0490, -2.8050], [54.0480, -2.8010],
     ],
-  },
-  {
+  }, {
     id: 'mock-bus-2', routeNumber: '2', operator: 'Demo Buses', delayMinutes: 4,
     waypoints: [
       [54.0460, -2.7990], [54.0440, -2.8040], [54.0430, -2.8090],
@@ -100,6 +99,11 @@ showBuses: true,
 showTrains: true
 });
 const [openPopupId, setOpenPopupId] = useState(null);
+// Track a compact signature for the currently-open popup so we can detect
+// whether a subsequent data refresh has caused the same id to be reused for
+// a different vehicle. If the signature no longer matches, we'll close the
+// popup to avoid jumping to another bus.
+const [openPopupSignature, setOpenPopupSignature] = useState(null);
 const [apiError, setApiError] = useState(null);
 const [userLocation, setUserLocation] = useState(null);
 const [locationStatus, setLocationStatus] = useState('idle');
@@ -111,7 +115,11 @@ const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
 
 // Called by MapViewMap whenever the map finishes panning/zooming
 const handleMoveEnd = useCallback(({ lat, lon }) => {
+  // Update the map center used for live queries
   setMapCenter({ lat, lon });
+  // Close any open popup/label when the user moves the map to avoid stale
+  // selections that no longer match the current view.
+  try { setOpenPopupId(null); } catch (e) { /* ignore */ }
 }, []);
 
 // Search bar state
@@ -134,7 +142,7 @@ const handleSearchSelect = useCallback((option) => {
 const { data: busLocations, loading: busLoading, refreshing: busRefreshing, countdown: busCountdown, refreshInterval: busRefreshInterval, error: busError } = useLiveBusLocations('SCCU', {
   lat: mapCenter.lat,
   lon: mapCenter.lon,
-  refreshInterval: 10000,
+  refreshInterval: 20000,
   debounceMs: 800,
 });
 const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
@@ -146,6 +154,15 @@ const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('b
 
 // Track whether real API data has ever arrived so we know when to stop the mock animation.
 const [hasRealData, setHasRealData] = useState(false);
+
+// Ensure any open popup is closed when the page is refreshed or unloaded.
+useEffect(() => {
+  const onBeforeUnload = () => {
+    try { setOpenPopupId(null); } catch (e) { /* ignore */ }
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+  return () => window.removeEventListener('beforeunload', onBeforeUnload);
+}, []);
 
 // Animated mock buses — runs until the real API returns data.
 useEffect(() => {
@@ -284,14 +301,34 @@ if (Array.isArray(trainDepartures)) {
   newMarkers.push(...Object.values(stations));
 }
 
-setMarkers(newMarkers);
-setHasRealData(true);
-setApiError(null);
+    setMarkers(newMarkers);
+    // If a popup was open previously, ensure it still refers to the same
+    // logical marker. If not, clear the popup to avoid it reappearing on a
+    // different bus after the refresh.
+    try {
+      if (openPopupId) {
+        const found = newMarkers.find((m) => m && m.id === openPopupId);
+        if (!found) {
+          try { setOpenPopupId(null); } catch (e) { /* ignore */ }
+          try { setOpenPopupSignature(null); } catch (e) { /* ignore */ }
+        } else if (openPopupSignature) {
+          // recompute signature for the found marker
+          const sig = (found && (found.meta && (found.meta.logged_journey_id || found.meta.journey_id))) || found.routeNumber || `${String(found.id)}|${Math.round((found.position?.[0]||0)*1e5)}|${Math.round((found.position?.[1]||0)*1e5)}`;
+          if (sig !== openPopupSignature) {
+            try { setOpenPopupId(null); } catch (e) { /* ignore */ }
+            try { setOpenPopupSignature(null); } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    setHasRealData(true);
+    setApiError(null);
 } else if (busError || trainError) {
 // Show error message but keep mock data
 setApiError('Using demo data - API temporarily unavailable');
 }
-}, [busLocations, trainDepartures, busError, trainError]);
+  }, [busLocations, trainDepartures, busError, trainError]);
 
 // Determine whether a bus marker has a deterministic mapping to a journey.
 // We treat a bus as "mapped" when the live payload / backend attached
@@ -775,7 +812,8 @@ sx={{ borderRadius: '10px' }}
             filteredMarkers={filteredMarkers}
             openPopupId={openPopupId}
             onOpenPopup={setOpenPopupId}
-            onClosePopup={() => setOpenPopupId(null)}
+            onOpenPopupSignature={setOpenPopupSignature}
+            onClosePopup={() => { setOpenPopupId(null); try { setOpenPopupSignature(null); } catch(e) {} }}
             userLocation={userLocation}
             nearestStop={nearestStop}
             busLoading={busLoading}

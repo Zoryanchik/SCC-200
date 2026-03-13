@@ -46,6 +46,9 @@ export const useLiveBusLocations = (
   operatorCode,
   { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
 ) => {
+  // Enforce a minimum refresh interval of 5 seconds to avoid overly
+  // aggressive polling from callers that pass very small values.
+  const effectiveRefreshInterval = Math.max(5000, Number(refreshInterval || 0));
   const [data, setData] = useState([]);
   // `loading` is true only until the very first fetch completes (initial load).
   // Subsequent background re-fetches are indicated by `refreshing` instead,
@@ -54,7 +57,7 @@ export const useLiveBusLocations = (
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   // Countdown in seconds until the next automatic refresh.
-  const [countdown, setCountdown] = useState(Math.round(refreshInterval / 1000));
+  const [countdown, setCountdown] = useState(Math.round(effectiveRefreshInterval / 1000));
   const initializedRef = useRef(false);
   const debounceRef = useRef(null);
   const intervalRef = useRef(null);
@@ -97,7 +100,7 @@ export const useLiveBusLocations = (
         setLoading(false);
       }
       // Restart the countdown after every successful fetch.
-      startCountdown(Math.round(refreshInterval / 1000));
+    startCountdown(Math.round(effectiveRefreshInterval / 1000));
     } catch (err) {
       setError(err);
       console.error('Error fetching bus locations:', err);
@@ -116,7 +119,7 @@ export const useLiveBusLocations = (
       fetchData(lat, lon);
       intervalRef.current = setInterval(() => {
         fetchData(lat, lon);
-      }, refreshInterval);
+      }, effectiveRefreshInterval);
     }, debounceMs);
 
     return () => {
@@ -124,11 +127,11 @@ export const useLiveBusLocations = (
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [fetchData, lat, lon, refreshInterval, debounceMs]);
+  }, [fetchData, lat, lon, effectiveRefreshInterval, debounceMs]);
 
   const refetch = useCallback(() => fetchData(lat, lon), [fetchData, lat, lon]);
 
-  return { data, loading, refreshing, countdown, refreshInterval, error, refetch };
+  return { data, loading, refreshing, countdown, refreshInterval: effectiveRefreshInterval, error, refetch };
 };
 
 /**

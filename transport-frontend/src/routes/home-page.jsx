@@ -470,6 +470,7 @@ export default function HomePage() {
   const [markers, setMarkers] = useState(MOCK_MARKERS);
   const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
   const [openPopupId, setOpenPopupId] = useState(null);
+  const [openPopupSignature, setOpenPopupSignature] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
   const [geoError, setGeoError] = useState(null);
@@ -627,7 +628,7 @@ export default function HomePage() {
   } = useLiveBusLocations("SCCU", {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
-    refreshInterval: 10000,
+    refreshInterval: 20000,
     debounceMs: 800,
   });
   const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 180000);
@@ -716,6 +717,24 @@ export default function HomePage() {
         newMarkers.push(...Object.values(stations));
       }
       setMarkers(newMarkers);
+      // Validate existing popup ownership: if a popup was open, ensure the
+      // refreshed markers still represent the same logical vehicle. If not,
+      // clear the popup to avoid it appearing on a different bus.
+      try {
+        if (openPopupId) {
+          const found = newMarkers.find((m) => m && m.id === openPopupId);
+          if (!found) {
+            try { setOpenPopupId(null); } catch (e) { /* ignore */ }
+            try { setOpenPopupSignature(null); } catch (e) { /* ignore */ }
+          } else if (openPopupSignature) {
+            const sig = (found && (found.meta && (found.meta.logged_journey_id || found.meta.journey_id))) || found.routeNumber || `${String(found.id)}|${Math.round((found.position?.[0]||0)*1e5)}|${Math.round((found.position?.[1]||0)*1e5)}`;
+            if (sig !== openPopupSignature) {
+              try { setOpenPopupId(null); } catch (e) { /* ignore */ }
+              try { setOpenPopupSignature(null); } catch (e) { /* ignore */ }
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
     }
   }, [busLocations, trainDepartures]);
 
@@ -2129,7 +2148,8 @@ export default function HomePage() {
             filteredMarkers={filteredMarkers}
             openPopupId={openPopupId}
             onOpenPopup={setOpenPopupId}
-            onClosePopup={() => setOpenPopupId(null)}
+            onOpenPopupSignature={setOpenPopupSignature}
+            onClosePopup={() => { setOpenPopupId(null); try { setOpenPopupSignature(null); } catch(e) {} }}
             userLocation={userLocation}
             nearestStop={nearestStop}
             busLoading={busLoading}

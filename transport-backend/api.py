@@ -1762,6 +1762,8 @@ async def routes_for_line(line: str):
         return _route_line_cache[line_key]
 
     date_str = datetime.now().strftime("%Y-%m-%d")
+    import time
+    t0 = time.time()
     try:
         merged, _router, _walking = get_router_for_date(date_str)
     except Exception:
@@ -1769,13 +1771,25 @@ async def routes_for_line(line: str):
             status_code=503,
             content={"error": "Backend not initialized"},
         )
+    t1 = time.time()
+    try:
+        # Log time spent obtaining router/merged data
+        logger.info(f"routes_for_line: get_router_for_date took {int((t1-t0)*1000)}ms for line={line_key}")
+    except Exception:
+        pass
 
     # NaPTAN coordinate lookup
     atco = _base_cache.get("atco_loader") if _base_cache else None
     coord_map: Dict[str, tuple] = {}
     if atco:
+        t2 = time.time()
         try:
             coord_map = atco.get_all_stop_coords()
+        except Exception:
+            coord_map = {}
+        t3 = time.time()
+        try:
+            logger.info(f"routes_for_line: atco.get_all_stop_coords took {int((t3-t2)*1000)}ms for line={line_key}")
         except Exception:
             pass
 
@@ -1927,6 +1941,7 @@ async def routes_for_line(line: str):
                 continue
             try:
                 # 1) prefer stored route tracks
+                t_var_start = time.time()
                 tracks = _fetch_route_tracks(rid)
                 if tracks and isinstance(tracks, list) and len(tracks) >= 2:
                     v['geometry'] = tracks
@@ -1953,6 +1968,11 @@ async def routes_for_line(line: str):
                 if len(dedup) >= 2:
                     try:
                         coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
+                        t_var_end = time.time()
+                        try:
+                            logger.info(f"routes_for_line: osrm query for rid={rid} took {int((t_var_end-t_var_start)*1000)}ms")
+                        except Exception:
+                            pass
                         if coords_from_osrm and len(coords_from_osrm) >= 2:
                             v['geometry'] = coords_from_osrm
                             v['geometry_source'] = 'osrm'
@@ -2407,6 +2427,36 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
 
     # ── 1. collect candidate journeys ──
     candidates = []
+    # Precompute set of stops within SEARCH_STOP_RADIUS_M metres of the
+    # vehicle location. Per request, only journeys that serve at least one
+    # of these nearby stops will be considered. If no stops exist within
+    # the radius, consider the vehicle off-track and abort early.
+    try:
+        try:
+            SEARCH_STOP_RADIUS_M = int(os.environ.get('MATCH_STOP_RADIUS_M', '3000'))
+        except Exception:
+            SEARCH_STOP_RADIUS_M = 3000
+        nearby_stops_set = set()
+        total_stops = len(merged.stop_metadata or [])
+        for si in range(total_stops):
+            try:
+                sc = walking.get_loc_coords(si)
+                if not sc or len(sc) != 2:
+                    continue
+                slat, slon = sc
+                d = _hav(lat_v, lon_v, slat, slon)
+                if d <= SEARCH_STOP_RADIUS_M:
+                    nearby_stops_set.add(si)
+            except Exception:
+                continue
+    except Exception:
+        nearby_stops_set = set()
+
+    # If there are no stops within the search radius, treat as off-track.
+    if not nearby_stops_set:
+        if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+            logger.info('matcher: no nearby stops within %dm — vehicle considered off-track', SEARCH_STOP_RADIUS_M)
+        return None
     # Spatial prefilter: skip routes whose geometry is far from the
     # vehicle to avoid cross-region matches when short line names are
     # ambiguous. Read threshold from env so it can be tuned.
@@ -2645,9 +2695,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     except Exception:
         MATCH_ALLOW_AFTER_S = 300
     try:
-        MATCH_DEST_IGNORE_M = int(os.environ.get('MATCH_DEST_IGNORE_M', '50'))
+        MATCH_DEST_IGNORE_M = int(os.environ.get('MATCH_DEST_IGNORE_M', '30'))
     except Exception:
-        MATCH_DEST_IGNORE_M = 50
+        MATCH_DEST_IGNORE_M = 30
 
     for j_id, start_dep, end_arr, r_int in candidates:
         # Ensure we use the correct journey_times for this candidate.
@@ -2801,6 +2851,18 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                         journey_stop_ints = [sid for sid, at, dt in jt]
                     except Exception:
                         journey_stop_ints = []
+                    # Require that the journey serves at least one of the
+                    # stops within the precomputed nearby_stops_set. This
+                    # enforces the "only map to journeys that pass through
+                    # stops within X metres" rule.
+                    try:
+                        if nearby_stops_set and not (set(journey_stop_ints) & nearby_stops_set):
+                            if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+                                logger.info("matcher: candidate j_id=%s rejected because it serves none of the nearby stops", j_id)
+                            continue
+                    except Exception:
+                        pass
+
                     if nearest_stop_int not in journey_stop_ints:
                         if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
                             logger.info("matcher: candidate j_id=%s rejected because nearest_stop %s not in journey stops", j_id, nearest_stop_int)
