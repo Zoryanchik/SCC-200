@@ -1512,9 +1512,9 @@ export default function HomePage() {
 
   // Build the suggested routes panel so it can be injected into the map side column
   const suggestedRoutesPanel = (
-    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050, height: '100%', display: 'flex', flexDirection: 'column', border: '1px solid', borderColor: '#00bcd4' }}>
+    <Paper elevation={1} sx={{ p: { xs: 2.5, md: 3 }, position: 'relative', zIndex: 1050, height: '100%', maxHeight: { xs: '70dvh', md: '100%' }, minHeight: { xs: 320, md: 'auto' }, overflow: 'hidden', display: 'flex', flexDirection: 'column', border: '1px solid', borderColor: '#00bcd4' }}>
       <Stack spacing={2} sx={{ flex: '0 0 auto' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 1051 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1, position: 'relative', zIndex: 1051 }}>
           <Typography variant="h6" fontWeight={700}>
             Suggested routes
           </Typography>
@@ -1540,7 +1540,7 @@ export default function HomePage() {
       </Stack>
 
       {/* Make the list area scrollable and fill remaining height */}
-      <Box sx={{ flex: '1 1 auto', overflowY: 'auto', pr: 1, mt: 1 }}>
+      <Box sx={{ flex: '1 1 auto', overflowY: 'auto', pr: { xs: 0, sm: 1 }, mt: 1 }}>
         {isSearching ? (
           <Stack spacing={2}>
             {[1, 2, 3].map((i) => (
@@ -1807,14 +1807,14 @@ export default function HomePage() {
                   </Box>
 
                   {/* Date/time group aligned under From */}
-                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 2 }, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: { xs: 1, md: 0 } }}>
-                    <TextField label="Hour" select size="small" value={timeSelHour} onChange={(e) => { const h = Number(e.target.value); setTimeSelHour(h); setDepartureClock(`${pad2(h)}:${pad2(timeSelMinute)}`); }} SelectProps={{ renderValue: () => pad2(timeSelHour), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 2 }, display: 'flex', gap: 1, alignItems: 'stretch', flexWrap: 'wrap', mt: { xs: 1, md: 0 } }}>
+                    <TextField label="Hour" select size="small" value={timeSelHour} onChange={(e) => { const h = Number(e.target.value); setTimeSelHour(h); setDepartureClock(`${pad2(h)}:${pad2(timeSelMinute)}`); }} SelectProps={{ renderValue: () => pad2(timeSelHour), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: { xs: 'calc(50% - 4px)', sm: 90 }, '& .MuiSelect-select': { textAlign: 'center' } }}>
                       {Array.from({ length: 24 }, (_, i) => i).map((h) => (<MenuItem key={h} value={h} sx={{ textAlign: 'center' }}>{pad2(h)}</MenuItem>))}
                     </TextField>
-                    <TextField label="Minute" select size="small" value={timeSelMinute} onChange={(e) => { const mm = Number(e.target.value); setTimeSelMinute(mm); setDepartureClock(`${pad2(timeSelHour)}:${pad2(mm)}`); }} SelectProps={{ renderValue: () => pad2(timeSelMinute), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, ml: 1, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                    <TextField label="Minute" select size="small" value={timeSelMinute} onChange={(e) => { const mm = Number(e.target.value); setTimeSelMinute(mm); setDepartureClock(`${pad2(timeSelHour)}:${pad2(mm)}`); }} SelectProps={{ renderValue: () => pad2(timeSelMinute), SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: { xs: 'calc(50% - 4px)', sm: 90 }, '& .MuiSelect-select': { textAlign: 'center' } }}>
                       {Array.from({ length: 60 }, (_, i) => i).map((mm) => (<MenuItem key={mm} value={mm} sx={{ textAlign: 'center' }}>{pad2(mm)}</MenuItem>))}
                     </TextField>
-                    <TextField label="Day" select size="small" value={dateSelDay} onChange={(e) => { const newD = Number(e.target.value); setDateSelDay(newD); setDepartureDate(`${String(dateSelYear)}-${pad2(dateSelMonth)}-${pad2(newD)}`); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                    <TextField label="Day" select size="small" value={dateSelDay} onChange={(e) => { const newD = Number(e.target.value); setDateSelDay(newD); setDepartureDate(`${String(dateSelYear)}-${pad2(dateSelMonth)}-${pad2(newD)}`); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: { xs: 'calc(50% - 4px)', sm: 90 }, '& .MuiSelect-select': { textAlign: 'center' } }}>
                       {Array.from({ length: daysInMonth(dateSelYear, dateSelMonth) }, (_, i) => i + 1).map((d) => (<MenuItem key={d} value={d} sx={{ textAlign: 'center' }}>{d}</MenuItem>))}
                     </TextField>
                     <TextField
@@ -1837,7 +1837,7 @@ export default function HomePage() {
                         setDepartureDate(`${String(newYear)}-${pad2(newMonth)}-${pad2(newDay)}`);
                       }}
                       SelectProps={{ renderValue: () => `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: 'short' }).toUpperCase()}${'\u00A0\u00A0\u00A0\u00A0'}/${'\u00A0\u00A0\u00A0\u00A0'}${dateSelYear}`, SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }}
-                      sx={{ width: 180, '& .MuiSelect-select': { textAlign: 'center' } }}
+                      sx={{ width: { xs: '100%', sm: 180 }, '& .MuiSelect-select': { textAlign: 'center' } }}
                     >
                       {(() => {
                         // Start three months earlier than now, and produce a 7-year (84 month) range
@@ -1860,13 +1860,13 @@ export default function HomePage() {
                   </Box>
 
                   {/* Transfers/mode group aligned under To */}
-                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 4 }, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mt: { xs: 1, md: 0 }, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
-                    <TextField select size="small" value={transportMode} onChange={(e) => { const val = e.target.value; if (val !== null) setTransportMode(val); }} SelectProps={{ renderValue: (selected) => { if (!selected) return ''; return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1); }, SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: 90, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                  <Box sx={{ gridColumn: { xs: '1 / -1', md: 4 }, display: 'flex', gap: 1, alignItems: 'stretch', flexWrap: 'wrap', mt: { xs: 1, md: 0 }, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
+                    <TextField select size="small" value={transportMode} onChange={(e) => { const val = e.target.value; if (val !== null) setTransportMode(val); }} SelectProps={{ renderValue: (selected) => { if (!selected) return ''; return selected === 'all' ? 'All' : selected.charAt(0).toUpperCase() + selected.slice(1); }, SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } }, }} sx={{ width: { xs: 'calc(50% - 4px)', sm: 90 }, '& .MuiSelect-select': { textAlign: 'center' } }}>
                       <MenuItem value="all" sx={{ textAlign: 'center' }}>All</MenuItem>
                       <MenuItem value="bus" sx={{ textAlign: 'center' }}>Bus</MenuItem>
                       <MenuItem value="train" sx={{ textAlign: 'center' }}>Train</MenuItem>
                     </TextField>
-                    <TextField label="Transfers" select size="small" value={maxTransfers} onChange={(e) => { const v = Number(e.target.value); setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: 90, ml: 1, '& .MuiSelect-select': { textAlign: 'center' } }}>
+                    <TextField label="Transfers" select size="small" value={maxTransfers} onChange={(e) => { const v = Number(e.target.value); setMaxTransfers(Number.isFinite(v) ? Math.max(0, Math.min(5, v)) : 0); }} SelectProps={{ SelectDisplayProps: { sx: { textAlign: 'center' } }, MenuProps: { PaperProps: { sx: { maxHeight: 240 } } } }} sx={{ width: { xs: 'calc(50% - 4px)', sm: 90 }, '& .MuiSelect-select': { textAlign: 'center' } }}>
                       {[0,1,2,3,4,5].map((n) => (<MenuItem key={n} value={n} sx={{ textAlign: 'center' }}>{n}</MenuItem>))}
                     </TextField>
                   </Box>
@@ -1918,7 +1918,7 @@ export default function HomePage() {
           {/* Map header - icon intentionally removed */}
         </Stack>
 
-        <Stack direction="row" spacing={1.5} mb={2} flexWrap="wrap" alignItems="center">
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} mb={2} flexWrap="wrap" alignItems={{ xs: 'stretch', sm: 'center' }}>
           <Box
             data-testid="filter-buses"
             onClick={() => setFilters((f) => ({ ...f, showBuses: !f.showBuses }))}
@@ -1929,6 +1929,8 @@ export default function HomePage() {
               minHeight: 48,
               display: "inline-flex",
               alignItems: "center",
+              justifyContent: 'center',
+              width: { xs: '100%', sm: 'auto' },
               gap: 1,
               cursor: "pointer",
               backgroundColor: filters.showBuses ? "#6366F1" : "transparent",
@@ -1949,6 +1951,8 @@ export default function HomePage() {
               minHeight: 48,
               display: "inline-flex",
               alignItems: "center",
+              justifyContent: 'center',
+              width: { xs: '100%', sm: 'auto' },
               gap: 1,
               cursor: "pointer",
               backgroundColor: filters.showTrains ? "#10B981" : "transparent",
