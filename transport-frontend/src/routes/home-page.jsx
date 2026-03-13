@@ -1521,7 +1521,7 @@ export default function HomePage() {
           <Button
             size="small"
             variant="contained"
-            onClick={() => setShowSuggested(false)}
+            onClick={() => { setShowSuggested(false); setSelectedRouteIdx(null); }}
             aria-label="Close suggested routes"
             startIcon={<X size={16} />}
             sx={{
@@ -1730,7 +1730,51 @@ export default function HomePage() {
                                 <Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>Location</Typography>
                               )}
                             </Box>
-                            <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                            <Chip
+                              label={optionType === "location" ? "Location" : "Stop"}
+                              size="small"
+                              variant="outlined"
+                              onClick={(e) => {
+                                // clicking the chip should behave like selecting the stop
+                                e.stopPropagation();
+                                try {
+                                  // set selected value for the From input and centre the map
+                                  if (typeof option === 'object') {
+                                    setSelectedFromStop(option);
+                                    const lat = option.lat ?? option.latitude;
+                                    const lon = option.lon ?? option.longitude;
+                                    if (mapInstance && typeof lat === 'number' && typeof lon === 'number') {
+                                      mapInstance.flyTo([lat, lon], Math.max(mapInstance.getZoom(), 15), { duration: 1.2 });
+                                    }
+                                  }
+                                } catch (err) {
+                                  // ignore
+                                }
+                              }}
+                            />
+                            {option && Array.isArray(option.lines) && option.lines.length > 0 && (
+                              <Box sx={{ display: 'inline-flex', gap: 0.5, ml: 1 }}>
+                                {option.lines.slice(0,3).map((ln) => (
+                                  <Button key={ln} size="small" onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    try {
+                                      // Prefer the safe dispatch helper which will call
+                                      // the registered toggle or queue the request.
+                                      if (window.__dispatchBusRouteToggle) {
+                                        void window.__dispatchBusRouteToggle(String(ln));
+                                      } else if (window.__busRouteToggle) {
+                                        void window.__busRouteToggle(String(ln));
+                                      } else {
+                                        window.__busRouteToggleQueue = window.__busRouteToggleQueue || [];
+                                        window.__busRouteToggleQueue.push(String(ln));
+                                      }
+                                    } catch (e) {
+                                      // ignore
+                                    }
+                                  }} sx={{ minWidth: 0, px: 0.6, py: 0.3, fontWeight: 700, fontSize: '0.6rem' }}>{ln}</Button>
+                                ))}
+                              </Box>
+                            )}
                           </Box>
                         );
                       }}
@@ -1791,7 +1835,41 @@ export default function HomePage() {
                           <Box component="li" {...props} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                             <Box sx={{ color: (theme) => theme.palette.mode === 'light' && optionType === 'location' ? '#8B5E3C' : undefined }}>{optionType === "location" ? <MapPin size={16} /> : <Bus size={16} />}</Box>
                             <Box sx={{ flexGrow: 1 }}><Typography variant="body2" fontWeight={600}>{label}</Typography>{optionType === "location" && (<Typography variant="caption" sx={{ color: (theme) => theme.palette.mode === 'light' ? '#8B5E3C' : undefined }}>Location</Typography>)}</Box>
-                            <Chip label={optionType === "location" ? "Location" : "Stop"} size="small" variant="outlined" />
+                            <Chip
+                              label={optionType === "location" ? "Location" : "Stop"}
+                              size="small"
+                              variant="outlined"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                try {
+                                  if (typeof option === 'object') {
+                                    setSelectedToStop(option);
+                                    const lat = option.lat ?? option.latitude;
+                                    const lon = option.lon ?? option.longitude;
+                                    if (mapInstance && typeof lat === 'number' && typeof lon === 'number') {
+                                      mapInstance.flyTo([lat, lon], Math.max(mapInstance.getZoom(), 15), { duration: 1.2 });
+                                    }
+                                  }
+                                } catch (err) {}
+                              }}
+                            />
+                                {option && Array.isArray(option.lines) && option.lines.length > 0 && (
+                              <Box sx={{ display: 'inline-flex', gap: 0.5, ml: 1 }}>
+                                {option.lines.slice(0,3).map((ln) => (
+                                  <Button key={ln} size="small" onClick={(ev) => { ev.stopPropagation(); try {
+                                      // Prefer the dispatch helper (may queue) then fall back to direct toggle
+                                      if (window.__dispatchBusRouteToggle) {
+                                        void window.__dispatchBusRouteToggle(String(ln));
+                                      } else if (window.__busRouteToggle) {
+                                        void window.__busRouteToggle(String(ln));
+                                      } else {
+                                        window.__busRouteToggleQueue = window.__busRouteToggleQueue || [];
+                                        window.__busRouteToggleQueue.push(String(ln));
+                                      }
+                                    } catch(e) {} }} sx={{ minWidth: 0, px: 0.6, py: 0.3, fontWeight: 700, fontSize: '0.6rem' }}>{ln}</Button>
+                                ))}
+                              </Box>
+                            )}
                           </Box>
                         );
                       }}
@@ -2037,7 +2115,7 @@ export default function HomePage() {
             onMoveEnd={handleMoveEnd}
             sideContent={suggestedRoutesPanel}
             showSideOverlay={showSuggested}
-            showRouteLines={typeof selectedRouteIdx === 'number' && showSuggested}
+            showRouteLines={true}
             journeyRoute={journeyRoute}
           />
         </Suspense>

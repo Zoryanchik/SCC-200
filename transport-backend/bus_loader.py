@@ -242,6 +242,7 @@ class BusLoader:
             CREATE TABLE IF NOT EXISTS bus_journey_operating_profile (
                 journey_id   TEXT NOT NULL,
                 service_code TEXT NOT NULL,
+                operator_national_code TEXT,
                 days_of_week INTEGER NOT NULL DEFAULT 0,
                 start_date   TEXT,
                 end_date     TEXT,
@@ -330,6 +331,7 @@ class BusLoader:
         ns = '{http://www.transxchange.org.uk/}'
 
         service_code = ''
+        operator_noc = ''
         svc_el = root.find(f'{ns}Services/{ns}Service')
         if svc_el is not None:
             service_code = svc_el.findtext(f'{ns}ServiceCode', '').strip()
@@ -345,6 +347,21 @@ class BusLoader:
             op_el = root.find(f'{ns}ServiceOperator/{ns}OperatorCode')
             if op_el is not None:
                 service_code = (op_el.text or '').strip()
+
+        # Some TransXChange files put an operator code under
+        # <Operators><Operator><NationalOperatorCode>. Capture that
+        # separately as operator_noc (we'll store it alongside the
+        # journey operating profile so matching can compare feed
+        # operator_ref to this authoritative national operator code).
+        try:
+            for op in root.findall(f'{ns}Operators/{ns}Operator'):
+                noc = (op.findtext(f'{ns}NationalOperatorCode') or '').strip()
+                if noc:
+                    operator_noc = noc
+                    break
+        except Exception:
+            # best-effort only — don't fail parsing on unexpected XML
+            operator_noc = operator_noc or ''
 
         stop_names_rows = []
         for sp in root.findall(f'{ns}StopPoints/{ns}AnnotatedStopPointRef'):
@@ -374,10 +391,20 @@ class BusLoader:
             rs_id = rs.attrib.get('id', '')
             waypoints = []
             for rl in rs.findall(f'{ns}RouteLink'):
+                # Mapping elements sometimes appear under Track/Mapping,
+                # sometimes directly under RouteLink, and some providers
+                # nest Location nodes in slightly different ways. Be
+                # tolerant: look for Track/Mapping first, then a direct
+                # Mapping child, and finally fall back to any Track node.
                 mapping = rl.find(f'{ns}Track/{ns}Mapping')
                 if mapping is None:
+                    mapping = rl.find(f'{ns}Mapping') or rl.find(f'{ns}Track')
+                if mapping is None:
                     continue
-                for loc in mapping.findall(f'{ns}Location'):
+                # Find Location nodes anywhere under the mapping/track
+                # element (handles both direct children and nested
+                # Translation wrappers).
+                for loc in mapping.findall(f'.//{ns}Location'):
                     # TXC files vary: some providers wrap coords in
                     # <Translation><Latitude> / <Longitude></Translation>
                     # while others place <Latitude> and <Longitude>
@@ -592,7 +619,7 @@ class BusLoader:
                         if ed:
                             op_end = ed
 
-            journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working))
+            journey_op_rows.append((jkey, service_code, dow_mask, op_start, op_end, org_ref, org_working, operator_noc))
 
             overrides = {}
             for vjtl in vj.findall(f'{ns}VehicleJourneyTimingLink'):
@@ -709,7 +736,19 @@ class BusLoader:
                 return [ (f"{file_prefix}::{jid}", atco, at) for (jid, atco, at) in (jt_list or []) ]
 
             def _pref_file_journey_ops(jop_list):
-                return [ (f"{file_prefix}::{jid}", svc, dow, s, e, org, orgw) for (jid, svc, dow, s, e, org, orgw) in (jop_list or []) ]
+                # Support both 7-field and 8-field (with operator_noc) tuples
+                out = []
+                for item in (jop_list or []):
+                    if not item:
+                        continue
+                    if len(item) == 7:
+                        jid, svc, dow, s, e, org, orgw = item
+                        out.append((f"{file_prefix}::{jid}", svc, dow, s, e, org, orgw, None))
+                    else:
+                        # assume 8-tuple: jid, svc, dow, s, e, org, orgw, operator_noc
+                        jid, svc, dow, s, e, org, orgw, operator_noc = item
+                        out.append((f"{file_prefix}::{jid}", svc, dow, s, e, org, orgw, operator_noc))
+                return out
 
             def _pref_file_route_tracks(rt_list):
                 return [ (f"{file_prefix}::{rid}", seq, lat, lon) for (rid, seq, lat, lon) in (rt_list or []) ]
@@ -838,7 +877,20 @@ class BusLoader:
             route_stops = [( _pref(rid), atco, so ) for (rid, atco, so) in (route_stops or [])]
             journey_routes = [( _pref(jid), _pref(rid), ln, dd ) for (jid, rid, ln, dd) in (journey_routes or [])]
             journey_times = [( _pref(jid), atco, at ) for (jid, atco, at) in (journey_times or [])]
-            journey_ops = [( _pref(jid), svc, dow, s, e, org, orgw ) for (jid, svc, dow, s, e, org, orgw) in (journey_ops or [])]
+            # Accept both 7-field and 8-field (with operator_national_code)
+            normalized_jops = []
+            for item in (journey_ops or []):
+                if not item:
+                    continue
+                if len(item) == 7:
+                    jid, svc, dow, s, e, org, orgw = item
+                    normalized_jops.append((_pref(jid), svc, None, dow, s, e, org, orgw))
+                else:
+                    # assume 8-tuple in the form (jid, svc, dow, s, e, org, orgw, operator_noc)
+                    jid, svc, dow, s, e, org, orgw, operator_noc = item
+                    # reorder to match DB columns: journey_id, service_code, operator_national_code, days_of_week, start_date, end_date, org_ref, org_working
+                    normalized_jops.append((_pref(jid), svc, operator_noc, dow, s, e, org, orgw))
+            journey_ops = normalized_jops
             route_tracks = [( _pref(rid), seq, lat, lon ) for (rid, seq, lat, lon) in (route_tracks or [])]
 
             # Revision-aware skipping/deletion. If the DB table contains a 'revision'
@@ -1138,9 +1190,9 @@ class BusLoader:
             _chunked_multi_insert(
                 cursor,
                 'bus_journey_operating_profile',
-                ['journey_id', 'service_code', 'days_of_week', 'start_date', 'end_date', 'org_ref', 'org_working'],
+                ['journey_id', 'service_code', 'operator_national_code', 'days_of_week', 'start_date', 'end_date', 'org_ref', 'org_working'],
                 journey_ops,
-                on_conflict='ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working',
+                on_conflict='ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, operator_national_code = EXCLUDED.operator_national_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working',
                 key_indices=(0,),  # (journey_id,)
             )
         if route_tracks:
@@ -1213,18 +1265,37 @@ class BusLoader:
             bd.add_journey_times(current_journey, times_buf)
 
         # --- 4. populate route_metadata and journey_metadata ---------------
-        # journey_routes has (journey_id, route_id, line_name, destination_display)
-        cursor.execute("SELECT journey_id, route_id, line_name, destination_display FROM bus_journey_routes")
+        # Use a LEFT JOIN between `bus_journey_routes` and
+        # `bus_journey_operating_profile` to ensure we surface any
+        # available service_code/operator_national_code for each journey
+        # in a single query. This avoids missing operator fields due to
+        # later in-memory map lookups that can fail when journey_id
+        # representations diverge.
+        cursor.execute(
+            """
+            SELECT r.journey_id, r.route_id, r.line_name, r.destination_display,
+                   op.service_code, op.operator_national_code
+            FROM bus_journey_routes r
+            LEFT JOIN bus_journey_operating_profile op USING (journey_id)
+            """
+        )
         route_line_names = {}   # route_id -> line_name (first seen)
-        for journey_id, route_id, line_name, destination_display in cursor.fetchall():
+        for journey_id, route_id, line_name, destination_display, svc_code, op_noc in cursor.fetchall():
             # journey metadata
             j_int = bd.map_journeys.code_to_int.get(journey_id)
             if j_int is not None:
+                # Normalize and strip service/operator codes to avoid
+                # accidental whitespace mismatches (e.g. 'SCCU ' vs 'SCCU').
+                svc_val = svc_code.strip() if isinstance(svc_code, str) and svc_code.strip() else None
+                noc_val = op_noc.strip() if isinstance(op_noc, str) and op_noc.strip() else None
                 bd.journey_metadata[j_int] = {
                     "journey_id": journey_id,
                     "route_id":   route_id,
                     "line_name":  line_name or "",
                     "destination_display": destination_display or "",
+                    # include operator/service code and national operator code when available for strict matching
+                    "service_code": svc_val,
+                    "operator_national_code": noc_val,
                 }
             # collect line_name per route (keep first non-empty)
             if route_id not in route_line_names or not route_line_names[route_id]:
@@ -1508,21 +1579,35 @@ class BusLoader:
 
         # 3d. metadata (use JOIN)
         t3d2 = time.perf_counter()
+        # Include service_code and operator_national_code via LEFT JOIN so
+        # per-journey metadata in the date-filtered BusData contains the
+        # same operator/service fields as the full DB loader.  Omitting
+        # these caused merged in-memory entries to lack operator codes and
+        # therefore fail strict operator matching.
         cur.execute(
-            "SELECT jr.journey_id, jr.route_id, jr.line_name, jr.destination_display "
+            "SELECT jr.journey_id, jr.route_id, jr.line_name, jr.destination_display, "
+            "op.service_code, op.operator_national_code "
             "FROM bus_journey_routes jr "
-            "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
+            "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id "
+            "LEFT JOIN bus_journey_operating_profile op ON jr.journey_id = op.journey_id"
         )
         route_line_names = {}
         rows = cur.fetchall()
-        for journey_id, route_id, line_name, destination_display in rows:
+        for journey_id, route_id, line_name, destination_display, svc_code, op_noc in rows:
             j_int = bd.map_journeys.code_to_int.get(journey_id)
             if j_int is not None:
+                # Normalize and strip service/operator codes to avoid
+                # accidental whitespace mismatches (e.g. 'SCCU ' vs 'SCCU').
+                svc_val = svc_code.strip() if isinstance(svc_code, str) and svc_code.strip() else None
+                noc_val = op_noc.strip() if isinstance(op_noc, str) and op_noc.strip() else None
                 bd.journey_metadata[j_int] = {
                     "journey_id": journey_id,
                     "route_id":   route_id,
                     "line_name":  line_name or "",
                     "destination_display": destination_display or "",
+                    # include operator/service code and national operator code when available for strict matching
+                    "service_code": svc_val,
+                    "operator_national_code": noc_val,
                 }
             if route_id not in route_line_names or not route_line_names[route_id]:
                 route_line_names[route_id] = line_name or ""

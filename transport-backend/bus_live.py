@@ -269,14 +269,50 @@ class BusLive:
                             delay_seconds = int(diff)
                     # --------------------------------------------------------
 
-                    # ── OriginAimedDepartureTime → seconds since midnight ──
+                    # ── OriginAimedDepartureTime → seconds since midnight (with day-shift) ──
+                    # Prefer a full ISO datetime when present and compute a seconds
+                    # value relative to UTC 'today'. If the parsed date differs from
+                    # today, include a day-offset (±86400 seconds) so callers can
+                    # detect forward/backwards day shifts.
                     origin_dep_secs: Optional[int] = None
+                    origin_tz_offset_s: int = 0
                     origin_dep_raw = (self._get_text(mvj, 'originaimeddeparturetime') or
                                       self._get_text(mvj, 'OriginAimedDepartureTime'))
                     if origin_dep_raw:
-                        origin_dt = _parse_iso_dt(origin_dep_raw)
-                        if origin_dt is not None:
-                            origin_dep_secs = origin_dt.hour * 3600 + origin_dt.minute * 60 + origin_dt.second
+                        # Some feeds supply a numeric seconds-since-midnight value
+                        # directly (e.g. "64800"). Prefer that when present so
+                        # we don't have to infer day offsets from an ISO string.
+                        s = origin_dep_raw.strip()
+                        if re.match(r'^-?\d+$', s):
+                            try:
+                                origin_dep_secs = int(s)
+                            except Exception:
+                                origin_dep_secs = None
+                        else:
+                            origin_dt = _parse_iso_dt(origin_dep_raw)
+                            if origin_dt is not None:
+                                try:
+                                    # Record the time-of-day portion only (seconds since
+                                    # midnight). Do NOT include a day-offset here — callers
+                                    # (the matcher) perform day alignment using timetable
+                                    # context. Including a day offset in the feed value
+                                    # produced negative/large values which caused
+                                    # downstream filters (and the frontend) to treat
+                                    # vehicles as far-future or far-past incorrectly.
+                                    origin_dep_secs = origin_dt.hour * 3600 + origin_dt.minute * 60 + origin_dt.second
+                                except Exception:
+                                    # Fallback to time-of-day only if something goes wrong
+                                    origin_dep_secs = origin_dt.hour * 3600 + origin_dt.minute * 60 + origin_dt.second
+                                
+                                # Also record the timezone offset in seconds (may be 0)
+                                try:
+                                    tzoff = origin_dt.utcoffset()
+                                    if tzoff is not None:
+                                        origin_tz_offset_s = int(tzoff.total_seconds())
+                                    else:
+                                        origin_tz_offset_s = 0
+                                except Exception:
+                                    origin_tz_offset_s = 0
                     # --------------------------------------------------------
 
                     # extract optional bearing (may be present under VehicleLocation or elsewhere)
@@ -288,9 +324,68 @@ class BusLive:
                         # try searching the whole MonitoredVehicleJourney subtree
                         bearing, matched_tag = _extract_bearing_from_element(mvj)
 
+                    # --- extract additional ID fields we can surface to callers ---
+                    meta = {}
+                    try:
+                        # Search MonitoredVehicleJourney subtree for common identifiers
+                        for child in mvj.iter():
+                            if not isinstance(child.tag, str):
+                                continue
+                            tag = child.tag.lower()
+                            txt = (child.text or '').strip()
+                            if not txt:
+                                # also check attributes (some feeds put ids in attributes)
+                                for ak, av in (child.attrib or {}).items():
+                                    if not av:
+                                        continue
+                                    lak = ak.lower()
+                                    if 'vehicleref' in lak:
+                                        meta.setdefault('vehicle_ref', av)
+                                    if 'framedvehiclejourneyref' in lak:
+                                        meta.setdefault('framed_journey_ref', av)
+                                    if 'datedvehiclejourneyref' in lak:
+                                        meta.setdefault('dated_journey_ref', av)
+                                continue
+                            # tag-name based matching (case-insensitive)
+                            if tag.endswith('vehicleref') or tag.endswith('vehiclenumber'):
+                                meta.setdefault('vehicle_ref', txt)
+                            elif tag.endswith('framedvehiclejourneyref'):
+                                meta.setdefault('framed_journey_ref', txt)
+                            elif tag.endswith('datedvehiclejourneyref'):
+                                meta.setdefault('dated_journey_ref', txt)
+                            elif tag.endswith('vehiclejourneycode'):
+                                meta.setdefault('vehicle_journey_code', txt)
+                            elif tag.endswith('datedjourneyref'):
+                                # some feeds use alternative naming
+                                meta.setdefault('dated_journey_ref', txt)
+                            elif tag.endswith('originref'):
+                                # SIRI OriginRef often holds an ATCO/NAPTAN code
+                                meta.setdefault('origin_atco', txt)
+                            elif tag.endswith('destinationref'):
+                                # SIRI DestinationRef often holds an ATCO/NAPTAN code
+                                meta.setdefault('destination_atco', txt)
+                            elif tag.endswith('origin') and txt.isdigit():
+                                # Some feeds use <Origin> with an ATCO code numeric string
+                                meta.setdefault('origin_atco', txt)
+                            elif tag.endswith('destination') and txt.isdigit():
+                                meta.setdefault('destination_atco', txt)
+                        # include the raw operator ref/code when present so callers
+                        # can perform strict operator-based matching
+                        if operator_ref:
+                            meta.setdefault('operator_ref', operator_ref)
+                        # include origin timezone offset if we parsed one earlier
+                        try:
+                            meta.setdefault('origin_tz_offset_s', origin_tz_offset_s)
+                        except Exception:
+                            pass
+                    except Exception:
+                        # best-effort: do not fail the entire feed parsing for meta extraction errors
+                        meta = meta or {}
+
                     if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
-                        # Return an 8-tuple (bearing may be None).
-                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs, bearing))
+                        # Return a 9-tuple (bearing may be None, meta may be empty dict).
+                        # `meta` now includes a best-effort `operator_ref` when available.
+                        results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs, bearing, meta))
                         if bearing is not None:
                             logger.debug(
                                 f"Vehicle live feed: line={line_ref}, dest={dest}, lat={lat_v}, lon={lon_v}, bearing={bearing} (matched={matched_tag})"
@@ -347,11 +442,21 @@ def main():
     print(f"Found {len(results)} vehicles within tolerance")
     display_results = results if args.limit is None else results[: args.limit]
     for i, item in enumerate(display_results):
-        # support both 7-tuple and 8-tuple (with bearing)
-        if len(item) == 7:
-            line, dest, lat, lon, operator, delay_s, origin_dep = item
+        # support both 7/8-tuple shapes and an optional trailing metadata dict
+        meta = {}
+        base = item
+        try:
+            if isinstance(item[-1], dict):
+                meta = item[-1]
+                base = item[:-1]
+        except Exception:
+            base = item
+
+        if len(base) == 7:
+            line, dest, lat, lon, operator, delay_s, origin_dep = base
+            bearing = None
         else:
-            line, dest, lat, lon, operator, delay_s, origin_dep, bearing = item
+            line, dest, lat, lon, operator, delay_s, origin_dep, bearing = base
         delay_str = f", delay={delay_s}s" if delay_s is not None else ""
         origin_str = ""
         if origin_dep is not None:

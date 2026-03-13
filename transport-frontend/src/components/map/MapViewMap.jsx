@@ -12,6 +12,7 @@ import React, { useEffect } from "react";
 import BusStopLayer from "./BusStopLayer";
 import RouteLineLayer from "./RouteLineLayer";
 import { useRouteLine } from "../../hooks/useRouteLine";
+import { fetchRouteLineWithFallback, stopsToLatLngs } from '../../services/routeLineApi';
 import Grid from "@mui/material/Grid";
 import { useAccessibility } from "../../contexts/AccessibilityContext";
 
@@ -194,6 +195,43 @@ const busIconColor = (delayMinutes) => {
 
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32', null, null);
 const USER_ICON = createUserIcon();
+
+// Utility: project point P onto segment AB and return nearest point on segment
+const _projectPointOntoSegment = (px, py, ax, ay, bx, by) => {
+	const vx = bx - ax;
+	const vy = by - ay;
+	const wx = px - ax;
+	const wy = py - ay;
+	const vlen2 = vx * vx + vy * vy;
+	if (vlen2 === 0) return { x: ax, y: ay };
+	const t = Math.max(0, Math.min(1, (wx * vx + wy * vy) / vlen2));
+	return { x: ax + t * vx, y: ay + t * vy, t };
+};
+
+// Utility: find nearest point on a polyline (array of [lat, lon]) to a given point [lat, lon]
+const _nearestPointOnPolyline = (poly, pt) => {
+	if (!Array.isArray(poly) || poly.length === 0) return null;
+	let best = null;
+	const px = Number(pt[0]);
+	const py = Number(pt[1]);
+	for (let i = 0; i < poly.length - 1; i++) {
+		const a = poly[i];
+		const b = poly[i + 1];
+		const ax = Number(a[0]);
+		const ay = Number(a[1]);
+		const bx = Number(b[0]);
+		const by = Number(b[1]);
+		const proj = _projectPointOntoSegment(px, py, ax, ay, bx, by);
+		const dx = proj.x - px;
+		const dy = proj.y - py;
+		const d2 = dx * dx + dy * dy;
+		if (best == null || d2 < best.d2) {
+			best = { x: proj.x, y: proj.y, d2, segIndex: i, t: proj.t };
+		}
+	}
+	if (!best) return null;
+	return [best.x, best.y];
+};
 
 /**
  * Internal map controller that fires onReady and onMoveEnd callbacks.
@@ -739,6 +777,9 @@ export default function MapViewMap({
 
 	const { activeRoutes, toggleRoute, isActive, clearRoutes } = useRouteLine();
 
+	// Selected vehicle track overlay shown when user clicks a live vehicle marker.
+	const [selectedVehicleTrack, setSelectedVehicleTrack] = React.useState(null);
+
 	// Debugging: log when showRouteLines changes and when we clear routes
 	React.useEffect(() => {
 		try {
@@ -751,7 +792,49 @@ export default function MapViewMap({
 			clearRoutes();
 		}
 	}, [showRouteLines, clearRoutes, activeRoutes]);
+
+	// When active route overlays are cleared, also clear any selected vehicle track
+	React.useEffect(() => {
+		try {
+			if (!activeRoutes || activeRoutes.size === 0) {
+				setSelectedVehicleTrack(null);
+			}
+		} catch (e) {
+			// ignore
+		}
+	}, [activeRoutes]);
 	const { highContrast } = useAccessibility();
+
+	// Debug toggle mirrored from MapViewPage: when set in localStorage under
+	// SHOW_ALL_BUSES_DEBUG, allow the UI to fall back to nearest-geometry variant
+	// selection for debugging. Default is false in normal operation.
+	const debugShowAllBuses = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_ALL_BUSES_DEBUG') === '1');
+
+	// Cache routeData per-line so first-click has immediate access when possible.
+	const [routeDataCache, setRouteDataCache] = React.useState({});
+
+	// Prefetch route data for visible markers to avoid first-click fallback to mock.
+	React.useEffect(() => {
+		let mounted = true;
+		const lines = new Set();
+		try {
+			for (const m of filteredMarkers) {
+				const line = m.routeNumber || m.route;
+				if (line) lines.add(String(line));
+			}
+		} catch (e) {}
+		// Fetch each line if not already cached
+		for (const line of lines) {
+			if (routeDataCache[line]) continue;
+			fetchRouteLineWithFallback(line).then((data) => {
+				if (!mounted) return;
+				setRouteDataCache((prev) => ({ ...prev, [line]: data }));
+			}).catch(() => {
+				// ignore individual fetch failures
+			});
+		}
+		return () => { mounted = false; };
+	}, [filteredMarkers]);
 
 	// High-contrast mode → CartoDB Positron (clean, light, high-legibility labels)
 	// Normal mode        → standard OpenStreetMap
@@ -914,7 +997,109 @@ export default function MapViewMap({
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
-								click: () => onOpenPopup(marker.id)
+								click: async () => {
+									// open popup immediately
+									try { onOpenPopup(marker.id); } catch (e) { /* ignore */ }
+									// If the same vehicle is already selected, toggle it off
+									try {
+										if (selectedVehicleTrack && selectedVehicleTrack.id === marker.id) {
+											setSelectedVehicleTrack(null);
+											return;
+										}
+									} catch (e) { /* ignore */ }
+									if (marker.type === 'bus') {
+										try {
+											const line = marker.routeNumber || marker.route || null;
+											if (!line) return;
+											// Prefer cached data (prefetched) to avoid falling back to mock on first click
+											let routeData = routeDataCache[String(line)];
+											if (!routeData) {
+												routeData = await fetchRouteLineWithFallback(String(line));
+												// cache result for future clicks
+												setRouteDataCache((prev) => ({ ...prev, [String(line)]: routeData }));
+											}
+											if (!routeData || !Array.isArray(routeData.variants) || routeData.variants.length === 0) {
+												setSelectedVehicleTrack(null);
+												return;
+											}
+
+											// Prefer an explicit mapping included in the live marker metadata
+											// (the bus feed / backend augmentation often attaches route_id,
+											// journey_id or similar fields when computing delays). If present
+											// use that to pick the exact variant instead of nearest-geometry.
+											let metaRouteId = null;
+											if (marker.meta) {
+												metaRouteId = marker.meta.route_id || marker.meta.routeId || marker.meta.route || marker.meta.logged_journey_id || marker.meta.journey_id || marker.meta.journeyId || null;
+											}
+
+											const pos = marker.position;
+											// If we have an explicit route_id from the marker metadata, try to
+											// find a matching variant immediately and use its geometry.
+											if (metaRouteId) {
+												const match = routeData.variants.find(v => v && (v.route_id === metaRouteId || String(v.route_id) === String(metaRouteId)));
+												if (match) {
+													let geom = Array.isArray(match.geometry) ? match.geometry : stopsToLatLngs(match.stops);
+													const stops = Array.isArray(match.stops) ? stopsToLatLngs(match.stops) : [];
+													if (Array.isArray(geom) && geom.length >= 2) {
+														const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
+														const color = busIconColor(marker.delayMinutes);
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops });
+														return;
+													}
+													// If geometry absent but stops present, render stops-only polyline
+													if (stops.length >= 2) {
+														const norm = stops.map((pt) => ([Number(pt[0]), Number(pt[1])]));
+														const color = busIconColor(marker.delayMinutes);
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops });
+														return;
+													}
+												}
+											}
+
+
+											// If no explicit mapping was provided, only fall back to
+											// nearest-geometry when developer debug mode is enabled.
+											// This avoids the UI picking an unrelated route variant
+											// purely based on geometric proximity when the server
+											// hasn't provided an authoritative id.
+											let best = null;
+											if (metaRouteId || debugShowAllBuses) {
+												for (const variant of routeData.variants) {
+													let geom = Array.isArray(variant.geometry) ? variant.geometry : stopsToLatLngs(variant.stops);
+													if (!Array.isArray(geom) || geom.length === 0) continue;
+													const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
+													let minD = Infinity;
+													for (const p of norm) {
+														const dlat = p[0] - pos[0];
+														const dlon = p[1] - pos[1];
+														const d2 = dlat * dlat + dlon * dlon;
+														if (d2 < minD) minD = d2;
+													}
+													if (best == null || minD < best.minD) {
+														best = { variant, norm, minD };
+													}
+												}
+
+												if (!best) {
+													setSelectedVehicleTrack(null);
+													return;
+												}
+											} else {
+												// No authoritative mapping and not in debug mode:
+												// do not attempt to guess the variant by geometry.
+												setSelectedVehicleTrack(null);
+												return;
+											}
+
+											const color = busIconColor(marker.delayMinutes);
+											// include stops if variant provides them
+											const stops = Array.isArray(best.variant && best.variant.stops) ? stopsToLatLngs(best.variant.stops) : [];
+											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops });
+										} catch (e) {
+											setSelectedVehicleTrack(null);
+										}
+									}
+								}
 							}}
 						>
 							{openPopupId === marker.id && (
@@ -1003,19 +1188,55 @@ export default function MapViewMap({
 												{Object.entries(marker.meta)
 													.filter(([k]) => {
 														const kk = String(k).toLowerCase();
-														// Exclude coordinate/operator/delay/status and any bearing-like fields
-														return ![
-															'lat', 'lon', 'latitude', 'longitude',
-															'operator', 'operator_name', 'operatorname', 'operator_ref', 'operatorref', 'operatorname',
-															'delay_minutes', 'delayminutes', 'status',
-															'bearing', 'bearing_degrees', 'bearingdegrees', 'heading', 'course'
-														].includes(kk);
+															// Exclude coordinate/operator/delay/status, identifier fields and any bearing-like fields
+															return ![
+																'lat', 'lon', 'latitude', 'longitude',
+																'operator', 'operator_name', 'operatorname', 'operator_ref', 'operatorref', 'operatorname',
+																'delay_minutes', 'delayminutes', 'status',
+																'bearing', 'bearing_degrees', 'bearingdegrees', 'heading', 'course',
+																// Administrative/identifier fields that should not be shown in the popup
+																'logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid',
+																'framed_journey_ref', 'framedjourneyref', 'dated_journey_ref', 'datedjourneyref',
+																'vehicle_journey_code', 'vehiclejourneycode', 'vehicle_ref', 'vehicleref',
+																// Origin/departure and ATCO fields (noisy for popup labels)
+																'origin_dep_secs', 'origindepsecs', 'origin_dep', 'origindep',
+																'origin_atco', 'originatco', 'destination_atco', 'destinationatco'
+															].includes(kk);
 													})
 													.map(([key, value]) => (
 														<Typography key={key} variant="body2" sx={{ mb: 0.5 }}>
 															<strong>{key.replace(/_/g, ' ')}:</strong> {String(value)}
 														</Typography>
 													))}
+
+													{/* Selected vehicle track overlay (shown when user clicks a live vehicle) */}
+													{selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) && selectedVehicleTrack.coords.length >= 2 && (
+														<>
+															{/* Cyan underlay/frame so the vehicle track has a cyan outline */}
+															<Polyline pane="routePane" positions={selectedVehicleTrack.coords} pathOptions={{ color: '#00ffff', weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }} />
+															{/* Main coloured track */}
+															<Polyline pane="routePane" positions={selectedVehicleTrack.coords} pathOptions={{ color: selectedVehicleTrack.color || '#1a73e8', weight: 4, opacity: 1, lineCap: 'round', lineJoin: 'round' }} />
+															{/* Render stop markers snapped to the displayed polyline so they lie exactly on the track */}
+															{Array.isArray(selectedVehicleTrack.stops) && selectedVehicleTrack.stops.length > 0 && selectedVehicleTrack.coords.length >= 2 && (
+																selectedVehicleTrack.stops.map((s, si) => {
+																	try {
+																		const snapped = _nearestPointOnPolyline(selectedVehicleTrack.coords, s);
+																		if (!snapped) return null;
+																		return (
+																			<CircleMarker
+																				key={`stop-${si}`}
+																				center={snapped}
+																				radius={4}
+																				pathOptions={{ color: '#ffffff', weight: 2, fillColor: selectedVehicleTrack.color || '#1a73e8', fillOpacity: 1 }}
+																			/>
+																		);
+																	} catch (e) {
+																		return null;
+																	}
+																})
+															)}
+														</>
+													)}
 											</Box>
 										)}
 									</Box>
