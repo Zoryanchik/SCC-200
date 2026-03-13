@@ -1272,9 +1272,10 @@ export default function MapViewMap({
 						// Keep the suggested routes under the AppBar header
 						zIndex: 1050,
 						display: { xs: 'none', md: 'block' },
-						minWidth: { md: 280, lg: 320 },
-						width: { md: 320, lg: 360 },
-						maxWidth: '42vw',
+						// Adjusted to be ~1.05x (5% wider) from the previous 0.9× baseline
+						minWidth: { md: 363, lg: 381 },
+						width: { md: 408, lg: 436 },
+						maxWidth: '43vw',
 					}}>
 						{sideContent}
 					</Box>

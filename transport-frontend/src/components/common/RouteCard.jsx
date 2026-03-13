@@ -43,7 +43,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
           anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
           transformOrigin={{ vertical: 'top', horizontal: 'left' }}
         >
-          <Box sx={{ p: 1, maxWidth: 240 }}>
+          <Box sx={{ p: 1, maxWidth: { xs: 240, md: 360 } }}>
             <Typography fontWeight={700}>{cap}</Typography>
           </Box>
         </Popover>
@@ -81,6 +81,11 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
         minHeight: 160,
         display: 'flex',
         flexDirection: 'column',
+  // Increased RouteCard max width by ~1.2x from current values per request
+  width: '100%',
+  // increased by 1.05× from the current values to be slightly wider on desktop
+  maxWidth: { xs: '100%', md: 381, lg: 436 },
+        boxSizing: 'border-box',
         borderColor: isSelected ? undefined : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
         color: isSelected ? undefined : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.grey[400]),
       })}
@@ -367,7 +372,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                           sx={(theme) => ({ display: 'block', mt: 0.5, color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary) })}
                           fontWeight={400}
                         >
-                            Service: {step.journey_origin || '?'} → {step.journey_destination || '?'}
+                            {step.journey_origin || '?'} → {step.journey_destination || '?'}
                           </Typography>
                       )}
                       {(step.departure_time_with_offset || step.arrival_time_with_offset) && (

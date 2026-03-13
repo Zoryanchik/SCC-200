@@ -1452,12 +1452,14 @@ export default function HomePage() {
     // If deselecting, just clear selection immediately
     if (!willSelect) {
       setSelectedRouteIdx(null);
+      try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (e) {}
       return;
     }
 
     const opt = routeOptions?.[idx];
     if (!opt || !opt.sources) {
       setSelectedRouteIdx(idx);
+      try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (e) {}
       return;
     }
 
@@ -1468,12 +1470,14 @@ export default function HomePage() {
     // If no legs available, just select without geometry
     if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) {
       setSelectedRouteIdx(idx);
+      try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (e) {}
       return;
     }
 
     // If geometry was already prefetched, just select
     if (opt.routeGeometries && opt.routeGeometries.length > 0) {
       setSelectedRouteIdx(idx);
+      try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (e) {}
       return;
     }
 
@@ -1488,6 +1492,7 @@ export default function HomePage() {
     } catch (e) {
       console.warn('Failed to fetch per-leg geometry', e);
       setSelectedRouteIdx(idx);
+      try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (err) {}
     }
   };
 
@@ -1521,7 +1526,7 @@ export default function HomePage() {
           <Button
             size="small"
             variant="contained"
-            onClick={() => { setShowSuggested(false); setSelectedRouteIdx(null); }}
+            onClick={() => { setShowSuggested(false); setSelectedRouteIdx(null); try { setLabelDetail({ open: false, label: '', content: null }); setLabelAnchorEl(null); } catch (e) {} }}
             aria-label="Close suggested routes"
             startIcon={<X size={16} />}
             sx={{
@@ -1556,8 +1561,8 @@ export default function HomePage() {
                 sx={{ cursor: 'pointer', height: 'auto', display: 'block' }}
               >
                 {/* Option label + selected indicator: render multiple chips (uppercase) clickable for details */}
-                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75, flexWrap: 'wrap' }}>
-                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5, flexWrap: 'wrap' }}>
+                  <Stack direction="row" spacing={0.5} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
                     {(() => {
                       // enforce requested display order and colours
                       const rawLabels = Array.isArray(opt.labels) ? opt.labels : [opt.label];
@@ -1592,7 +1597,7 @@ export default function HomePage() {
                         const key = Object.keys(colorMap).find((k) => k.toUpperCase() === labUp) || labUp;
                         const bg = colorMap[key] || 'grey.300';
                         return (
-                          <Box key={lab} sx={{ display: 'inline-block' }}>
+                          <Box key={lab} sx={{ display: 'inline-flex', alignItems: 'center', mr: 0.5 }}>
                             <Chip
                               size="small"
                               label={labUp}
@@ -1604,13 +1609,14 @@ export default function HomePage() {
                                 color: '#000000', // font black per request
                                 border: '1px solid #00BCD4', // frame cyan
                                 height: 18,
-                                fontSize: '0.56rem',
-                                paddingLeft: 0.25,
-                                paddingRight: 0.25,
+                                fontSize: '0.52rem',
+                                paddingLeft: '6px',
+                                paddingRight: '6px',
                                 minWidth: '0px',
                                 lineHeight: '16px',
                                 cursor: 'pointer',
-                                px: 0.4,
+                                px: 0.3,
+                                letterSpacing: '0.2px',
                               }}
                             />
                           </Box>
@@ -1711,7 +1717,18 @@ export default function HomePage() {
                           return;
                         }
                         setSelectedFromStop(value);
-                        if (value && typeof value === "object") setFromLocation(value.display_name || value.name || "");
+                        if (value && typeof value === "object") {
+                          setFromLocation(value.display_name || value.name || "");
+                          try {
+                            const lat = value.lat ?? value.latitude;
+                            const lon = value.lon ?? value.longitude;
+                            if (mapInstance && typeof lat === 'number' && typeof lon === 'number') {
+                              mapInstance.flyTo([lat, lon], Math.max(mapInstance.getZoom(), 15), { duration: 1.2 });
+                            }
+                          } catch (err) {
+                            // ignore
+                          }
+                        }
                       }}
                       inputValue={fromLocation}
                       onInputChange={(e, value) => setFromLocation(value)}
@@ -1823,7 +1840,16 @@ export default function HomePage() {
                       onChange={(e, value) => {
                         if (typeof value === "string") { setSelectedToStop(null); setToLocation(value); return; }
                         setSelectedToStop(value);
-                        if (value && typeof value === "object") setToLocation(value.display_name || value.name || "");
+                        if (value && typeof value === "object") {
+                          setToLocation(value.display_name || value.name || "");
+                          try {
+                            const lat = value.lat ?? value.latitude;
+                            const lon = value.lon ?? value.longitude;
+                            if (mapInstance && typeof lat === 'number' && typeof lon === 'number') {
+                              mapInstance.flyTo([lat, lon], Math.max(mapInstance.getZoom(), 15), { duration: 1.2 });
+                            }
+                          } catch (err) {}
+                        }
                       }}
                       inputValue={toLocation}
                       onInputChange={(e, value) => setToLocation(value)}

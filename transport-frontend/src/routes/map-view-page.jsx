@@ -199,14 +199,13 @@ useEffect(() => {
 if ((Array.isArray(busLocations) && busLocations.length > 0) || 
     (Array.isArray(trainDepartures) && trainDepartures.length > 0)) {
 
-const newMarkers = [];
-let id = 1;
+  const newMarkers = [];
 
-// Add bus locations
-if (Array.isArray(busLocations) && busLocations.length > 0) {
-  busLocations.forEach(bus => {
-    const lat = bus.latitude || bus.lat;
-    const lon = bus.longitude || bus.lon;
+  // Add bus locations
+  if (Array.isArray(busLocations) && busLocations.length > 0) {
+    busLocations.forEach((bus, idx) => {
+      const lat = bus.latitude || bus.lat;
+      const lon = bus.longitude || bus.lon;
 
     // copy backend-provided fields into meta but exclude coords
     const meta = { ...(bus || {}) };
@@ -239,8 +238,13 @@ if (Array.isArray(busLocations) && busLocations.length > 0) {
 
     const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 
+    // Use stable ids when possible (backend-provided vehicle id/ref) so UI
+    // selections (popups / selectedVehicleTrack) remain associated with the
+    // same vehicle across background refreshes. Fall back to a generated id
+    // using any available unique fields or coordinates.
+    const stableId = bus.id || bus.vehicleId || bus.vehicle_id || bus.vehicle_ref || bus.vehicleRef || bus.v || bus.vehicle || `bus-${bus.vehicleId || bus.id || idx}-${lat}-${lon}`;
     newMarkers.push({
-      id: id++,
+      id: stableId,
       position: [lat, lon],
       name: displayName,
       type: 'bus',
@@ -256,27 +260,28 @@ if (Array.isArray(busLocations) && busLocations.length > 0) {
 
 // Add train departures
 if (Array.isArray(trainDepartures)) {
-    const stations = {};
-    trainDepartures.forEach((service) => {
-        // Build new markers with each station having a list of its current services
-        if (!stations[service.stationName]) {
-        stations[service.stationName] = {
-            id: id++,
-            name: service.stationName,
-            position: [service.lat, service.lon],
-            type: 'train',
-            services: []
-        }
-        }
+  const stations = {};
+  trainDepartures.forEach((service) => {
+    // Build new markers with each station having a list of its current services
+    const stationKey = service.stationId || service.stationCode || service.stationName || `${service.lat}-${service.lon}`;
+    if (!stations[stationKey]) {
+    stations[stationKey] = {
+      id: stationKey,
+      name: service.stationName,
+      position: [service.lat, service.lon],
+      type: 'train',
+      services: []
+    }
+    }
 
-        stations[service.stationName].services.push({
-        status: service.status,
-        destination: service.destination,
-        departureTime: service.departureTime,
-        delayMins: service.delayMins,
-        });
+    stations[stationKey].services.push({
+    status: service.status,
+    destination: service.destination,
+    departureTime: service.departureTime,
+    delayMins: service.delayMins,
     });
-    newMarkers.push(...Object.values(stations));
+  });
+  newMarkers.push(...Object.values(stations));
 }
 
 setMarkers(newMarkers);
@@ -370,23 +375,11 @@ const isOriginDepartureTooFar = (m, maxFutureSec = 20 * 60) => {
   return delta > maxFutureSec;
 };
 
-// Filter markers: show trains always (subject to filters) but only show
-// buses that are mapped to a journey when the bus filter is enabled.
+// Filter markers: align behaviour with the home page — show trains and buses
+// according to the user's toggles without applying stricter server-mapping
+// gating here. This keeps the Map view consistent with the Home dashboard.
 const filteredMarkers = useMemo(() => (
-  markers.filter(m => {
-    if (m.type === 'train') return filters.showTrains;
-    if (m.type === 'bus') {
-      if (!filters.showBuses) return false;
-      // If debug flag enabled, always include buses
-      if (debugShowAllBuses) return true;
-      // Exclude buses that are not mapped
-      if (!isBusMapped(m)) return false;
-      // Exclude buses whose origin departure is too far in the future
-      if (isOriginDepartureTooFar(m, 20 * 60)) return false;
-      return true;
-    }
-    return false;
-  })
+  markers.filter(m => (m.type === 'bus' && filters.showBuses) || (m.type === 'train' && filters.showTrains))
 ), [markers, filters.showBuses, filters.showTrains]);
 
 // Debugging: when markers change, log counts so we can see why buses are filtered
