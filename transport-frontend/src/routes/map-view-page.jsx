@@ -416,7 +416,7 @@ borderColor: 'divider'
 <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} mb={2} flexWrap="wrap" alignItems={{ xs: "stretch", sm: "center" }}>
 {/* Location search bar */}
 <Autocomplete
-  sx={{ flex: 1, minWidth: 220 }}
+  sx={{ flex: 1, minWidth: { xs: 0, sm: 220 } }}
   freeSolo
   filterOptions={(x) => x}
   options={searchResults || []}
@@ -465,6 +465,8 @@ border: `2px solid ${filters.showBuses ? '#6366F1' : '#E2E8F0'}`,
 borderRadius: '10px',
 display: 'flex',
 alignItems: 'center',
+justifyContent: 'center',
+width: { xs: '100%', sm: 'auto' },
 gap: 1,
 cursor: 'pointer',
 backgroundColor: filters.showBuses ? '#6366F1' : 'transparent',
@@ -493,6 +495,8 @@ border: `2px solid ${filters.showTrains ? '#10B981' : '#E2E8F0'}`,
 borderRadius: '10px',
 display: 'flex',
 alignItems: 'center',
+justifyContent: 'center',
+width: { xs: '100%', sm: 'auto' },
 gap: 1,
 cursor: 'pointer',
 backgroundColor: filters.showTrains ? '#10B981' : 'transparent',
@@ -552,7 +556,7 @@ Center on me
 )}
 
 {userLocation && nearestStop && (
-<Stack direction="row" spacing={1.5} alignItems="center" mb={2} flexWrap="wrap">
+<Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ xs: "stretch", sm: "center" }} mb={2} flexWrap="wrap">
 <Chip
 label={`Nearest: ${nearestStop.name}`}
 variant="outlined"

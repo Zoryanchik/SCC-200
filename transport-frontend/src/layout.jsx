@@ -156,85 +156,97 @@ export default function AppLayout({ children }) {
 			{/* Baseline CSS (e.g. padding: 0) and enable automatic use of the user's color scheme */}
 			<CssBaseline enableColorScheme />
 			<AppBar position="sticky" color="default" enableColorOnDark>
-				<Toolbar>
-					<Container maxWidth={false} disableGutters sx={{ px: { xs: 2, md: 4 } }}>
-						<Stack direction="row" alignItems="center" justifyContent="space-between" spacing={3}>
+				<Toolbar sx={{ minHeight: { xs: 84, sm: 64 }, py: { xs: 1, sm: 0 } }}>
+					<Container maxWidth={false} disableGutters sx={{ px: { xs: 1.25, sm: 2, md: 4 } }}>
+						<Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "stretch", sm: "center" }} justifyContent="space-between" spacing={{ xs: 1, sm: 3 }}>
 							<Typography 
 								variant="h6" 
 								fontWeight={700} 
-								sx={{ letterSpacing: 0.4 }}
+								sx={{ letterSpacing: 0.4, textAlign: { xs: "center", sm: "left" }, fontSize: { xs: "1.05rem", sm: "1.25rem" }, lineHeight: 1.2 }}
 								component="h1"
 							>
 									Lancashire Transport
 								</Typography>
-							<Stack direction="row" spacing={1.5} alignItems="center">
-								<Button
-									component={RouterLink}
-									to="/"
-									color={pathname === "/" ? "secondary" : "inherit"}
-									variant={pathname === "/" ? "contained" : "text"}
-									sx={{ 
-										textTransform: "none", 
-										fontWeight: 600,
-										'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
-									}}
-									aria-current={pathname === "/" ? "page" : undefined}
-								>
-									Home
-								</Button>
-								<Button
-									component={RouterLink}
-									to="/map-view"
-									color={pathname.startsWith("/map-view") ? "secondary" : "inherit"}
-									variant={pathname.startsWith("/map-view") ? "contained" : "text"}
-									sx={{ 
-										textTransform: "none", 
-										fontWeight: 600,
-										'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
-									}}
-									aria-current={pathname.startsWith("/map-view") ? "page" : undefined}
-								>
-									Map
-								</Button>
-								<IconButton 
-									onClick={toggleTheme} 
-									color="inherit"
-									aria-label={`Switch to ${mode === "dark" ? "light" : "dark"} theme`}
-									size="small"
-									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
-								>
-									{mode === "dark" ? <Sun size={20} /> : <Moon size={20} />}
-								</IconButton>
-								{/* Text scale: cycles normal → large → xlarge */}
-								<IconButton
-									onClick={cycleFontSize}
-									color="inherit"
-									aria-label={`Text size: ${fontSize} (click to change)`}
-									title={`Text size: ${fontSize}`}
-									size="small"
-									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
-								>
-									<Type size={fontSize === 'normal' ? 16 : fontSize === 'large' ? 19 : 22} />
-								</IconButton>
-								{/* High-contrast toggle */}
-								<IconButton
-									onClick={() => setHighContrast(!highContrast)}
-									color={highContrast ? 'primary' : 'inherit'}
-									aria-label={`${highContrast ? 'Disable' : 'Enable'} high contrast`}
-									aria-pressed={highContrast}
-									title={highContrast ? 'Disable high contrast' : 'Enable high contrast'}
-									size="small"
-									sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
-								>
-									<Contrast size={20} />
-								</IconButton>
+							<Stack direction="row" spacing={1} alignItems="center" justifyContent={{ xs: "space-between", sm: "flex-end" }} sx={{ width: "100%", flexWrap: "wrap", rowGap: 0.75 }}>
+								<Stack direction="row" spacing={1} sx={{ flexGrow: { xs: 1, sm: 0 } }}>
+									<Button
+										component={RouterLink}
+										to="/"
+										color={pathname === "/" ? "secondary" : "inherit"}
+										variant={pathname === "/" ? "contained" : "text"}
+										size="small"
+										sx={{ 
+											textTransform: "none", 
+											fontWeight: 600,
+											minWidth: { xs: 72, sm: 84 },
+											px: { xs: 1.25, sm: 1.75 },
+											flex: { xs: 1, sm: "0 0 auto" },
+											'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
+										}}
+										aria-current={pathname === "/" ? "page" : undefined}
+									>
+										Home
+									</Button>
+									<Button
+										component={RouterLink}
+										to="/map-view"
+										color={pathname.startsWith("/map-view") ? "secondary" : "inherit"}
+										variant={pathname.startsWith("/map-view") ? "contained" : "text"}
+										size="small"
+										sx={{ 
+											textTransform: "none", 
+											fontWeight: 600,
+											minWidth: { xs: 72, sm: 84 },
+											px: { xs: 1.25, sm: 1.75 },
+											flex: { xs: 1, sm: "0 0 auto" },
+											'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
+										}}
+										aria-current={pathname.startsWith("/map-view") ? "page" : undefined}
+									>
+										Map
+									</Button>
+								</Stack>
+								<Stack direction="row" spacing={0.5} alignItems="center">
+									<IconButton 
+										onClick={toggleTheme} 
+										color="inherit"
+										aria-label={`Switch to ${mode === "dark" ? "light" : "dark"} theme`}
+										size="small"
+										sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
+									>
+										{mode === "dark" ? <Sun size={20} /> : <Moon size={20} />}
+									</IconButton>
+									{/* Text scale: cycles normal → large → xlarge */}
+									<IconButton
+										onClick={cycleFontSize}
+										color="inherit"
+										aria-label={`Text size: ${fontSize} (click to change)`}
+										title={`Text size: ${fontSize}`}
+										size="small"
+										sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
+									>
+										<Type size={fontSize === 'normal' ? 16 : fontSize === 'large' ? 19 : 22} />
+									</IconButton>
+									{/* High-contrast toggle */}
+									<IconButton
+										onClick={() => setHighContrast(!highContrast)}
+										color={highContrast ? 'primary' : 'inherit'}
+										aria-label={`${highContrast ? 'Disable' : 'Enable'} high contrast`}
+										aria-pressed={highContrast}
+										title={highContrast ? 'Disable high contrast' : 'Enable high contrast'}
+										size="small"
+										sx={{ '&:focus-visible': { outline: '2px solid', outlineOffset: 2 } }}
+									>
+										<Contrast size={20} />
+									</IconButton>
+								</Stack>
 							</Stack>
 						</Stack>
 					</Container>
 				</Toolbar>
 			</AppBar>
-			<Box component="main" sx={{ bgcolor: "background.default", minHeight: "100vh", pb: 6 }}>
-				<Container maxWidth={false} sx={{ pt: 4, px: { xs: 2, md: 4 } }}>
+			<Box component="main" sx={{ bgcolor: "background.default", minHeight: "100dvh", pb: { xs: 3, md: 6 } }}>
+				<Container maxWidth={false} sx={{ pt: { xs: 2, md: 4 }, px: { xs: 1.25, sm: 2, md: 4 } }}>
 					<ErrorBoundary>
 						{children}
 					</ErrorBoundary>

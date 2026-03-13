@@ -772,7 +772,8 @@ export default function MapViewMap({
 				boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
 				border: '1px solid',
 				borderColor: 'divider',
-				height: { xs: 320, sm: 420, md: '100%' }
+				height: { xs: '55dvh', sm: 420, md: '100%' },
+				minHeight: { xs: 320, sm: 420, md: 0 }
 			}}>
 				{/* Full overlay only on the very first load — not on every 30-second refresh */}
 				{(busLoading || trainLoading) && (
@@ -1050,7 +1051,9 @@ export default function MapViewMap({
 						// Keep the suggested routes under the AppBar header
 						zIndex: 1050,
 						display: { xs: 'none', md: 'block' },
-						minWidth: 320,
+						minWidth: { md: 280, lg: 320 },
+						width: { md: 320, lg: 360 },
+						maxWidth: '42vw',
 					}}>
 						{sideContent}
 					</Box>
@@ -1059,7 +1062,7 @@ export default function MapViewMap({
 
 			{/* On small screens, render the sideContent below the map (full width) */}
 			{showSideOverlay && sideContent && (
-				<Box sx={{ display: { xs: 'block', md: 'none' }, width: '100%' }}>
+				<Box sx={{ display: { xs: 'block', md: 'none' }, width: '100%', maxHeight: '70dvh', overflow: 'hidden' }}>
 					{sideContent}
 				</Box>
 			)}
