@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Marker, Popup, Tooltip, useMap } from 'react-leaflet';
+import { Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { useBusStops } from '../../hooks/useBusStops';
 import { fetchBusArrivals } from '../../services/busStopsApi';
@@ -233,16 +233,6 @@ function BusStopMarker({ stop, zoom = 16, isRouteActive }) {
       icon={icon}
       data-testid={`bus-stop-marker-${stop.id}`}
     >
-      {stop.lines && stop.lines.length > 0 && (
-        <Tooltip
-          permanent={zoom >= 16}
-          direction="right"
-          offset={[8, -10]}
-          className="bus-lines-tooltip"
-        >
-          {stop.lines.slice(0, 4).join(' · ')}
-        </Tooltip>
-      )}
       <Popup
         closeOnClick={false}
         eventHandlers={{
@@ -304,6 +294,36 @@ export default function BusStopLayer({
           .forEach((btn) => applyChipStyle(btn, active));
       }
     };
+    // Expose a dispatch helper that callers can use even when the map
+    // (and thus __busRouteToggle) hasn't been registered yet. Clickers
+    // should call `window.__dispatchBusRouteToggle(line)`; if the map
+    // isn't ready we queue requests in `window.__busRouteToggleQueue`.
+    window.__dispatchBusRouteToggle = (line) => {
+      if (window.__busRouteToggle) return window.__busRouteToggle(line);
+      window.__busRouteToggleQueue = window.__busRouteToggleQueue || [];
+      window.__busRouteToggleQueue.push(line);
+    };
+
+    // If any toggles were queued before the map mounted, drain them now.
+    try {
+      if (Array.isArray(window.__busRouteToggleQueue) && window.__busRouteToggleQueue.length > 0) {
+        (async () => {
+          for (const l of window.__busRouteToggleQueue.slice()) {
+            try {
+              // await each toggle to avoid overwhelming any rate limits
+              // inside the route layer logic.
+              // eslint-disable-next-line no-await-in-loop
+              await window.__busRouteToggle(l);
+            } catch (e) {
+              // ignore individual failures
+            }
+          }
+          window.__busRouteToggleQueue = [];
+        })();
+      }
+    } catch (e) {
+      // ignore queue draining errors — best-effort only
+    }
     return () => { delete window.__busRouteToggle; };
   }, []);
 

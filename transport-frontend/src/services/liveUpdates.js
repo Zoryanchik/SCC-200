@@ -107,7 +107,10 @@ class LiveUpdatesManager {
    * @returns {string} Subscription ID
    */
   subscribeToBusMovements(callback) {
-    return this.subscribe('/topic/BUS_MVT_ALL', callback);
+    // Bus movement STOMP/topics are disabled in this deployment —
+    // the frontend fetches bus locations via HTTP polling instead.
+    console.warn('subscribeToBusMovements: bus STOMP subscription disabled; use HTTP polling for buses');
+    return null;
   }
 
   /**

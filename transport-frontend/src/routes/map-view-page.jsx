@@ -89,6 +89,11 @@ const BUS_SPEED = 0.012;
 const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
 
 export default function MapViewPage() {
+// Debug toggle: when set to '1' in localStorage under SHOW_ALL_BUSES_DEBUG,
+// the frontend will bypass mapping/time gating and show all buses returned
+// from the backend. This is a temporary aid for investigation only.
+const debugShowAllBuses = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_ALL_BUSES_DEBUG') === '1');
+
 const [markers, setMarkers] = useState(MOCK_MARKERS); // Start with mock data for instant display
 const [filters, setFilters] = useState({
 showBuses: true,
@@ -126,15 +131,18 @@ const handleSearchSelect = useCallback((option) => {
 }, [mapInstance]);
 
 // Fetch real data from API using the current map center (debounced inside the hook)
-const { data: busLocations, loading: busLoading, error: busError } = useLiveBusLocations('SCCU', {
-lat: mapCenter.lat,
-lon: mapCenter.lon,
-refreshInterval: 30000,
-debounceMs: 800,
+const { data: busLocations, loading: busLoading, refreshing: busRefreshing, countdown: busCountdown, refreshInterval: busRefreshInterval, error: busError } = useLiveBusLocations('SCCU', {
+  lat: mapCenter.lat,
+  lon: mapCenter.lon,
+  refreshInterval: 10000,
+  debounceMs: 800,
 });
 const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
-const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
+// STOMP/websocket is used only for train movements in this deployment.
+// Bus live data is fetched via HTTP polling (useLiveBusLocations). Do
+// not subscribe to bus STOMP topics to avoid conflicting state.
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
+const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
 
 // Track whether real API data has ever arrived so we know when to stop the mock animation.
 const [hasRealData, setHasRealData] = useState(false);
@@ -196,20 +204,54 @@ let id = 1;
 
 // Add bus locations
 if (Array.isArray(busLocations) && busLocations.length > 0) {
-busLocations.forEach(bus => {
-newMarkers.push({
-id: id++,
-position: [bus.latitude || bus.lat, bus.longitude || bus.lon],
-name: bus.name || `Bus ${bus.id}`,
-type: 'bus',
-status: bus.status || 'On time',
-routeNumber: bus.routeNumber || bus.route,
-delayMinutes: bus.delay_minutes ?? bus.delayMinutes ?? null,
-operator: bus.operator || bus.operator_name || null,
-bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? bus.heading ?? bus.course ?? null,
-meta: bus.meta ?? null,
-});
-});
+  busLocations.forEach(bus => {
+    const lat = bus.latitude || bus.lat;
+    const lon = bus.longitude || bus.lon;
+
+    // copy backend-provided fields into meta but exclude coords
+    const meta = { ...(bus || {}) };
+    delete meta.lat;
+    delete meta.lon;
+    delete meta.latitude;
+    delete meta.longitude;
+    // Avoid duplicating displayed fields in the popup
+    delete meta.line;
+    delete meta.destination;
+
+    // Extract operator robustly and keep it separate from the display name
+    let operatorName = null;
+    if (bus?.operator) {
+      if (typeof bus.operator === 'string') operatorName = bus.operator;
+      else if (typeof bus.operator === 'object') {
+        operatorName = bus.operator.name || bus.operator.operator_name || bus.operator.operatorName || null;
+      }
+    }
+    operatorName = operatorName || bus?.operator_name || bus?.operatorName || bus?.operator_ref || bus?.operatorRef || null;
+    ['operator', 'operator_name', 'operatorName', 'operator_ref', 'operatorRef'].forEach((k) => delete meta[k]);
+    // Remove delay/status keys – shown in the popup header, not in meta
+    ['delay_minutes', 'delayMinutes', 'status'].forEach((k) => delete meta[k]);
+
+    // Show destination as the primary label line (e.g. "To: Night Stop").
+    // Route/line number is shown separately in the popup pill.
+    const displayName = bus.destination
+                        ? `To: ${bus.destination}`
+                        : (bus.name || (bus.line ? String(bus.line) : `Bus ${bus.id || ''}`));
+
+    const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
+
+    newMarkers.push({
+      id: id++,
+      position: [lat, lon],
+      name: displayName,
+      type: 'bus',
+      status: bus.status || (delayMinutes != null && delayMinutes >= 2 ? `Delayed ${Math.round(delayMinutes)} min` : 'On time'),
+      routeNumber: bus.routeNumber || bus.route || bus.line,
+      delayMinutes,
+      operator: operatorName,
+      bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? bus.heading ?? bus.course ?? null,
+      meta,
+    });
+  });
 }
 
 // Add train departures
@@ -246,12 +288,122 @@ setApiError('Using demo data - API temporarily unavailable');
 }
 }, [busLocations, trainDepartures, busError, trainError]);
 
+// Determine whether a bus marker has a deterministic mapping to a journey.
+// We treat a bus as "mapped" when the live payload / backend attached
+// one of the known identifier fields. This is a best-effort check — the
+// backend may attach different keys depending on feed/provider, so we
+// check several common variants (snake_case / camelCase / alternative names).
+const isBusMapped = (m) => {
+  if (!m || m.type !== 'bus') return false;
+  // Exempt development/demo markers: allow mock buses to remain visible.
+  // Some codepaths set a `mock` flag, others use ids like 'mock-bus-1' — accept both.
+  if (m.mock === true) return true;
+  if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
+  const meta = m.meta || {};
+  // Only treat a bus as mapped when the backend has provided an
+  // authoritative journey identifier (e.g. `logged_journey_id` / `journey_id`)
+  // or an explicit `route_id`. Presence of feed-level identifiers such as
+  // `vehicle_ref` or `dated_journey_ref` alone is NOT sufficient — those
+  // can identify a vehicle or dated journey but do not guarantee a
+  // deterministic mapping to the internal timetable journey without
+  // server-side resolution.
+  const top = m.logged_journey_id || m.journey_id || m.route_id || null;
+  if (top) return true;
+  // If provenance fields are present (either top-level or inside meta),
+  // only consider a bus mapped when the server explicitly reports it as
+  // 'matched'. This hides vehicles that were rejected by gating
+  // (off-track, out-of-window, implausible delay, etc.).
+  const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
+  if (mr != null) return String(mr).toLowerCase() === 'matched';
+  const keys = Object.keys(meta).map(k => String(k).toLowerCase());
+  // Accept meta.logged_journey_id or meta.journey_id or meta.route_id only
+  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+  for (const w of want) {
+    if (keys.includes(w)) return true;
+    if (meta[w] || meta[w.replace(/_/g, '')]) return true;
+  }
+  return false;
+};
+
+// Determine whether the bus's origin departure is more than `maxFutureSec`
+// seconds in the future. origin_dep is a time-of-day in seconds since
+// midnight; to handle journeys that start after midnight relative to the
+// current time, compute the minimal positive delta modulo 24h.
+const isOriginDepartureTooFar = (m, maxFutureSec = 20 * 60) => {
+  if (!m || m.type !== 'bus') return false;
+  // mock buses are exempt
+  if (m.mock === true) return false;
+  if (m.id && String(m.id).toLowerCase().startsWith('mock')) return false;
+
+  const maybe = (v) => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.floor(n) : null;
+  };
+
+  // Try a few common locations for the origin departure seconds
+  const candidates = [
+    maybe(m.origin_dep_secs),
+    maybe(m.origin_dep),
+    maybe(m.originDepSecs),
+    maybe(m.meta && m.meta.origin_dep_secs),
+    maybe(m.meta && m.meta.origin_dep),
+    maybe(m.meta && m.meta.originaimeddeparturetime),
+  ];
+  let origin = null;
+  for (const c of candidates) {
+    if (c != null) { origin = c; break; }
+  }
+  if (origin == null) return false;
+
+  const now = new Date();
+  const nowSecs = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+  // If the feed included a timezone offset for the origin time, apply it
+  // to align the origin seconds with the client's local clock.
+  const tzOffsetSecs = (m.meta && Number.isFinite(Number(m.meta.origin_tz_offset_s)) ? Number(m.meta.origin_tz_offset_s) : (Number.isFinite(Number(m.origin_tz_offset_s)) ? Number(m.origin_tz_offset_s) : 0));
+  // If tzOffsetSecs is provided we adjust the origin value accordingly.
+  const originAdj = origin + (tzOffsetSecs || 0);
+  // delta candidate one: direct difference
+  let delta = originAdj - nowSecs;
+  // if negative, consider it as next-day start
+  if (delta < 0) delta += 24 * 3600;
+  return delta > maxFutureSec;
+};
+
+// Filter markers: show trains always (subject to filters) but only show
+// buses that are mapped to a journey when the bus filter is enabled.
 const filteredMarkers = useMemo(() => (
-markers.filter(m => 
-(m.type === 'bus' && filters.showBuses) || 
-(m.type === 'train' && filters.showTrains)
-)
+  markers.filter(m => {
+    if (m.type === 'train') return filters.showTrains;
+    if (m.type === 'bus') {
+      if (!filters.showBuses) return false;
+      // If debug flag enabled, always include buses
+      if (debugShowAllBuses) return true;
+      // Exclude buses that are not mapped
+      if (!isBusMapped(m)) return false;
+      // Exclude buses whose origin departure is too far in the future
+      if (isOriginDepartureTooFar(m, 20 * 60)) return false;
+      return true;
+    }
+    return false;
+  })
 ), [markers, filters.showBuses, filters.showTrains]);
+
+// Debugging: when markers change, log counts so we can see why buses are filtered
+useEffect(() => {
+  if (!debugShowAllBuses) return;
+  try {
+    const totalBuses = markers.filter(m => m.type === 'bus').length;
+    const mapped = markers.filter(m => m.type === 'bus' && isBusMapped(m)).length;
+    const future = markers.filter(m => m.type === 'bus' && isOriginDepartureTooFar(m, 20 * 60)).length;
+    console.debug('BUS DEBUG: total=', totalBuses, 'mapped=', mapped, 'origin_too_far=', future);
+    // Show a sample of rejected buses for inspection
+    const rejected = markers.filter(m => m.type === 'bus' && (!isBusMapped(m) || isOriginDepartureTooFar(m, 20 * 60))).slice(0,5);
+    console.debug('BUS DEBUG: sample rejected=', rejected);
+  } catch (e) {
+    console.debug('BUS DEBUG: logging failed', e);
+  }
+}, [markers, debugShowAllBuses]);
 
 const distanceMeters = useMemo(() => {
 const toRadians = (deg) => (deg * Math.PI) / 180;
@@ -311,38 +463,38 @@ return `${minutes} min walk`;
 };
 
 const normalizeLiveMarker = (item, type) => {
-const lat = item?.latitude ?? item?.lat;
-const lon = item?.longitude ?? item?.lon;
-if (typeof lat !== 'number' || typeof lon !== 'number') return null;
-return {
-id: item?.vehicleId || item?.id || `${type}-${lat}-${lon}`,
-position: [lat, lon],
-name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
-type,
-status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins` : 'On time'),
-routeNumber: item?.routeNumber || item?.route,
-destination: item?.destination,
-departureTime: item?.departureTime || item?.scheduledTime
-  ,
-  delayMinutes: item?.delay_minutes ?? item?.delayMinutes ?? null,
-  operator: item?.operator || item?.operator_name || null,
-  bearing: item?.bearing ?? item?.Bearing ?? item?.bearing_degrees ?? item?.heading ?? item?.course ?? null,
-};
+  const lat = item?.latitude ?? item?.lat;
+  const lon = item?.longitude ?? item?.lon;
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+
+  // Prefer the server-authoritative journey id when available so live
+  // websocket updates refer to the same entity as the initial HTTP fetch.
+  const stableId = item?.logged_journey_id || item?.journey_id || item?.vehicleId || item?.id || `${type}-${lat}-${lon}`;
+
+  return {
+    id: stableId,
+    position: [lat, lon],
+    name: item?.name || item?.label || (type === 'bus' ? `Bus ${item?.route || item?.routeNumber || ''}`.trim() : item?.station || 'Train'),
+    type,
+    status: item?.status || (item?.delayMinutes ? `Delayed ${item.delayMinutes} mins` : 'On time'),
+    routeNumber: item?.routeNumber || item?.route,
+    destination: item?.destination,
+    departureTime: item?.departureTime || item?.scheduledTime,
+    delayMinutes: item?.delay_minutes ?? item?.delayMinutes ?? null,
+    operator: item?.operator || item?.operator_name || null,
+    bearing: item?.bearing ?? item?.Bearing ?? item?.bearing_degrees ?? item?.heading ?? item?.course ?? null,
+    // Preserve backend metadata so mapping checks (isBusMapped) can see
+    // authoritative identifiers such as logged_journey_id / journey_id.
+    meta: item?.meta ?? null,
+    // Also expose common mapping identifiers at top-level for convenience.
+    logged_journey_id: item?.logged_journey_id ?? item?.meta?.logged_journey_id ?? null,
+    journey_id: item?.journey_id ?? item?.meta?.journey_id ?? null,
+    route_id: item?.route_id ?? item?.meta?.route_id ?? null,
+  };
 };
 
-useEffect(() => {
-const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : (liveBusUpdate ? [liveBusUpdate] : []);
-const normalized = updates.map((item) => normalizeLiveMarker(item, 'bus')).filter(Boolean);
-if (normalized.length === 0) return;
-
-setMarkers((prev) => {
-const next = new Map(prev.map((m) => [m.id, m]));
-for (const item of normalized) {
-next.set(item.id, { ...next.get(item.id), ...item });
-}
-return Array.from(next.values());
-});
-}, [liveBusUpdate]);
+// Removed: bus websocket updates. Buses are updated via HTTP polling
+// through `useLiveBusLocations` and the markers are refreshed above.
 
 useEffect(() => {
 const updates = Array.isArray(liveTrainUpdate) ? liveTrainUpdate : (liveTrainUpdate ? [liveTrainUpdate] : []);
@@ -622,18 +774,21 @@ sx={{ borderRadius: '10px' }}
 )}
 
 <Suspense fallback={<MapFallback />}>
-<MapViewMap
-filteredMarkers={filteredMarkers}
-openPopupId={openPopupId}
-onOpenPopup={setOpenPopupId}
-onClosePopup={() => setOpenPopupId(null)}
-userLocation={userLocation}
-nearestStop={nearestStop}
-busLoading={busLoading}
-trainLoading={trainLoading}
-onMapReady={setMapInstance}
-onMoveEnd={handleMoveEnd}
-/>
+          <MapViewMap
+            filteredMarkers={filteredMarkers}
+            openPopupId={openPopupId}
+            onOpenPopup={setOpenPopupId}
+            onClosePopup={() => setOpenPopupId(null)}
+            userLocation={userLocation}
+            nearestStop={nearestStop}
+            busLoading={busLoading}
+            busRefreshing={busRefreshing}
+            busCountdown={busCountdown}
+            busRefreshInterval={busRefreshInterval}
+            trainLoading={trainLoading}
+            onMapReady={setMapInstance}
+            onMoveEnd={handleMoveEnd}
+          />
 </Suspense>
 </Paper>
 </Stack>
