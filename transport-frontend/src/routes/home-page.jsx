@@ -244,10 +244,11 @@ function journeyToRouteCard(journey) {
   };
 }
 
+// Initial mock markers removed to prevent UI confusion
 const MOCK_MARKERS = [
-  { id: 1, position: [54.050556, -2.800556], name: "Lancaster Bus Station", type: "bus", status: "On time" },
-  { id: 2, position: [54.048889, -2.802500], name: "Lancaster Train Station", type: "train", status: "On time" },
-  { id: 3, position: [54.064560, -2.798890], name: "Lancaster City Center Stop", type: "bus", status: "On time" },
+  { id: 'mk-bus-1', type: 'bus', position: [54.0480, -2.8010], name: 'To: Lancaster University', routeNumber: '1', delayMinutes: 0, operator: 'Stagecoach' },
+  { id: 'mk-bus-2', type: 'bus', position: [54.0460, -2.7990], name: 'To: Morecambe', routeNumber: '2', delayMinutes: 4, operator: 'Stagecoach' },
+  { id: 'mk-train-1', type: 'train', position: [54.0435, -2.8055], name: 'Glasgow Central' }
 ];
 
 const DEFAULT_CENTER = { lat: 54.050556, lon: -2.800556 };
@@ -285,6 +286,15 @@ const normalizeCoords = (raw) => {
 const fetchGeometryForLegs = async (legs) => {
   if (!Array.isArray(legs) || legs.length === 0) return [];
 
+  // Some routers return the canonical route_id on the overall route meta
+  // rather than on each individual transit leg. If the caller attached that
+  // value as legs._route_id (or similar), thread it through so we can request
+  // stored track subsegments.
+  const fallbackRouteId = (
+    (legs && (legs.route_id || legs.routeId || legs._route_id || legs._routeId)) ||
+    null
+  );
+
   const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050').replace(/\/$/, '');
 
   const promises = legs.map(async (leg, i) => {
@@ -295,10 +305,10 @@ const fetchGeometryForLegs = async (legs) => {
     const toLat = ts?.lat;
     const toLon = ts?.lon;
 
-    // Determine mode string for colouring / styling
-    const rawMode = (leg.mode && String(leg.mode).toLowerCase()) || '';
-    const isWalk = rawMode === 'walking';
-    const mode = rawMode || (leg.line_name ? 'transit' : 'walking');
+  // Determine mode string for colouring / styling
+  const rawMode = (leg.mode && String(leg.mode).toLowerCase()) || '';
+  const isWalk = rawMode === 'walking';
+  const mode = rawMode || (leg.line_name ? 'transit' : 'walking');
 
     // Build fallback straight-line coords from endpoints
     const fallbackCoords = [];
@@ -322,8 +332,53 @@ const fetchGeometryForLegs = async (legs) => {
     }
 
     try {
-      const osrmMode = isWalk ? 'walking' : 'driving';
-      const url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(osrmMode)}`;
+  // Prefer backend-provided mode if present. For transit legs we still
+  // ask the backend for 'bus' so it can prefer stored route_tracks and
+  // subsegment by stops.
+  const isBusLikeLeg = !isWalk && (rawMode === 'bus' || rawMode === 'transit' || !!leg?.line_name);
+  const osrmMode = isWalk ? 'walking' : 'driving';
+      // If the leg carries an explicit route_id (or metadata with route_id)
+      // include it so the backend can return stored track subsegments when
+      // OSRM is unavailable. If no route_id but a line name is available,
+      // try to fetch variant geometry for that line as a fallback before
+      // calling OSRM.
+  // Canonical route id is provided by the backend in leg.meta.route_id.
+  // Avoid falling back to other ids (journey ids / legacy ids) because
+  // they can refer to a different variant and therefore draw a different
+  // track.
+  const routeId = (
+    (leg?.meta && (leg.meta.route_id || leg.meta.canonical_route_id || leg.meta.routeId)) ||
+    leg?.route_id ||
+    leg?.routeId ||
+    (leg?.meta && leg.meta.route && (leg.meta.route.id || leg.meta.route.route_id)) ||
+    fallbackRouteId ||
+    null
+  );
+
+      // NOTE: We intentionally do NOT fall back to /routes/line/{line} geometry.
+      // That endpoint can return multiple variants and selecting the wrong one
+      // is exactly how we end up drawing a different track than the chosen
+      // journey leg. Instead, we rely on /route/leg-geometry (with route_id and
+      // stop ids) which is tied to the journey's canonical route_id.
+
+      let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(osrmMode)}`;
+      if (routeId) {
+        url += `&route_id=${encodeURIComponent(routeId)}`;
+      }
+
+      // If we're routing a bus/transit leg, pass stop ids (ATCO codes) so the backend
+      // can return a stored-track subsegment rather than the full route.
+      try {
+        const isBusLeg = isBusLikeLeg;
+        const fromStopId = fs?.id || fs?.atco_code || fs?.atco || fs?.atcoCode || null;
+        const toStopId = ts?.id || ts?.atco_code || ts?.atco || ts?.atcoCode || null;
+        if (routeId && isBusLeg && fromStopId && toStopId) {
+          url += `&from_stop_id=${encodeURIComponent(fromStopId)}`;
+          url += `&to_stop_id=${encodeURIComponent(toStopId)}`;
+        }
+      } catch (_) {
+        // ignore
+      }
       const resp = await fetch(url);
       if (!resp.ok) return segment;
       const data = await resp.json();
@@ -629,10 +684,9 @@ export default function HomePage() {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
     refreshInterval: 20000,
-    debounceMs: 800,
+    debounceMs: typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 0 : 3000,
   });
   const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 180000);
-  const { data: liveBusUpdate } = useLiveUpdates("bus");
 
   // Update markers when real bus API data arrives
   useEffect(() => {
@@ -737,32 +791,6 @@ export default function HomePage() {
       } catch (e) { /* ignore */ }
     }
   }, [busLocations, trainDepartures]);
-
-  // Merge live WebSocket bus updates into markers
-  useEffect(() => {
-    const updates = Array.isArray(liveBusUpdate) ? liveBusUpdate : liveBusUpdate ? [liveBusUpdate] : [];
-    const normalized = updates
-      .map((item) => {
-        const lat = item?.latitude ?? item?.lat;
-        const lon = item?.longitude ?? item?.lon;
-        if (typeof lat !== "number" || typeof lon !== "number") return null;
-        return {
-          id: item?.vehicleId || item?.id || "bus-" + lat + "-" + lon,
-          position: [lat, lon],
-          name: item?.name || ("Bus " + (item?.route || "")).trim(),
-          type: "bus",
-          status: item?.status || "On time",
-          routeNumber: item?.routeNumber || item?.route,
-        };
-      })
-      .filter(Boolean);
-    if (normalized.length === 0) return;
-    setMarkers((prev) => {
-      const next = new Map(prev.map((m) => [m.id, m]));
-      for (const item of normalized) next.set(item.id, { ...next.get(item.id), ...item });
-      return Array.from(next.values());
-    });
-  }, [liveBusUpdate]);
 
   const filteredMarkers = useMemo(
     () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
@@ -1261,6 +1289,13 @@ export default function HomePage() {
               const firstSrc = firstOpt ? Object.values(firstOpt.sources)[0] : null;
               const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
               const planLegs = plan?.legs || [];
+              // Some planner responses only expose canonical route_id at the plan level.
+              // Attach it to the legs array so geometry fetches can pick it up as a fallback.
+              try {
+                if (plan && plan.meta && plan.meta.route_id && Array.isArray(planLegs)) {
+                  planLegs._route_id = plan.meta.route_id;
+                }
+              } catch (e) {}
               if (planLegs.length === 0) {
                 setSelectedRouteIdx(null);
                 setIsSearching(false);
@@ -1391,6 +1426,13 @@ export default function HomePage() {
         const firstSrc = firstOpt ? Object.values(firstOpt.sources)[0] : null;
         const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
         const planLegs = plan?.legs;
+        // Some planner responses only expose canonical route_id at the plan level.
+        // Attach it to the legs array so geometry fetches can pick it up as a fallback.
+        try {
+          if (plan && plan.meta && plan.meta.route_id && Array.isArray(planLegs)) {
+            planLegs._route_id = plan.meta.route_id;
+          }
+        } catch (e) {}
         if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) {
           setSelectedRouteIdx(null);
         } else {
@@ -1417,6 +1459,13 @@ export default function HomePage() {
             const src = opt ? Object.values(opt.sources)[0] : null;
             const plan = src ? (src.route ? src.route : src) : null;
             const planLegs = plan?.legs;
+            // Some planner responses only expose canonical route_id at the plan level.
+            // Attach it to the legs array so geometry fetches can pick it up as a fallback.
+            try {
+              if (plan && plan.meta && plan.meta.route_id && Array.isArray(planLegs)) {
+                planLegs._route_id = plan.meta.route_id;
+              }
+            } catch (e) {}
             if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) return;
             try {
               const segments = await fetchGeometryForLegs(planLegs);
@@ -1485,6 +1534,14 @@ export default function HomePage() {
     const firstSrc = Object.values(opt.sources)[0];
     const plan = firstSrc ? (firstSrc.route ? firstSrc.route : firstSrc) : null;
     const planLegs = plan?.legs;
+
+    // Some planner responses only expose canonical route_id at the plan level.
+    // Attach it to the legs array so geometry fetches can pick it up as a fallback.
+    try {
+      if (plan && plan.meta && plan.meta.route_id && Array.isArray(planLegs)) {
+        planLegs._route_id = plan.meta.route_id;
+      }
+    } catch (e) {}
 
     // If no legs available, just select without geometry
     if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) {

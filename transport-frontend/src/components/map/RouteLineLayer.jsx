@@ -23,10 +23,10 @@ const VARIANT_COLORS = [
  * Each variant is rendered as a coloured polyline with small circle
  * markers at each stop.  Hovering a stop shows its name.
  *
- * @param {{ routeData: object, lineColor?: string }} props
+ * @param {{ routeData: object, lineColor?: string, onRouteClick?: function }} props
  *   routeData — the { line, variants } object from the API / cache
  */
-function SingleRouteLine({ routeData }) {
+function SingleRouteLine({ routeData, onRouteClick }) {
   if (!routeData || !routeData.variants || routeData.variants.length === 0) {
     return null;
   }
@@ -128,25 +128,70 @@ function SingleRouteLine({ routeData }) {
             {/* Cyan underlay/frame so route variants have a cyan outline */}
             <Polyline
               positions={positions}
+              eventHandlers={{
+                add: (e) => {
+                  try {
+                    e.target.bindTooltip(`<strong style="font-size: 1.2em;">Line ${routeData.line}</strong>`, { sticky: true });
+                  } catch (err) {}
+                },
+                click: (e) => {
+                  try {
+                    if (e && e.originalEvent) {
+                      e.originalEvent.preventDefault();
+                      e.originalEvent.stopPropagation();
+                    }
+                    if (e && typeof e.stopPropagation === 'function') {
+                      e.stopPropagation();
+                    }
+                    if (onRouteClick) onRouteClick(routeData.line);
+                  } catch (err) { /* ignore */ }
+                }
+              }}
               pathOptions={{
                 color: '#00ffff',
                 weight: 6,
                 opacity: 0.9,
                 dashArray: idx > 0 ? '8 6' : undefined,
               }}
-            />
+            >
+              <Tooltip sticky>
+                <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
+              </Tooltip>
+            </Polyline>
 
             {/* The route polyline (on top) */}
             <Polyline
               positions={positions}
+              eventHandlers={{
+                add: (e) => {
+                  try {
+                    e.target.bindTooltip(`<strong style="font-size: 1.2em;">Line ${routeData.line}</strong>`, { sticky: true });
+                  } catch (err) {}
+                },
+                click: (e) => {
+                  try {
+                    if (e && e.originalEvent) {
+                      e.originalEvent.preventDefault();
+                      e.originalEvent.stopPropagation();
+                    }
+                    if (e && typeof e.stopPropagation === 'function') {
+                      e.stopPropagation();
+                    }
+                    if (onRouteClick) onRouteClick(routeData.line);
+                  } catch (err) { /* ignore */ }
+                }
+              }}
               pathOptions={{
                 color,
                 weight: 4,
                 opacity: 0.8,
                 dashArray: idx > 0 ? '8 6' : undefined, // dash secondary variants
               }}
-            />
-
+            >
+              <Tooltip sticky>
+                <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
+              </Tooltip>
+            </Polyline>
             {/* Small circles at each stop along the route */}
             {variant.stops
               .filter((s) => s.lat != null && s.lon != null)
@@ -177,10 +222,10 @@ function SingleRouteLine({ routeData }) {
 /**
  * Map layer that renders polylines for every currently-active bus route.
  *
- * @param {{ activeRoutes: Map<string, object> }} props
+ * @param {{ activeRoutes: Map<string, object>, onRouteClick?: function }} props
  *   activeRoutes — from useRouteLine().activeRoutes
  */
-export default function RouteLineLayer({ activeRoutes }) {
+export default function RouteLineLayer({ activeRoutes, onRouteClick }) {
   const entries = useMemo(
     () => Array.from(activeRoutes.entries()),
     [activeRoutes],
@@ -191,7 +236,11 @@ export default function RouteLineLayer({ activeRoutes }) {
   return (
     <>
       {entries.map(([line, routeData]) => (
-        <SingleRouteLine key={line} routeData={routeData} />
+        <SingleRouteLine 
+          key={line} 
+          routeData={routeData} 
+          onRouteClick={onRouteClick} 
+        />
       ))}
     </>
   );

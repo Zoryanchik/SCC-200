@@ -72,7 +72,7 @@ def _project_onto_track(plat, plon, track, cum_dists):
 
 
 def main(limit=20, tol=30):
-    bl = BusLive(timeout=20)
+    bl = BusLive(timeout=10)
     records = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
     print(f"[investigate_no_stop_progs] fetched {len(records)} records")
     today = time.strftime('%Y-%m-%d')

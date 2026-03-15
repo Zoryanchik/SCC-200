@@ -18,6 +18,7 @@ from urllib.request import Request as UrllibRequest, urlopen
 from xml.etree import ElementTree
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -209,6 +210,101 @@ async def lifespan(app: FastAPI):
     
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
+
+
+def _suggest_similar_route_ids(route_id: str, limit: int = 10) -> list[str]:
+    """Return a short list of route_ids that look similar to the provided one.
+
+    This is best-effort and only inspects in-memory data (prebuilt merged caches).
+    It's designed purely for debugging why a route_id isn't resolving to tracks.
+    """
+    if not route_id:
+        return []
+
+    suggestions: list[str] = []
+    try:
+        if globals().get('_base_cache'):
+            prebuilt = _base_cache.get('prebuilt_cache') if _base_cache else None
+            if prebuilt:
+                # Build a few match keys (prefix before '::', suffix after '::')
+                prefix = route_id.split('::', 1)[0] if '::' in route_id else route_id
+                suffix = route_id.split('::', 1)[1] if '::' in route_id else None
+
+                for _k, v in prebuilt.items():
+                    try:
+                        merged = v[0]
+                    except Exception:
+                        merged = None
+                    if not merged:
+                        continue
+                    metas = getattr(merged, 'route_metadata', None) or []
+                    for meta in metas:
+                        if not isinstance(meta, dict):
+                            continue
+                        rid = meta.get('route_id')
+                        if not rid:
+                            continue
+                        srid = str(rid)
+                        if srid == route_id:
+                            continue
+                        if prefix and srid.startswith(prefix):
+                            suggestions.append(srid)
+                        elif suffix and srid.endswith(suffix):
+                            suggestions.append(srid)
+                        if len(suggestions) >= limit:
+                            return suggestions[:limit]
+    except Exception:
+        # Suggestions are best-effort only.
+        return suggestions[:limit]
+    return suggestions[:limit]
+
+
+@app.get('/debug/route-tracks/{route_id:path}')
+def debug_route_tracks(route_id: str, sample: int = 5, suggest: int = 10):
+    """Debug helper: inspect whether in-memory route_tracks exist for route_id.
+
+    Response:
+      {
+        "route_id": str,
+        "found": bool,
+        "coords_len": int,
+        "coords_sample": [[lat,lon],...],
+        "suggestions": [route_id,...]
+      }
+
+    This endpoint is for local debugging only.
+    """
+    if not route_id:
+        raise HTTPException(status_code=400, detail='route_id is required')
+
+    tracks = []
+    try:
+        tracks = _fetch_route_tracks(route_id) or []
+    except Exception:
+        tracks = []
+
+    coords_len = len(tracks) if isinstance(tracks, list) else 0
+    coords_sample = []
+    try:
+        n = int(sample)
+        if n < 0:
+            n = 0
+        coords_sample = (tracks[:n] if isinstance(tracks, list) else [])
+    except Exception:
+        coords_sample = []
+
+    resp = {
+        'route_id': route_id,
+        'found': bool(isinstance(tracks, list) and len(tracks) >= 2),
+        'coords_len': coords_len,
+        'coords_sample': coords_sample,
+        'suggestions': [],
+    }
+
+    if not resp['found'] and int(suggest or 0) > 0:
+        resp['suggestions'] = _suggest_similar_route_ids(route_id, limit=int(suggest))
+
+    return resp
 
 # -- WebSocket/STOMP live updates endpoint --------------------------------
 app.add_api_websocket_route("/ws/live", ws_live_endpoint)
@@ -420,15 +516,22 @@ def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
     if changed:
         return corrected
     return q
+
+
+def _looks_like_street(s: str) -> bool:
+    """Heuristic: return True if a string looks like a street/address token.
+
+    Used to decide whether comma suffixes are towns ('Morrisons, Morecambe')
+    vs street/address details.
+    """
     if not s:
         return False
-    s = s.strip().lower()
+    s = str(s).strip().lower()
     import re
     # If it contains a number (house number, postcode fragment), treat as street/address
     if re.search(r"\d", s):
         return True
 
-    # Common street-type tokens
     street_tokens = {
         'street', 'st', 'road', 'rd', 'lane', 'ln', 'avenue', 'ave', 'drive', 'dr',
         'way', 'court', 'ct', 'crescent', 'close', 'terrace', 'gardens', 'place',
@@ -442,7 +545,7 @@ def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
         if w.rstrip('.') in street_tokens:
             return True
 
-    # Very short tails (1-3 chars) are more likely postcode fragments or abbreviations — treat as street-like
+    # Very short tails (1-3 chars) are more likely postcode fragments or abbreviations
     if 0 < len(s) <= 3:
         return True
 
@@ -451,198 +554,26 @@ def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
 
 # --- Geometry assembly endpoint ----------------------------------------
 @app.get("/route/geometry")
-def route_geometry(logged_journey_id: str):
-    """Return smoothed route geometry for a previously-logged journey.
+def route_geometry(route_id: str):
+    """Return route geometry for an in-memory route_id.
 
     Query params:
-      - logged_journey_id: the UUID id stored in `bus_journeys`.
+      - route_id: canonical route id (file-prefixed where applicable)
 
     Response:
-      {"coords": [[lat, lon], ...], "source": "osrm"|"track"}
+      {"coords": [[lat, lon], ...], "source": "track"} or {"error": ...}
     """
-    # 1) Fetch logged journey from DB
-    lj = _fetch_logged_journey_from_db(logged_journey_id)
-    if not lj:
-        return {"error": "logged_journey_not_found"}
+    if not route_id:
+        return {"error": "missing_route_id"}
 
-    # 2) For each leg, try to determine stop ATCO sequence using external journey_id
-    coords_accum = []
-    per_leg_coords = []  # per-leg coordinate arrays for precise frontend splitting
-    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
-    walking_coords = None
-    if globals().get('_base_cache'):
-        walking_coords = _base_cache.get('walking_raw', {}).get('coords')
-
-    for leg in lj.get('legs', []):
-        # Prefer explicit stop arrival times in the logged leg
-        ext_meta = leg.get('journey_metadata') or {}
-        ext_jid = ext_meta.get('journey_id')
-        stop_atcos = []
-        if ext_jid:
-            jt = _fetch_journey_times_external(ext_jid)
-            if jt:
-                # If logged stops include arrival times, match indices
-                logged_stops = leg.get('stops', [])
-                if logged_stops and isinstance(logged_stops[0], dict) and 'arrival' in logged_stops[0]:
-                    # find start/end by matching arrival times
-                    start_arr = logged_stops[0].get('arrival')
-                    end_arr = logged_stops[-1].get('arrival')
-                    # find closest indices in jt
-                    start_idx = next((i for i, (_a, at) in enumerate(jt) if at == start_arr), 0)
-                    end_idx = next((i for i, (_a, at) in enumerate(jt) if at == end_arr), len(jt) - 1)
-                    if start_idx > end_idx:
-                        start_idx, end_idx = end_idx, start_idx
-                    stop_atcos = [a for a, _ in jt[start_idx:end_idx + 1]]
-                else:
-                    stop_atcos = [a for a, _ in jt]
-
-        # 3) First try: extract a subsegment from stored route_tracks (best precision)
-        leg_coords = None
-        route_id = ext_meta.get('route_id')
-        if stop_atcos and route_id:
-            sub = _subsegment_from_tracks(route_id, stop_atcos, walking_coords)
-            if sub and len(sub) >= 2:
-                # sample the subsegment for OSRM to avoid too many coordinates
-                sample = _sample_coords_for_osrm(sub, max_samples=30)
-                try:
-                    leg_coords = _query_osrm_for_coords(osrm_base, sample)
-                except Exception:
-                    leg_coords = None
-                # if OSRM failed, fall back to returning the raw subsegment
-                if leg_coords is None:
-                    leg_coords = sub
-
-        # 4) Second try: if no subsegment, fall back to resolving stop coords and calling OSRM
-        if leg_coords is None:
-            coords_lonlat = []
-            if stop_atcos and walking_coords:
-                for atco in stop_atcos:
-                    c = walking_coords.get(atco)
-                    if c:
-                        coords_lonlat.append(f"{c[1]},{c[0]}")
-            if coords_lonlat and len(coords_lonlat) >= 2:
-                leg_coords = _query_osrm_for_coords(osrm_base, coords_lonlat)
-
-        # 5) Final fallback: return stored route_tracks for the whole route
-        if leg_coords is None and route_id:
-            leg_coords = _fetch_route_tracks(route_id)
-
-        # 6) Append leg_coords (if any) to accumulator
-        if leg_coords:
-            coords_accum.extend(leg_coords)
-            per_leg_coords.append(leg_coords)
-        else:
-            per_leg_coords.append(None)
-
-    if not coords_accum:
-        # Final fallback: try to construct an OSRM route from the
-        # logged journey's stop coordinates (from/to of each leg).
-        # This helps when detailed route_tracks or external journey
-        # traces are not available but the basic stop sequence is.
-        try:
-            # 1) Try using any routeGeometries stored inside the logged journey
-            #    These are produced by the compare/plan endpoint and often
-            #    contain at least endpoint pairs for each segment. Use their
-            #    endpoints (deduped) as OSRM waypoints to reconstruct a
-            #    full road-following geometry when detailed route_tracks are
-            #    not available.
-            rg = None
-            if isinstance(lj, dict):
-                rg = lj.get('routeGeometries') or lj.get('route_geometries')
-            if rg and isinstance(rg, list):
-                coords_lonlat = []
-                for g in rg:
-                    coords = None
-                    if isinstance(g, dict):
-                        coords = g.get('coords')
-                    elif isinstance(g, list):
-                        coords = g
-                    if not coords:
-                        continue
-                    # take first and last point as representative endpoints
-                    if len(coords) >= 1:
-                        first = coords[0]
-                        last = coords[-1]
-                        if isinstance(first, (list, tuple)) and len(first) >= 2:
-                            coords_lonlat.append(f"{first[1]},{first[0]}")
-                        if isinstance(last, (list, tuple)) and len(last) >= 2:
-                            coords_lonlat.append(f"{last[1]},{last[0]}")
-                # dedupe while preserving order
-                seen = set()
-                dedup = []
-                for s in coords_lonlat:
-                    if s not in seen:
-                        seen.add(s)
-                        dedup.append(s)
-                if len(dedup) >= 2:
-                    try:
-                        coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
-                        if coords_from_osrm and len(coords_from_osrm) >= 2:
-                            return {"coords": coords_from_osrm, "source": "osrm"}
-                    except Exception:
-                        pass
-
-            # 2) Fall back to constructing waypoints from each leg's from/to
-            #    stop coordinates (existing behaviour). This keeps prior
-            #    functionality unchanged.
-            legs = lj.get('legs', []) if isinstance(lj, dict) else []
-            coords_lonlat = []
-            for leg in legs:
-                fs = leg.get('from_stop') or {}
-                ts = leg.get('to_stop') or {}
-                for p in (fs, ts):
-                    lat = p.get('lat') if isinstance(p, dict) else None
-                    lon = p.get('lon') if isinstance(p, dict) else None
-                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                        coords_lonlat.append(f"{lon},{lat}")
-            # Deduplicate while preserving order
-            seen = set()
-            dedup = []
-            for s in coords_lonlat:
-                if s not in seen:
-                    seen.add(s)
-                    dedup.append(s)
-            if len(dedup) >= 2:
-                try:
-                    coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
-                    if coords_from_osrm and len(coords_from_osrm) >= 2:
-                        return {"coords": coords_from_osrm, "source": "osrm"}
-                except Exception:
-                    # fall through to original error below
-                    pass
-                # If OSRM was unavailable or returned nothing, fall back to a
-                # simple linear interpolation between the stop points so the
-                # frontend at least gets a smooth-looking polyline.
-                try:
-                    # parse dedup into [(lat,lon), ...]
-                    pts = []
-                    for s in dedup:
-                        lon_s, lat_s = s.split(',')
-                        pts.append((float(lat_s), float(lon_s)))
-                    interp = []
-                    samples_per_leg = 8
-                    for i in range(len(pts) - 1):
-                        a = pts[i]
-                        b = pts[i + 1]
-                        for t in range(samples_per_leg):
-                            frac = t / samples_per_leg
-                            lat = a[0] + (b[0] - a[0]) * frac
-                            lon = a[1] + (b[1] - a[1]) * frac
-                            interp.append([lat, lon])
-                    # include final point
-                    interp.append([pts[-1][0], pts[-1][1]])
-                    if len(interp) >= 2:
-                        return {"coords": interp, "source": "linear"}
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return {"error": "no_geometry_available"}
-    # Include per_leg_coords so the frontend can map geometry to journey
-    # plan legs without fragile distance-based splitting.  Only include
-    # non-empty per-leg arrays.
-    plc = [lc for lc in per_leg_coords if lc] if per_leg_coords else []
-    return {"coords": coords_accum, "source": "osrm", "per_leg_coords": plc}
+    # Prefer a route_id that includes the file-prefix tag when present in
+    # the in-memory datasets. _fetch_route_tracks only consults in-memory
+    # route_tracks (MergedData.route_tracks) and will return [] if not
+    # found.
+    tracks = _fetch_route_tracks(route_id)
+    if not tracks:
+        return {"error": "route_tracks_not_found"}
+    return {"coords": tracks, "source": "track"}
 
 
 # --- Geometry assembly endpoint helpers -------------------------------
@@ -753,17 +684,100 @@ def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float
 @app.get("/route/leg-geometry")
 def route_leg_geometry(from_lat: float, from_lon: float,
                        to_lat: float, to_lon: float,
-                       mode: str = "driving"):
-    """Return road-following OSRM geometry for a single journey leg.
+                       mode: str = "driving",
+                       route_id: str | None = None,
+                       from_stop_id: str | None = None,
+                       to_stop_id: str | None = None):
+    """Return geometry for a single journey leg.
 
     Query params:
       from_lat, from_lon – start point
       to_lat, to_lon     – end point
       mode               – 'walking' | 'bus' | 'train' | 'driving' (default)
+            route_id           – optional canonical timetable route_id
+            from_stop_id       – optional ATCO code for the leg start stop
+            to_stop_id         – optional ATCO code for the leg end stop
+
+    If route_id is provided and this is a bus leg, we will *prefer* the
+    timetable's stored route tracks when available.
 
     Walking legs use the OSRM *foot* profile; all others use *driving*.
-    Response: {"coords": [[lat, lon], ...], "source": "osrm"} or {"error": "..."}
+    Response: {"coords": [[lat, lon], ...], "source": "route_tracks"|"osrm"|"linear"} or {"error": "..."}
     """
+    # Prefer stored timetable tracks when we have enough context.
+    #
+    # IMPORTANT: The frontend often calls this endpoint with mode=driving
+    # even for bus legs (it uses the driving OSRM profile for road snapping).
+    # When a canonical route_id is provided, we still want to prefer the
+    # timetable's own stored route_tracks.
+    trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
+    try:
+        if trace:
+            print('[route_leg_geometry] start', {
+                'mode': mode,
+                'route_id': route_id,
+                'from_stop_id': from_stop_id,
+                'to_stop_id': to_stop_id,
+                'from': (from_lat, from_lon),
+                'to': (to_lat, to_lon),
+            })
+
+        if route_id and mode != 'walking':
+            tracks = _fetch_route_tracks(route_id)
+            if trace:
+                try:
+                    tlen = len(tracks) if isinstance(tracks, list) else None
+                except Exception:
+                    tlen = None
+                print('[route_leg_geometry] fetched tracks', {
+                    'route_id': route_id,
+                    'tracks_type': type(tracks).__name__,
+                    'tracks_len': tlen,
+                })
+
+            # Treat tracks as usable only if it has at least 2 points.
+            if isinstance(tracks, list) and len(tracks) >= 2:
+                # When stop ids are available, return a subsegment between the
+                # two stops so the frontend doesn't render the *entire* route.
+                if from_stop_id and to_stop_id:
+                    # Build a minimal coord map for the requested stops.
+                    # - Prefer in-memory walking coords when available.
+                    # - Fall back to the provided query endpoints.
+                    stop_coords = {}
+                    try:
+                        if globals().get('_base_cache'):
+                            wc = _base_cache.get('walking_raw', {}).get('coords')
+                            if wc:
+                                a = wc.get(from_stop_id)
+                                b = wc.get(to_stop_id)
+                                if a:
+                                    stop_coords[from_stop_id] = a
+                                if b:
+                                    stop_coords[to_stop_id] = b
+                    except Exception:
+                        pass
+                    if from_stop_id not in stop_coords:
+                        stop_coords[from_stop_id] = (from_lat, from_lon)
+                    if to_stop_id not in stop_coords:
+                        stop_coords[to_stop_id] = (to_lat, to_lon)
+
+                    seg = _subsegment_from_tracks(route_id, [from_stop_id, to_stop_id], stop_coords)
+                    if seg and len(seg) >= 2:
+                        if trace:
+                            print('[route_leg_geometry] returning route_tracks subsegment', {'len': len(seg)})
+                        return {"coords": seg, "source": "route_tracks"}
+                # Fallback: return full track.
+                if trace:
+                    print('[route_leg_geometry] returning full route_tracks', {'len': len(tracks)})
+                return {"coords": tracks, "source": "route_tracks"}
+    except Exception:
+        # Best-effort only; fall through to OSRM/linear.
+        if trace:
+            import traceback
+            print('[route_leg_geometry] exception in route_tracks path')
+            traceback.print_exc()
+        pass
+
     osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
     profile = 'foot' if mode == 'walking' else 'driving'
     try:
@@ -781,16 +795,171 @@ def route_leg_geometry(from_lat: float, from_lon: float,
 
 
 def _fetch_route_tracks(route_id: str):
-    """Return the route track from bus_route_tracks as list of (lat, lon) or [] on failure."""
+    """Return the route track as list of [lat, lon] or [] on failure.
+
+    Prefer in-memory route_tracks from any loaded MergedData (prebuilt cache
+    and router cache) so consumers use the timetable's in-memory copy that
+    the loader populated. Fall back to DB lookups only if no in-memory
+    candidate is found.
+    """
+    # 1) Try in-memory caches (prebuilt_cache in _base_cache, then _router_cache)
+    try:
+        # Check prebuilt merged timetables (fast path)
+        if globals().get('_base_cache'):
+            try:
+                prebuilt = _base_cache.get('prebuilt_cache')
+                if prebuilt:
+                    for k, v in prebuilt.items():
+                        try:
+                            merged = v[0]
+                        except Exception:
+                            continue
+                        if not merged:
+                            continue
+                        # MergedData does not expose DenseMapper instances
+                        # (map_routes/map_journeys) like the raw BusData.
+                        # Resolve an int route index by scanning metadata.
+                        r_int = None
+                        try:
+                            for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
+                                if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                                    r_int = i
+                                    break
+                        except Exception:
+                            r_int = None
+                        if r_int is not None and r_int < len(merged.route_tracks):
+                            tracks = merged.route_tracks[r_int]
+                            if tracks:
+                                return [[t[0], t[1]] for t in tracks]
+            except Exception:
+                # best-effort only
+                pass
+
+        # Check any routers cached in _router_cache (may include other dates)
+        try:
+            # _router_cache and its lock may be defined later in the file;
+            # reference globals to avoid NameError during module import time.
+            rcache = globals().get('_router_cache')
+            rlock = globals().get('_router_cache_lock')
+            if rcache is not None:
+                # Iterate safely under lock when available
+                if rlock:
+                    with rlock:
+                        items = list(rcache.values())
+                else:
+                    items = list(rcache.values())
+                for val in items:
+                    try:
+                        merged = val[0]
+                    except Exception:
+                        continue
+                    if not merged:
+                        continue
+                    r_int = None
+                    try:
+                        for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
+                            if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                                r_int = i
+                                break
+                    except Exception:
+                        r_int = None
+                    if r_int is not None and r_int < len(merged.route_tracks):
+                        tracks = merged.route_tracks[r_int]
+                        if tracks:
+                            return [[t[0], t[1]] for t in tracks]
+        except Exception:
+            pass
+    except Exception:
+        # In-memory lookup failed — fall back to DB below
+        pass
+
+    # 1b) Best-effort: lazily build today's router once so route_tracks become
+    # available in memory even when this helper is called early in a process.
+    # This is slower than the cache paths above, so we only do it once.
+    try:
+        if not globals().get('_route_tracks_bootstrapped'):
+            globals()['_route_tracks_bootstrapped'] = True
+            try:
+                from datetime import date as _date
+                # Build a router for today; this populates _router_cache.
+                get_router_for_date(_date.today().isoformat())
+            except Exception:
+                pass
+
+            # Retry router_cache scan after bootstrap
+            rcache = globals().get('_router_cache')
+            rlock = globals().get('_router_cache_lock')
+            if rcache is not None:
+                if rlock:
+                    with rlock:
+                        items = list(rcache.values())
+                else:
+                    items = list(rcache.values())
+                for val in items:
+                    try:
+                        merged = val[0]
+                    except Exception:
+                        continue
+                    if not merged:
+                        continue
+                    r_int = None
+                    try:
+                        for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
+                            if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                                r_int = i
+                                break
+                    except Exception:
+                        r_int = None
+                    if r_int is not None and r_int < len(merged.route_tracks):
+                        tracks = merged.route_tracks[r_int]
+                        if tracks:
+                            return [[t[0], t[1]] for t in tracks]
+    except Exception:
+        pass
+
+    # 2) In this deployment we only use in-memory route_tracks.
+    # If no in-memory candidate found above, return empty so callers
+    # fall back to OSRM or other strategies.
+    return []
+
+
+def _find_prefixed_route_candidate(route_id: str):
+    """Return a candidate route_id from the DB that includes a file-prefix
+    (i.e. matches '%::<route_id') or None if not found. This helps ensure
+    lookups include the originating file tag when present in the tables.
+    """
+    if not route_id:
+        return None
     try:
         conn = _get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq", (route_id,))
-        rows = cur.fetchall()
+        # Prefer a route_id present in section_tracks (more specific)
+        try:
+            pattern = f"%::{route_id}"
+            logger.debug("_find_prefixed_route_candidate: checking bus_route_section_tracks LIKE %s", pattern)
+            cur.execute("SELECT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT 1", (pattern,))
+            r = cur.fetchone()
+            if r and r[0]:
+                logger.debug("_find_prefixed_route_candidate: found section_tracks candidate %s for %s", r[0], route_id)
+                conn.close()
+                return r[0]
+        except Exception:
+            logger.exception("_find_prefixed_route_candidate: error querying bus_route_section_tracks LIKE %s", f"%::{route_id}")
+        try:
+            pattern2 = f"%::{route_id}"
+            logger.debug("_find_prefixed_route_candidate: checking bus_route_tracks LIKE %s", pattern2)
+            cur.execute("SELECT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 1", (pattern2,))
+            r = cur.fetchone()
+            if r and r[0]:
+                logger.debug("_find_prefixed_route_candidate: found bus_route_tracks candidate %s for %s", r[0], route_id)
+                conn.close()
+                return r[0]
+        except Exception:
+            logger.exception("_find_prefixed_route_candidate: error querying bus_route_tracks LIKE %s", f"%::{route_id}")
         conn.close()
-        return [[r[0], r[1]] for r in rows]
     except Exception:
-        return []
+        logger.exception("_find_prefixed_route_candidate: error opening DB connection to resolve %s", route_id)
+    return None
 
 
 def _haversine(lat1, lon1, lat2, lon2):
@@ -827,7 +996,11 @@ def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dic
         if not coord:
             # can't map this stop
             continue
-        lat_s, lon_s = coord[0], coord[1]
+        # Accept either (lat, lon) tuples or [lat, lon] lists.
+        try:
+            lat_s, lon_s = float(coord[0]), float(coord[1])
+        except Exception:
+            continue
         # find nearest track point
         best_i = None
         best_d = None
@@ -1720,6 +1893,83 @@ async def stops_geo(
 # to draw polylines on the map when a user clicks a line chip.
 
 _route_line_cache: Dict[str, Any] = {}
+_route_label_cache: Dict[str, Any] = {}
+
+
+@app.get("/routes/label/{line}")
+async def route_label(line: str):
+    """Return a compact label/metadata payload for a route line.
+
+    The frontend uses this for lightweight display when a user clicks a live
+    vehicle (map view). It is intentionally small and stable:
+
+    Response::
+
+        {
+          "line": "100",
+          "variant_count": 3,
+          "route_ids": ["...", "..."],
+        }
+
+    Returns 404 when the backend has no label data for that line.
+    """
+    from fastapi.responses import JSONResponse
+
+    line_key = (line or '').strip().upper()
+    if not line_key:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    if line_key in _route_label_cache:
+        return _route_label_cache[line_key]
+
+    # Prefer reusing the /routes/line cache; compute if needed.
+    try:
+        data = _route_line_cache.get(line_key)
+        if not data:
+            data = await routes_for_line(line_key)
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    # If routes_for_line returned an error response, treat as not found.
+    if not isinstance(data, dict):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    variants = data.get('variants') if isinstance(data, dict) else None
+    if not isinstance(variants, list) or len(variants) == 0:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    route_ids = []
+    try:
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            rid = v.get('route_id')
+            if rid is None:
+                continue
+            route_ids.append(str(rid))
+    except Exception:
+        route_ids = []
+
+    # Preserve order but remove duplicates for a stable, compact payload.
+    try:
+        seen = set()
+        deduped = []
+        for rid in route_ids:
+            if rid in seen:
+                continue
+            seen.add(rid)
+            deduped.append(rid)
+        route_ids = deduped
+    except Exception:
+        pass
+
+    payload = {
+        "line": line_key,
+        "variant_count": int(len(variants)),
+        "route_ids": route_ids,
+    }
+    _route_label_cache[line_key] = payload
+    return payload
 
 
 @app.get("/routes/line/{line}")
@@ -2672,6 +2922,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     best_delay = None
     best_score = None
     best_jid = None
+    best_start_dep = None
 
     _track_cache = {}
 
@@ -3115,6 +3366,14 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             best_score = score
             best_delay = delay
             best_jid = j_id
+            best_start_dep = start_dep
+
+    # If the chosen journey's scheduled start time is more than 30 minutes in the future,
+    # reject the bus entirely (it likely mapped incorrectly or shouldn't be tracked yet).
+    if best_start_dep is not None and best_start_dep - now_seconds > 1800:
+        if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+            logger.info("matcher: rejecting matched bus for journey %s because its start_dep %d is > 30 mins in future", best_jid, best_start_dep)
+        return (None, None) if return_jid else None
 
     # Clamp negative delays to zero at the source of computation so
     # callers don't have to special-case early/negative values.
@@ -3550,7 +3809,11 @@ async def bus_live_operator(
         # journey mapping. Set SHOW_UNMATCHED=1 in the environment to opt
         # into including unmatched feed vehicles for debugging/operational
         # reasons.
-        show_unmatched = str(os.environ.get('SHOW_UNMATCHED') or '').lower() in ('1', 'true', 'yes')
+        # Default to showing unmatched vehicles so the endpoint always returns
+        # useful data in dev/testing contexts. Set SHOW_UNMATCHED=0 to restore
+        # strict filtering.
+        show_unmatched_raw = str(os.environ.get('SHOW_UNMATCHED') or '').lower()
+        show_unmatched = show_unmatched_raw not in ('0', 'false', 'no')
         if matched_jid is None and not show_unmatched:
             # do not render unmatched vehicles into the API response
             continue
@@ -3930,8 +4193,12 @@ def _recompute_journey_delay_map_once() -> None:
             if d > MAX_VISIBLE_DELAY_S:
                 # Skip storing this journey entirely
                 continue
-            # Store integer seconds
-            temp_map[int(j_id)] = d
+            # Store integer seconds, keeping the minimum delay if multiple buses map to the same journey
+            j_id_int = int(j_id)
+            if j_id_int in temp_map:
+                temp_map[j_id_int] = min(temp_map[j_id_int], d)
+            else:
+                temp_map[j_id_int] = d
         except Exception:
             continue
 
@@ -4425,6 +4692,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         return {
             "success": True,
             "legs": [],
+            "journeys": [],
             "meta": {},
             "routeGeometries": [],
         }
@@ -4483,6 +4751,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         return {
             "success": True,
             "legs": legs,
+            "journeys": [{"legs": legs}],
             "meta": {
                 "start_walk_seconds": meta.get("start_walk_seconds", 0),
                 "end_walk_seconds": meta.get("end_walk_seconds", 0),
@@ -4499,14 +4768,35 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     # stop-index -> info-dict, but some implementations or edge-cases
     # may include unexpected non-dict values. Only process entries
     # whose values are dict-like to avoid TypeErrors.
-    route_data = {k: v for k, v in route_result.items()
-                  if k != "_meta" and isinstance(v, dict)}
+    # Router implementations differ:
+    # - Some return a dict mapping stop_int -> info-dict for ONLY the chosen best path.
+    # - Others return a dict mapping stop_int -> list/structure of multiple route options.
+    # This function expects the first form (single best path). If the second form
+    # sneaks in, we still try to behave sensibly.
+    route_data = {
+        k: v
+        for k, v in route_result.items()
+        if k not in ("_meta", "_route_id") and isinstance(v, dict)
+    }
 
-    all_prevs = {info.get("prev_stop") for info in route_data.values()
-                 if isinstance(info, dict) and info.get("prev_stop") is not None}
+    all_prevs = {
+        info.get("prev_stop")
+        for info in route_data.values()
+        if isinstance(info, dict) and info.get("prev_stop") is not None
+    }
     destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
         destinations = list(route_data.keys())
+
+    if not destinations:
+        # No usable route data (e.g. unexpected router output).
+        return {
+            "success": True,
+            "legs": [],
+            "journeys": [],
+            "meta": {},
+            "routeGeometries": [],
+        }
 
     stop = destinations[0]
     visited = set()
@@ -4521,6 +4811,39 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if idx < len(merged.stop_metadata):
             return merged.stop_metadata[idx]
         return f"stop#{idx}"
+
+    def _stop_point(idx: int):
+        """Return a stop dict including coordinates and stable identifiers.
+
+        The frontend needs a stop id (ATCO code) to request a route_tracks
+        subsegment for bus legs. Provide it consistently on every from_stop /
+        to_stop object.
+        """
+        try:
+            atco = merged.get_atco_code(idx)
+        except Exception:
+            atco = None
+        lat = lon = None
+        try:
+            if isinstance(stop_coords, dict) and idx in stop_coords:
+                lat, lon = stop_coords.get(idx)
+        except Exception:
+            lat = lon = None
+        out = {
+            "name": _display_name(idx),
+            "lat": lat,
+            "lon": lon,
+        }
+        if atco:
+            out["id"] = atco
+            out["atco_code"] = atco
+        try:
+            cls = classification_lookup.get(idx)
+            if cls:
+                out["classification"] = cls
+        except Exception:
+            pass
+        return out
 
     # Try to resolve town names for stops using the MergedData's
     # AtcoLoader (if available).  We'll use this to append ", Town"
@@ -4656,32 +4979,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
         transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
-        prev_name = _display_name(prev_int)
-        curr_name = _display_name(curr_int)
         prev_coord = stop_coords.get(prev_int)
         curr_coord = stop_coords.get(curr_int)
 
-        from_loc = {"name": prev_name}
-        to_loc = {"name": curr_name}
-        if prev_coord:
-            from_loc["lat"] = prev_coord[0]
-            from_loc["lon"] = prev_coord[1]
-        if curr_coord:
-            to_loc["lat"] = curr_coord[0]
-            to_loc["lon"] = curr_coord[1]
-        # Attach classification meta to stops when available
-        try:
-            fcls = classification_lookup.get(prev_int)
-            if fcls:
-                from_loc["classification"] = fcls
-        except Exception:
-            pass
-        try:
-            tcls = classification_lookup.get(curr_int)
-            if tcls:
-                to_loc["classification"] = tcls
-        except Exception:
-            pass
+        # Include a stable stop id (ATCO code) so the frontend can request
+        # bus route_tracks subsegments.
+        from_loc = _stop_point(prev_int)
+        to_loc = _stop_point(curr_int)
 
         leg = {
             "mode": transport,
@@ -4904,6 +5208,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     resp = {
         "success": True,
         "legs": legs,
+        "journeys": [{"legs": legs}],
         "meta": {
             "start_walk_seconds": start_walk,
             "end_walk_seconds": end_walk,
@@ -4915,20 +5220,31 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
-            # Expose the logged_journey id (if the router attached one)
-            # so clients can request smoothed geometry with /route/geometry
-            # using the exact journey that was selected by the router.
-            "logged_journey_id": route_result.get("_logged_journey_id") if isinstance(route_result, dict) else None,
+            # Expose a canonical route_id (if the router attached one)
+            # so clients can lookup in-memory route_tracks. Routers no
+            # longer expose logged_journey_id — downstream callers should
+            # use this route_id to retrieve tracks from the in-memory
+            # timetable (MergedData.route_tracks).
+            "route_id": (route_result.get("_route_id") if isinstance(route_result, dict) else None),
             "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
             "initial_departure_day_offset": (int(initial_departure_secs) // 86400) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else 0,
         },
         "routeGeometries": geometries,
     }
 
-    # Persist a minimal logged_journey record when the router did not
-    # already attach one. This ensures /route/geometry can look up the
-    # exact journey that produced these geometries even for router
-    # implementations that do not create logged_journey entries.
+    # Defensive: some legacy callers expect a `journeys` array, but older
+    # logic in this function only produced top-level `legs`. Ensure both are
+    # always consistent.
+    try:
+        if not resp.get("journeys"):
+            resp["journeys"] = [{"legs": legs}]
+    except Exception:
+        resp["journeys"] = [{"legs": legs}]
+
+    # Note: routers do not need to surface a logged_journey_id; callers
+    # should use the returned `route_id` meta to lookup in-memory tracks.
+    # We still persist a minimal logged_journey for auditing where the
+    # router did not attach one, but we do not expose its id to clients.
     try:
         if isinstance(route_result, dict) and not route_result.get('_logged_journey_id'):
             import uuid
@@ -4946,13 +5262,11 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             # Build minimal legs with from_stop/to_stop coords (if available)
             for leg in legs:
                 l = {}
-                # include any journey metadata if present on the produced leg
                 if 'journey_origin' in leg or 'journey_destination' in leg or leg.get('line_name'):
                     l['journey_metadata'] = {
                         'line_name': leg.get('line_name'),
                         'destination_display': leg.get('journey_destination')
                     }
-                # include raw from/to coords so /route/geometry can fallback to OSRM
                 fs = leg.get('from_stop') or {}
                 ts = leg.get('to_stop') or {}
                 if isinstance(fs, dict) and 'lat' in fs and 'lon' in fs:
@@ -4961,17 +5275,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     l['to_stop'] = {'lat': ts['lat'], 'lon': ts['lon']}
                 lj['legs'].append(l)
 
-            # Persist best-effort (do not fail the whole response on DB error)
             try:
                 bl = BusLoader(BUS_DB_PATH)
                 bl.insert_logged_journey(lj)
-                # Annotate the route_result and response meta so callers can reference the id
-                route_result['_logged_journey_id'] = lj['id']
-                resp['meta']['logged_journey_id'] = lj['id']
+                # Do NOT annotate route_result or response with the logged_journey id.
             except Exception:
                 pass
     except Exception:
-        # Do not allow logging failures to disrupt normal response
         pass
 
     return resp

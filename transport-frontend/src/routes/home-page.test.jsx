@@ -78,7 +78,7 @@ vi.mock("../components/common/RouteCard", () => ({
 // ---- Helpers ----
 afterEach(() => {
   vi.clearAllMocks();
-  vi.useRealTimers();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
   delete window.__testOnMoveEnd;
 });
 
@@ -109,7 +109,7 @@ describe("HomePage (combined search + map)", () => {
   });
 
   test("renders the map and search form on the same page", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
 
@@ -127,7 +127,7 @@ describe("HomePage (combined search + map)", () => {
   });
 
   test("renders filter chips for buses and trains", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     expect(screen.getByTestId("filter-buses")).toBeTruthy();
@@ -135,14 +135,14 @@ describe("HomePage (combined search + map)", () => {
   });
 
   test("renders departure cards section", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     expect(screen.getByText("Upcoming Train Departures")).toBeTruthy();
   });
 
   test("renders suggested routes section", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     expect(screen.getByText("Suggested routes")).toBeTruthy();
@@ -266,8 +266,8 @@ describe("useLiveBusLocations debounced map center integration", () => {
       expect(api.fetchLiveBusLocations).toHaveBeenCalledTimes(1);
     });
 
-    // After refresh interval
-    await act(async () => { vi.advanceTimersByTime(1100); });
+    // The hook enforces a minimum refresh interval of 5 seconds.
+    await act(async () => { vi.advanceTimersByTime(5100); });
     await waitFor(() => {
       expect(api.fetchLiveBusLocations).toHaveBeenCalledTimes(2);
     });
@@ -288,7 +288,7 @@ describe("HomePage marker update logic", () => {
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
 
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     // The map stub should render with mock markers initially
@@ -299,7 +299,7 @@ describe("HomePage marker update logic", () => {
 
   test("renders default alerts when no API alerts are available", async () => {
     api.fetchServiceAlerts.mockResolvedValue([]);
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     await waitFor(() => {
@@ -309,7 +309,7 @@ describe("HomePage marker update logic", () => {
 
   test("renders default departures when no API data available", async () => {
     api.fetchRailDepartures.mockResolvedValue([]);
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     await waitFor(() => {
@@ -319,7 +319,7 @@ describe("HomePage marker update logic", () => {
   });
 
   test("shows no-routes message initially (no search performed)", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     await waitFor(() => {
@@ -328,7 +328,7 @@ describe("HomePage marker update logic", () => {
   });
 
   test("search button is disabled by default (no stops selected)", async () => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     const btn = screen.getByText("Search routes");
@@ -371,7 +371,7 @@ describe("fetchLiveBusLocations API contract", () => {
 
 describe("Bus route number display on markers", () => {
   beforeEach(() => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
   test("bus markers carry routeNumber equal to bus.line from API response", async () => {
@@ -447,7 +447,7 @@ describe("Bus route number display on markers", () => {
 
 describe("Bus delay handling on markers", () => {
   beforeEach(() => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
   test("bus with no delay shows 'On time' status", async () => {
@@ -476,7 +476,7 @@ describe("Bus delay handling on markers", () => {
 
     await waitFor(() => {
       const statuses = screen.getAllByTestId("marker-status");
-      expect(statuses.some((el) => el.textContent === "Delayed 5 min")).toBe(true);
+      console.log("statuses:", statuses.map(s => s.textContent)); expect(statuses.some((el) => el.textContent === "Delayed 5 min")).toBe(true);
     });
   });
 

@@ -76,7 +76,7 @@ def _project_onto_track(plat, plon, track, cum_dists):
 
 
 def main():
-    bl = BusLive(timeout=20)
+    bl = BusLive(timeout=10)
     records = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
     print(f"[match_debug] fetched {len(records)} records")
     now = int(time.time())

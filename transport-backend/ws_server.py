@@ -20,7 +20,7 @@ Integration
     from ws_server import broker as ws_broker, websocket_endpoint
 
     app.add_api_websocket_route("/ws/live", websocket_endpoint)
-    ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=20), poll_interval=20.0)
+    ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=10), poll_interval=20.0)
     await ws_broker.start_polling()
 """
 

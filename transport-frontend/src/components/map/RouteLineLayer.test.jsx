@@ -83,15 +83,15 @@ describe('RouteLineLayer', () => {
   it('renders tooltips with stop names', () => {
     const routes = new Map([['100', MOCK_ROUTE]]);
     const { getAllByTestId } = render(<RouteLineLayer activeRoutes={routes} />);
-
+    
     const tooltips = getAllByTestId('tooltip');
-    expect(tooltips).toHaveLength(3);
-    expect(tooltips[0].textContent).toBe('Stop A');
-    expect(tooltips[1].textContent).toBe('Stop B');
-    expect(tooltips[2].textContent).toBe('Stop C');
-  });
-
-  it('renders multiple active routes', () => {
+    expect(tooltips).toHaveLength(5); // 3 stops + 2 polyline labels (one for underlay, one for top line)
+    const texts = tooltips.map(t => t.textContent);
+    expect(texts).toContain('Line 100');
+    expect(texts).toContain('Stop A');
+    expect(texts).toContain('Stop B');
+    expect(texts).toContain('Stop C');
+  });  it('renders multiple active routes', () => {
     const route2 = {
       line: '1',
       variants: [
@@ -111,7 +111,9 @@ describe('RouteLineLayer', () => {
     const { getAllByTestId } = render(<RouteLineLayer activeRoutes={routes} />);
 
     const polylines = getAllByTestId('polyline');
-    expect(polylines).toHaveLength(2);
+    // Each variant renders two polylines: a cyan underlay + the colored route.
+    // With 2 routes (1 variant each) we therefore expect 4 polylines.
+    expect(polylines).toHaveLength(4);
   });
 });
 
@@ -161,10 +163,11 @@ describe('SingleRouteLine', () => {
     };
     const { getAllByTestId } = render(<SingleRouteLine routeData={data} />);
     const polylines = getAllByTestId('polyline');
-    expect(polylines).toHaveLength(2);
-    // First variant gets blue (primary), second gets red (secondary)
-    expect(polylines[0].dataset.color).toBe('#1976d2');
-    expect(polylines[1].dataset.color).toBe('#d32f2f');
+    // Two variants, each with underlay + main polyline => 4 total.
+    expect(polylines).toHaveLength(4);
+    // Main lines are at indices 1 and 3 (0 and 2 are cyan underlays).
+    expect(polylines[1].dataset.color).toBe('#1976d2');
+    expect(polylines[3].dataset.color).toBe('#d32f2f');
   });
 
   it('uses OSRM geometry for polyline when available', () => {
@@ -172,12 +175,17 @@ describe('SingleRouteLine', () => {
       <SingleRouteLine routeData={MOCK_ROUTE_WITH_GEOMETRY} />,
     );
     const polylines = getAllByTestId('polyline');
-    expect(polylines).toHaveLength(1);
-    const positions = JSON.parse(polylines[0].dataset.positions);
-    // Geometry has 6 points (not 3 from stops)
-    expect(positions).toHaveLength(6);
+  // Underlay + main polyline.
+  expect(polylines).toHaveLength(2);
+  const positions = JSON.parse(polylines[1].dataset.positions);
+    // When geometry is provided, the component inserts projected stop points
+    // and applies smoothing, so the rendered polyline has *more* points than
+    // the raw 3-stop fallback.
+    expect(positions.length).toBeGreaterThan(3);
+    // Keep endpoint assertions — the path should still begin/end at the
+    // original geometry endpoints.
     expect(positions[0]).toEqual([54.0, -2.8]);
-    expect(positions[5]).toEqual([54.1, -2.7]);
+    expect(positions[positions.length - 1]).toEqual([54.1, -2.7]);
   });
 
   it('falls back to stop positions when geometry is absent', () => {
@@ -185,8 +193,9 @@ describe('SingleRouteLine', () => {
       <SingleRouteLine routeData={MOCK_ROUTE} />,
     );
     const polylines = getAllByTestId('polyline');
-    expect(polylines).toHaveLength(1);
-    const positions = JSON.parse(polylines[0].dataset.positions);
+  // Underlay + main polyline.
+  expect(polylines).toHaveLength(2);
+  const positions = JSON.parse(polylines[1].dataset.positions);
     // No geometry → uses 3 stop coordinates
     expect(positions).toHaveLength(3);
     expect(positions[0]).toEqual([54.0, -2.8]);

@@ -186,7 +186,21 @@ class RaptorRouter:
                 info['prev_stop_name'] = day.stop_metadata[prev]
             j_id = info.get('journey')
             if j_id is not None and j_id < len(day.journey_metadata):
-                info['journey_info'] = day.journey_metadata[j_id]
+                # Normalize journey metadata so route_id matches canonical id
+                try:
+                    jm = dict(day.journey_metadata[j_id]) if day.journey_metadata[j_id] else None
+                except Exception:
+                    jm = day.journey_metadata[j_id]
+                try:
+                    if jm is not None and hasattr(net, 'journey_to_route'):
+                        r_int = net.journey_to_route[j_id] if j_id < len(net.journey_to_route) else None
+                        if r_int is not None and r_int < len(net.route_metadata):
+                            rm = net.route_metadata[r_int]
+                            if isinstance(rm, dict) and rm.get('route_id'):
+                                jm['route_id'] = rm.get('route_id')
+                except Exception:
+                    pass
+                info['journey_info'] = jm
             if j_id is not None and j_id < len(day.journey_times):
                 jt = day.journey_times[j_id]
                 if jt:
@@ -217,6 +231,22 @@ class RaptorRouter:
             'start_point': start_point,
             'destination': destination,
         }
+        # Annotate with a canonical route_id for in-memory track lookup
+        try:
+            route_id_for_tracks = None
+            for k, info in fastest_route.items():
+                if k == '_meta':
+                    continue
+                if not isinstance(info, dict):
+                    continue
+                jm = info.get('journey_info') or info.get('journey_metadata') or {}
+                if jm and isinstance(jm, dict) and jm.get('route_id'):
+                    route_id_for_tracks = jm.get('route_id')
+                    break
+            if route_id_for_tracks:
+                fastest_route['_route_id'] = route_id_for_tracks
+        except Exception:
+            pass
         return fastest_route
 
     # ── recursive RAPTOR rounds ──────────────────────────────────

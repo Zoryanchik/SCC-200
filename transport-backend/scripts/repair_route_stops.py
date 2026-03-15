@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from bus_loader import BusLoader
+from route_id_utils import resolve_prefixed_route_id
 
 
 def compute_canonical_stops(downloads_dir):
@@ -86,10 +87,13 @@ def main():
         for r in desired_rows:
             print('  ', r)
 
-    # Connect and fetch existing rows
+    # Connect and fetch existing rows. Resolve a DB-prefixed route_id so
+    # queries target the stored namespaced rows (e.g. "MO100::PC...:RS1").
     with psycopg.connect(dsn) as conn:
         cur = conn.cursor()
-        cur.execute('SELECT atco_code, stop_order FROM bus_route_stops WHERE route_id = %s ORDER BY stop_order', (route,))
+        db_route = resolve_prefixed_route_id(conn, route)
+        print('Resolved route for DB lookups:', db_route)
+        cur.execute('SELECT atco_code, stop_order FROM bus_route_stops WHERE route_id = %s ORDER BY stop_order', (db_route,))
         existing = cur.fetchall()
         print('\nExisting rows (%d):' % len(existing))
         for atco, so in existing:
@@ -104,27 +108,32 @@ def main():
 
         if args.dry_run:
             # Print SQL that would be run
-            tb = safe_table_name(route) + '_' + time.strftime('%Y%m%d_%H%M%S')
+            tb = safe_table_name(db_route) + '_' + time.strftime('%Y%m%d_%H%M%S')
             print('\n-- SQL preview --')
             print(f'CREATE TABLE {tb} AS SELECT * FROM bus_route_stops WHERE route_id = %s;')
             print('DELETE FROM bus_route_stops WHERE route_id = %s;')
             print('-- INSERT rows:')
+            # Use the DB-resolved route id when inserting so stored rows use
+            # the same namespaced id the rest of the DB uses.
             for rid, atco, so in desired_rows:
-                print("INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES ('%s', '%s', %d);" % (rid, atco, so))
+                print("INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES ('%s', '%s', %d);" % (db_route, atco, so))
             return 0
 
         # Perform repair in a transaction
-        tb = safe_table_name(route) + '_' + time.strftime('%Y%m%d_%H%M%S')
+        tb = safe_table_name(db_route) + '_' + time.strftime('%Y%m%d_%H%M%S')
         print('\nCreating backup table:', tb)
-        cur.execute(f'CREATE TABLE {tb} AS SELECT * FROM bus_route_stops WHERE route_id = %s', (route,))
+        cur.execute(f'CREATE TABLE {tb} AS SELECT * FROM bus_route_stops WHERE route_id = %s', (db_route,))
         print('Backup created.')
 
         print('Deleting existing rows for route')
-        cur.execute('DELETE FROM bus_route_stops WHERE route_id = %s', (route,))
+        cur.execute('DELETE FROM bus_route_stops WHERE route_id = %s', (db_route,))
 
         print('Inserting desired rows...')
         for rid, atco, so in desired_rows:
-            cur.execute('INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (%s, %s, %s)', (rid, atco, so))
+            # Insert using the DB-resolved namespaced id so rows align with
+            # existing route_tracks/section_tracks stored under the same
+            # prefix.
+            cur.execute('INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (%s, %s, %s)', (db_route, atco, so))
 
         conn.commit()
         print('Repair committed. Backup table retained:', tb)

@@ -509,7 +509,10 @@ def print_route(route_result, merged):
     route_data = {k: v for k, v in route_result.items() if k != '_meta'}
     legs = []
     # Find the destination (stop with no outgoing — not a prev_stop of anyone else)
-    all_prevs = {info["prev_stop"] for info in route_data.values() if info["prev_stop"] is not None}
+    # Be defensive: some route_data values may be non-dict (older callers or
+    # unexpected router output); ignore non-dict entries when computing
+    # prev_stop chains.
+    all_prevs = {info.get("prev_stop") for info in route_data.values() if isinstance(info, dict) and info.get("prev_stop") is not None}
     destinations = [s for s in route_data if s not in all_prevs]
     if not destinations:
         destinations = list(route_data.keys())
@@ -518,9 +521,13 @@ def print_route(route_result, merged):
     stop = destinations[0]
     visited = set()
     while stop is not None and stop not in visited:
+        info = route_data.get(stop)
+        if not isinstance(info, dict):
+            # Can't trace further if the entry isn't the expected dict shape
+            break
         visited.add(stop)
-        legs.append((stop, route_data[stop]))
-        stop = route_data[stop]["prev_stop"]
+        legs.append((stop, info))
+        stop = info.get("prev_stop")
     legs.reverse()
 
     print(f"\n{'='*60}")

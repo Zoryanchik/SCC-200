@@ -185,12 +185,31 @@ export const highlightEndpoints = (map, start, end) => {
  * Returns the colour to use for a bus marker icon based on delay.
  * @param {number|null} delayMinutes
  */
-const busIconColor = (delayMinutes) => {
-	// Treat negative delays (early) visually the same as on-time.
-	if (delayMinutes == null) return '#1976d2';      // unknown → blue
-	if (delayMinutes >= 10) return '#d32f2f';        // very late → red
-	if (delayMinutes >= 2) return '#f57c00';         // delayed → orange
-	return '#1976d2';                                // on time / early → blue
+const busIconColor = (delayMinutes, isMapped = true) => {
+        if (!isMapped) return '#9e9e9e';         // unmapped → grey
+        // Treat negative delays (early) visually the same as on-time.
+        if (delayMinutes == null) return '#1976d2';      // unknown → blue
+        if (delayMinutes >= 10) return '#d32f2f';        // very late → red
+        if (delayMinutes >= 2) return '#f57c00';         // delayed → orange
+        return '#1976d2';                                // on time / early → blue
+};
+
+const isBusMappedLocal = (m) => {
+  if (!m || m.type !== 'bus') return false;
+  if (m.mock === true) return true;
+  if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
+  const meta = m.meta || {};
+  const top = m.logged_journey_id || m.journey_id || m.route_id || null;
+  if (top) return true;
+  const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
+  if (mr != null) return String(mr).toLowerCase() === 'matched';
+  const keys = Object.keys(meta).map(k => String(k).toLowerCase());
+  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+  for (const w of want) {
+    if (keys.includes(w)) return true;
+    if (meta[w] || meta[w.replace(/_/g, '')]) return true;
+  }
+  return false;
 };
 
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32', null, null);
@@ -329,13 +348,53 @@ const JourneyRouteLayer = ({ segments }) => {
 	const normalizeCoords = (raw) => {
 		if (!Array.isArray(raw)) return [];
 		const out = [];
+		let dropped = 0;
+
+		const inLatRange = (x) => Number.isFinite(x) && x >= -90 && x <= 90;
+		const inLonRange = (x) => Number.isFinite(x) && x >= -180 && x <= 180;
+
 		for (const pt of raw) {
-			if (!Array.isArray(pt) || pt.length < 2) continue;
-			const a = Number(pt[0]);
-			const b = Number(pt[1]);
-			if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
-			if (a < -90 || a > 90) out.push([b, a]); else out.push([a, b]);
+			if (!Array.isArray(pt) || pt.length < 2) {
+				dropped++;
+				continue;
+			}
+			let a = Number(pt[0]);
+			let b = Number(pt[1]);
+			if (!Number.isFinite(a) || !Number.isFinite(b)) {
+				dropped++;
+				continue;
+			}
+
+			// Decide whether the point is [lat, lon] or [lon, lat].
+			// Only swap when it *clearly* looks swapped: a can't be lat but b can.
+			let lat = a;
+			let lon = b;
+			const aLat = inLatRange(a);
+			const bLat = inLatRange(b);
+			const aLon = inLonRange(a);
+			const bLon = inLonRange(b);
+
+			if (!aLat && bLat && aLon && bLon) {
+				// likely [lon, lat]
+				lat = b;
+				lon = a;
+			}
+
+			if (!inLatRange(lat) || !inLonRange(lon)) {
+				dropped++;
+				continue;
+			}
+			out.push([lat, lon]);
 		}
+
+		try {
+			if (dropped > 0 && raw.length >= 10) {
+				console.debug('[map] normalizeCoords', { inLen: raw.length, outLen: out.length, dropped });
+			}
+		} catch (e) {
+			// ignore
+		}
+
 		return out;
 	};
 
@@ -556,9 +615,9 @@ const JourneyRouteLayer = ({ segments }) => {
 		return isWalkA ? 1 : -1;
 	});
 
-		if (!displaySegments || displaySegments.length === 0) return null;
+	if (!displaySegments || displaySegments.length === 0) return null;
 
-		return (
+	return (
 			<>
 				{renderSegments.map((seg, segIdx) => {
 					// Prefer any fetched OSRM geometry for segments that lacked a usable polyline
@@ -567,8 +626,8 @@ const JourneyRouteLayer = ({ segments }) => {
 					const isWalk = seg.mode === 'walking' || seg.color === '#888888' || (seg.id && String(seg.id).startsWith('walk'));
 					// Use normalized key to force Leaflet to replace the polyline when coords change
 					// For walking segments, use a heavier weight and a bold dashed pattern so they remain visible on top of vehicle tracks.
-						return (
-							<>
+					return (
+						<>
 								{/* Cyan underlay/frame so route lines (vehicle and walking) have a cyan outline */}
 								<Polyline
 									pane="routePane"
@@ -614,8 +673,8 @@ const JourneyRouteLayer = ({ segments }) => {
 										/>
 									</>
 								)}
-							</>
-						);
+						</>
+					);
 				})}
 
 							{/* Transfer stop markers: render a marker at the boundary between consecutive segments */}
@@ -668,12 +727,16 @@ const JourneyRouteLayer = ({ segments }) => {
 					);
 				})()}
 			</>
-			);
+		);
 	};
 
 
-const MapController = ({ onReady, onMoveEnd }) => {
+const MapController = ({ onReady, onMoveEnd, selectedVehicleTrack, onClearSelectedVehicleTrack }) => {
 	const map = useMap();
+	const vehicleLayerRef = React.useRef(null);
+	const vehicleCoreLayerRef = React.useRef(null);
+	const vehicleStartRef = React.useRef(null);
+	const vehicleEndRef = React.useRef(null);
 
 	useMapEvents({
 		moveend: () => {
@@ -694,6 +757,18 @@ const MapController = ({ onReady, onMoveEnd }) => {
 				map.createPane('routePane');
 				map.getPane('routePane').style.zIndex = 400;
 			}
+			// Vehicle tracks should always be visible above base tiles and other overlays.
+			// Use a dedicated pane with a very high z-index so the selected vehicle's
+			// polyline can't be hidden behind other layers.
+			if (!map.getPane('vehicleTrackPane')) {
+				map.createPane('vehicleTrackPane');
+				// Leaflet defaults: overlayPane=400, markerPane=600, tooltipPane=650, popupPane=700.
+				// Keep the track above routes/overlays, but BELOW vehicle markers.
+				// (markerPane=600) so bus icons stay on top.
+				map.getPane('vehicleTrackPane').style.zIndex = 590;
+				// Allow clicks on the polyline without letting the map background click-clear
+				// handler treat it as a background click.
+			}
 			if (!map.getPane('transferPane')) {
 				map.createPane('transferPane');
 				map.getPane('transferPane').style.zIndex = 650;
@@ -712,6 +787,188 @@ const MapController = ({ onReady, onMoveEnd }) => {
 			onMoveEnd({ lat: center.lat, lon: center.lng });
 		}
 	}, [map, onReady, onMoveEnd]);
+
+	// Imperative selected-vehicle overlay. This bypasses react-leaflet's rendering
+	// lifecycle issues and guarantees the polyline is added to the Leaflet map.
+	useEffect(() => {
+		if (!map) return;
+		// Clear existing layers
+		try {
+			if (vehicleLayerRef.current) {
+				vehicleLayerRef.current.remove();
+				vehicleLayerRef.current = null;
+			}
+			if (vehicleCoreLayerRef.current) {
+				vehicleCoreLayerRef.current.remove();
+				vehicleCoreLayerRef.current = null;
+			}
+			if (vehicleStartRef.current) {
+				vehicleStartRef.current.remove();
+				vehicleStartRef.current = null;
+			}
+			if (vehicleEndRef.current) {
+				vehicleEndRef.current.remove();
+				vehicleEndRef.current = null;
+			}
+		} catch (e) {
+			// ignore
+		}
+
+		const coords = selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords : null;
+		if (!coords || coords.length < 2) return;
+
+		try {
+			// Ensure pane exists even if the controller's mount effect hasn't run yet.
+			if (!map.getPane('vehicleTrackPane')) {
+				map.createPane('vehicleTrackPane');
+				map.getPane('vehicleTrackPane').style.zIndex = 590;
+			}
+			const paneName = map.getPane('vehicleTrackPane') ? 'vehicleTrackPane' : undefined;
+			const latLngs = coords.map((p) => L.latLng(Number(p[0]), Number(p[1])));
+			try {
+				console.debug('[map] imperative vehicle track add', {
+					id: selectedVehicleTrack && selectedVehicleTrack.id,
+					len: latLngs.length,
+					first: [latLngs[0].lat, latLngs[0].lng],
+					last: [latLngs[latLngs.length - 1].lat, latLngs[latLngs.length - 1].lng],
+					pane: paneName,
+				});
+			} catch (e) {
+				// ignore
+			}
+			// Cyan casing/frame layer for the vehicle track
+			vehicleLayerRef.current = L.polyline(latLngs, {
+				pane: paneName,
+				color: '#00ffff',
+				weight: 8,
+				opacity: 0.95,
+				lineCap: 'round',
+				lineJoin: 'round',
+			}).addTo(map);
+
+			// Single colored line (same color as the icon).
+			vehicleCoreLayerRef.current = L.polyline(latLngs, {
+				pane: paneName,
+				color: (selectedVehicleTrack && selectedVehicleTrack.color) ? selectedVehicleTrack.color : '#1a73e8',
+				weight: 5,
+				opacity: 1,
+				lineCap: 'round',
+				lineJoin: 'round',
+			}).addTo(map);
+
+			const handleTrackClick = (e) => {
+				try {
+					if (e && e.originalEvent) {
+						e.originalEvent.preventDefault();
+						e.originalEvent.stopPropagation();
+					}
+					// Leaflet provides a helper for this exact purpose.
+					try { L.DomEvent && typeof L.DomEvent.stopPropagation === 'function' && L.DomEvent.stopPropagation(e); } catch (ee) { /* ignore */ }
+					if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+					if (onClearSelectedVehicleTrack) onClearSelectedVehicleTrack();
+				} catch (err) {
+					// ignore
+				}
+			};
+
+			vehicleLayerRef.current.on('click', handleTrackClick);
+			vehicleCoreLayerRef.current.on('click', handleTrackClick);
+			// Bring the casing to back so it sits behind the core layer
+			vehicleLayerRef.current.bringToBack();
+
+			vehicleStartRef.current = L.circleMarker(latLngs[0], {
+				pane: paneName,
+				radius: 8,
+				color: '#ffffff',
+				weight: 2,
+				fillColor: (selectedVehicleTrack && selectedVehicleTrack.color) ? selectedVehicleTrack.color : '#1a73e8',
+				fillOpacity: 1,
+			}).addTo(map);
+			vehicleStartRef.current.on('click', (e) => {
+				try {
+					if (e && e.originalEvent) {
+						e.originalEvent.preventDefault();
+						e.originalEvent.stopPropagation();
+					}
+					try { L.DomEvent && typeof L.DomEvent.stopPropagation === 'function' && L.DomEvent.stopPropagation(e); } catch (ee) { /* ignore */ }
+					if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+					if (onClearSelectedVehicleTrack) onClearSelectedVehicleTrack();
+				} catch (err) {
+					// ignore
+				}
+			});
+			vehicleStartRef.current.bringToFront();
+
+			vehicleEndRef.current = L.circleMarker(latLngs[latLngs.length - 1], {
+				pane: paneName,
+				radius: 8,
+				color: '#ffffff',
+				weight: 2,
+				fillColor: (selectedVehicleTrack && selectedVehicleTrack.color) ? selectedVehicleTrack.color : '#1a73e8',
+				fillOpacity: 1,
+			}).addTo(map);
+			vehicleEndRef.current.on('click', (e) => {
+				try {
+					if (e && e.originalEvent) {
+						e.originalEvent.preventDefault();
+						e.originalEvent.stopPropagation();
+					}
+					try { L.DomEvent && typeof L.DomEvent.stopPropagation === 'function' && L.DomEvent.stopPropagation(e); } catch (ee) { /* ignore */ }
+					if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+					if (onClearSelectedVehicleTrack) onClearSelectedVehicleTrack();
+				} catch (err) {
+					// ignore
+				}
+			});
+			vehicleEndRef.current.bringToFront();
+
+			// NOTE: we intentionally do NOT auto-fit bounds here. Auto-fitting every
+					// time the track is added makes it feel like the track can’t be “hidden”
+					// because the map keeps jumping back to it.
+				} catch (e) {
+					// ignore
+				}
+
+				return () => {
+					try {
+						if (vehicleLayerRef.current) vehicleLayerRef.current.remove();
+						if (vehicleCoreLayerRef.current) vehicleCoreLayerRef.current.remove();
+						if (vehicleStartRef.current) vehicleStartRef.current.remove();
+						if (vehicleEndRef.current) vehicleEndRef.current.remove();
+					} catch (e) { /* ignore */ }
+				};
+	}, [map, selectedVehicleTrack, onClearSelectedVehicleTrack]);	return null;
+};
+
+// Fit the map to a polyline when it changes (best-effort, guarded).
+const MapFitToPolyline = ({ coords, padding = [30, 30] }) => {
+	const map = useMap();
+	const lastHashRef = React.useRef(null);
+
+	useEffect(() => {
+		if (!map) return;
+		if (!Array.isArray(coords) || coords.length < 2) return;
+		// Hash a few points so we don't constantly refit on minor re-renders.
+		let h;
+		try {
+			const a = coords[0];
+			const b = coords[Math.floor(coords.length / 2)];
+			const c = coords[coords.length - 1];
+			h = JSON.stringify([coords.length, a, b, c]);
+		} catch (e) {
+			h = null;
+		}
+		if (h && lastHashRef.current === h) return;
+		lastHashRef.current = h;
+		try {
+			const bounds = L.latLngBounds(coords.map((p) => [Number(p[0]), Number(p[1])]));
+			if (bounds.isValid()) {
+				map.fitBounds(bounds, { paddingTopLeft: padding, paddingBottomRight: padding, maxZoom: 16 });
+			}
+		} catch (e) {
+			// ignore
+		}
+	}, [map, coords, padding]);
 
 	return null;
 };
@@ -842,6 +1099,9 @@ const makeMarkerSignature = (m) => {
 	const [selectedVehicleTrack, setSelectedVehicleTrack] = React.useState(null);
 	const [loadingPopupId, setLoadingPopupId] = React.useState(null);
 	const [loadingError, setLoadingError] = React.useState(null);
+	const [vehicleTrackRenderKey, setVehicleTrackRenderKey] = React.useState(0);
+	// Used to avoid stale async responses overwriting newer selections.
+	const selectedVehicleReqTokenRef = React.useRef(0);
 
 	// Debugging: log when showRouteLines changes and when we clear routes
 	React.useEffect(() => {
@@ -856,16 +1116,25 @@ const makeMarkerSignature = (m) => {
 		}
 	}, [showRouteLines, clearRoutes, activeRoutes]);
 
-	// When active route overlays are cleared, also clear any selected vehicle track
-	React.useEffect(() => {
-		try {
-			if (!activeRoutes || activeRoutes.size === 0) {
-				setSelectedVehicleTrack(null);
-			}
-		} catch (e) {
-			// ignore
-		}
-	}, [activeRoutes]);
+	// Single source of truth for clearing the selected vehicle track.
+	// IMPORTANT: always bump the token so any in-flight async work can't re-apply.
+	const clearSelectedVehicle = React.useCallback(() => {
+		try { selectedVehicleReqTokenRef.current += 1; } catch (e) { /* ignore */ }
+		try { setSelectedVehicleTrack(null); } catch (e) { /* ignore */ }
+		try { setLoadingPopupId(null); } catch (e) { /* ignore */ }
+		try { setLoadingError(null); } catch (e) { /* ignore */ }
+		try { onClosePopup(); } catch (e) { /* ignore */ }
+	}, [onClosePopup]);
+
+	// Note: selectedVehicleTrack is independent of route overlays.
+	// Don't clear it just because activeRoutes is empty — in normal operation
+	// users may never toggle route overlays at all.
+	// However, a user-initiated "clear overlays" action (background click / clear
+	// button) should clear BOTH route overlays and any selected vehicle track.
+	const clearOverlays = React.useCallback(() => {
+		try { clearRoutes(); } catch (e) { /* ignore */ }
+		clearSelectedVehicle();
+	}, [clearRoutes, clearSelectedVehicle]);
 
 	// If the underlying markers change such that the currently-selected
 	// vehicle no longer exists (disappeared from the feed), hide its
@@ -875,6 +1144,7 @@ const makeMarkerSignature = (m) => {
 		try {
 			const ids = new Set((filteredMarkers || []).map((m) => m && m.id));
 			if (selectedVehicleTrack && !ids.has(selectedVehicleTrack.id)) {
+				try { console.debug('[map] selectedVehicleTrack cleared: selected vehicle disappeared from feed', { id: selectedVehicleTrack.id }); } catch (e) { /* ignore */ }
 				setSelectedVehicleTrack(null);
 			}
 			if (openPopupId && !ids.has(openPopupId)) {
@@ -888,6 +1158,18 @@ const makeMarkerSignature = (m) => {
 			// ignore
 		}
 	}, [filteredMarkers, selectedVehicleTrack, openPopupId, loadingPopupId, onClosePopup]);
+
+	// Debug: confirm when track state is populated.
+	React.useEffect(() => {
+		try {
+			if (!selectedVehicleTrack) return;
+			const n = Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords.length : 0;
+			console.debug('[map] selectedVehicleTrack updated', { id: selectedVehicleTrack.id, coordsLen: n });
+			if (n >= 2) setVehicleTrackRenderKey((k) => k + 1);
+		} catch (e) {
+			// ignore
+		}
+	}, [selectedVehicleTrack]);
 	const { highContrast } = useAccessibility();
 
 	// Debug toggle mirrored from MapViewPage: when set in localStorage under
@@ -897,6 +1179,9 @@ const makeMarkerSignature = (m) => {
 
 	// Cache routeData per-line so first-click has immediate access when possible.
 	const [routeDataCache, setRouteDataCache] = React.useState({});
+
+	// API base used for backend calls from this component.
+	const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050').replace(/\/$/, '');
 
 	// Prefetch route data for visible markers to avoid first-click fallback to mock.
 	React.useEffect(() => {
@@ -1010,6 +1295,36 @@ const makeMarkerSignature = (m) => {
 
 					</Box>
 				)}
+
+					{/* Debug badge: confirms whether we have a selected vehicle track at render time */}
+					{(function(){
+						try {
+							const debug = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_TRACK_DEBUG') === '1');
+							if (!debug) return null;
+							const n = selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords.length : 0;
+							const first = (n >= 1) ? selectedVehicleTrack.coords[0] : null;
+							return (
+								<Box sx={{
+									position: 'absolute',
+									top: 12,
+									left: 12,
+									zIndex: 1200,
+									backgroundColor: 'rgba(0,0,0,0.75)',
+									color: 'white',
+									padding: '6px 10px',
+									borderRadius: '8px',
+									fontSize: '12px',
+									fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+								}}>
+									<div>track: {selectedVehicleTrack ? 'yes' : 'no'}</div>
+									<div>pts: {n}</div>
+									{first ? <div>first: {Number(first[0]).toFixed(5)}, {Number(first[1]).toFixed(5)}</div> : null}
+								</Box>
+							);
+						} catch (e) {
+							return null;
+						}
+					})()}
 				{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
 					<Box sx={{
 						position: 'absolute',
@@ -1035,14 +1350,36 @@ const makeMarkerSignature = (m) => {
 						style={{ height: "100%", width: "100%" }}
 						className="leaflet-container-custom"
 					>
-					<MapController onReady={onMapReady} onMoveEnd={onMoveEnd} />				<MapClickClearHandler onClear={clearRoutes} />					<TileLayer
+					{(function(){
+						try {
+							const n = selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords.length : 0;
+							if (n >= 2) console.debug('[map] MapContainer sees selectedVehicleTrack', { id: selectedVehicleTrack.id, coordsLen: n });
+						} catch (e) {}
+						return null;
+					})()}
+					<MapController
+						key={`mapctl-${selectedVehicleTrack ? (selectedVehicleTrack.id + '-' + (Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords.length : 0)) : 'none'}`}
+						onReady={onMapReady}
+						onMoveEnd={onMoveEnd}
+						selectedVehicleTrack={selectedVehicleTrack}
+						onClearSelectedVehicleTrack={() => {
+							try { clearSelectedVehicle(); } catch (e) { /* ignore */ }
+						}}
+					/>					<MapClickClearHandler onClear={clearOverlays} />					<TileLayer
 						attribution={tileAttribution}
 						url={tileUrl}
 					/>				{/* Clear-routes button — floated bottom-left, only when routes are active */}
+
+					{/* While a vehicle track is selected, fit bounds once so it's not offscreen. */}
+					{selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) && selectedVehicleTrack.coords.length >= 2 && (
+						<MapFitToPolyline coords={selectedVehicleTrack.coords} />
+					)}
+
+					{/* Selected vehicle track is rendered imperatively by MapController. */}
 				{showRouteLines && activeRoutes.size > 0 && (
 					<Box
 						component="button"
-						onClick={(e) => { e.stopPropagation(); clearRoutes(); }}
+						onClick={(e) => { e.stopPropagation(); clearOverlays(); }}
 						className="leaflet-control"
 						style={{
 							position: 'absolute',
@@ -1058,7 +1395,7 @@ const makeMarkerSignature = (m) => {
 							backgroundColor: 'white',
 							color: '#d32f2f',
 							fontSize: '13px',
-							fontWeight: 700,
+							fontWeight: '700',
 							cursor: 'pointer',
 							boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
 						}}
@@ -1067,7 +1404,7 @@ const makeMarkerSignature = (m) => {
 					</Box>
 				)}					{/* Bus stop markers — small circles visible at zoom ≥ 13 */}
 					<BusStopLayer onToggleRoute={toggleRoute} isRouteActive={isActive} />
-					{showRouteLines && <RouteLineLayer activeRoutes={activeRoutes} />}
+					{showRouteLines && <RouteLineLayer activeRoutes={activeRoutes} onRouteClick={toggleRoute} />}
 				{/* Journey-plan route overlay */}
 				{(function(){
 					try { console.debug('[MapViewMap] journeyRoute segments=', Array.isArray(journeyRoute) ? journeyRoute.length : journeyRoute); } catch(e) {}
@@ -1079,9 +1416,58 @@ const makeMarkerSignature = (m) => {
 							key={marker.id}
 							position={marker.position}
 							icon={marker.type === 'bus'
-							? createCustomIcon('bus', busIconColor(marker.delayMinutes), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
+							? createCustomIcon('bus', busIconColor(marker.delayMinutes, isBusMappedLocal(marker)), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON}
 							eventHandlers={{
+								add: (e) => {
+									try {
+										let tooltipText = '';
+										if (marker.type === 'bus') {
+											const dm = marker.delayMinutes;
+											const isOnTime = dm == null || dm < 2;
+											const mins = dm != null ? Math.round(Math.abs(dm)) : 0;
+											const isMapped = isBusMappedLocal(marker);
+
+											let statusText = marker.status || '';
+											if (!isMapped) {
+													statusText = 'Offline';
+											} else if (isOnTime) {
+													statusText = 'On time';
+											} else if (marker.delayMinutes != null) {
+													const base = (statusText || 'Delayed').replace(/\s*\d+(?:\.\d+)?\s*min?s?/i, '').trim() || 'Delayed';
+													statusText = `${base} ${mins} min${mins !== 1 ? 's' : ''}`;
+											}
+
+											const statusIcon = !isMapped ? '?' : (isOnTime ? '✓' : '⚠');
+											const statusColor = !isMapped ? '#616161' : (isOnTime ? '#2e7d32' : (dm >= 10 ? '#c62828' : '#e65100'));
+											const bgColor = !isMapped ? '#f5f5f5' : (isOnTime ? '#e8f5e9' : (dm >= 10 ? '#ffebee' : '#fff3e0'));
+
+											tooltipText = `
+  <div style="font-family: inherit; display: flex; flex-direction: column; width: max-content;">
+    <div style="display: flex; flex-direction: row; gap: 16px; align-items: flex-start; justify-content: space-between;">
+      <div style="display: flex; flex-direction: column;">
+        <div style="font-weight: 700; font-size: 14px; margin-bottom: 4px; white-space: nowrap;">${marker.name || 'Bus'}</div>
+        <div style="font-size: 12px; color: #666; margin-bottom: 6px; white-space: nowrap;">🚌 Bus</div>
+      </div>
+      <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+        ${marker.routeNumber != null ? `<div style="background-color: ${busIconColor(marker.delayMinutes, isBusMappedLocal(marker))}; color: white; display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 10px; font-size: 13px; font-weight: 700; white-space: nowrap;">Line ${marker.routeNumber}</div>` : ''}
+        <div style="display: inline-block; padding: 4px 12px; border-radius: 12px; background-color: ${bgColor}; color: ${statusColor}; font-size: 12px; font-weight: 600; white-space: nowrap;">${statusIcon} ${statusText}</div>
+      </div>
+    </div>
+    ${marker.operator ? `<div style="font-size: 12px; color: #666; margin-top: 8px; text-align: right; white-space: nowrap;"><strong>Operator:</strong> ${marker.operator}</div>` : ''}
+</div>
+`;
+                                                                                                } else {
+											tooltipText = `
+												<div style="font-family: inherit;">
+													<div style="font-weight: 700; font-size: 14px; margin-bottom: 4px;">${marker.name || 'Train'}</div>
+													<div style="font-size: 12px; color: #666;">🚂 Train</div>
+												</div>
+											`;
+										}
+										e.target.bindTooltip(tooltipText, { direction: 'top', offset: [0, -15], className: 'custom-vehicle-tooltip' });
+									} catch (err) {}
+								},
 								click: async (e) => {
 									// Prevent the click from bubbling to the map which
 									// would trigger MapClickClearHandler (clearing routes)
@@ -1092,14 +1478,18 @@ const makeMarkerSignature = (m) => {
 									// If the same vehicle is already selected, toggle it off
 									try {
 										if (selectedVehicleTrack && selectedVehicleTrack.id === marker.id) {
-											setSelectedVehicleTrack(null);
+											clearSelectedVehicle();
 											return;
 										}
 									} catch (e) { /* ignore */ }
 
 									if (marker.type === 'bus') {
 										const line = marker.routeNumber || marker.route || null;
+									
 										if (!line) return;
+
+											// Increment selection token; only the latest click may update selection state.
+											const selectionToken = ++selectedVehicleReqTokenRef.current;
 
 										// Prefer cached route data when available to avoid hitting the
 										// potentially expensive /routes/line endpoint on first click.
@@ -1117,21 +1507,115 @@ const makeMarkerSignature = (m) => {
 												setRouteDataCache((prev) => ({ ...prev, [String(line)]: routeData }));
 												// Proceed to selection logic below using the cached routeData.
 												var __routeData_local = routeData;
-												// Fetch label asynchronously (do not block display of route).
-												(async () => {
+													// Fetch label/geometry asynchronously (do not block display of route).
+													(async (tokenAtStart) => {
 													try {
 														const controllerLabel = new AbortController();
 														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
 														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
 														clearTimeout(tlabel);
-														// Attach label to the selectedVehicleTrack if still selected
-														setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, label: labelData } : prev);
+															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
+																	// Best-effort: if backend provides canonical route_ids for this line,
+																	// try to fetch the in-memory route_tracks geometry and render it.
+																	try {
+																		const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
+																		const pos = marker && Array.isArray(marker.position) ? marker.position : null;
+																		try { console.debug('[map] label route_ids (cached)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+																		if (routeIds && routeIds.length && pos && pos.length === 2) {
+																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
+																			// but rely on route_id to return route_tracks.
+																			const eps = 0.0001;
+																			for (const ridRaw of routeIds) {
+																				const rid = ridRaw != null ? String(ridRaw) : null;
+																				if (!rid) continue;
+																				try { console.debug('[map] trying route_id (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																				let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																				url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																				url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
+																				try { console.debug('[map] leg-geometry request (cached)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																				const controllerGeom = new AbortController();
+																				const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
+																				const resp = await fetch(url, { signal: controllerGeom.signal });
+																				clearTimeout(tgeom);
+																				if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
+																					try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					break;
+																				}
+																				if (!resp) {
+																					try { console.debug('[map] leg-geometry no response (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					continue;
+																				}
+																				try { console.debug('[map] leg-geometry status (cached)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
+																				if (!resp.ok) continue;
+																				let data = null;
+																				let norm = null;
+																				try {
+																					data = await resp.json();
+																					// Defensive: normalizeCoords should exist in this scope, but if refactors
+																					// ever move this block, fall back to a tiny local normalizer.
+																					const safeNormalizeCoords = (raw) => {
+																						if (typeof normalizeCoords === 'function') return normalizeCoords(raw);
+																						if (!Array.isArray(raw)) return [];
+																						const out = [];
+																						for (const pt of raw) {
+																							if (!Array.isArray(pt) || pt.length < 2) continue;
+																							const a = Number(pt[0]);
+																							const b = Number(pt[1]);
+																							if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+																							// Assume [lat, lon]
+																							out.push([a, b]);
+																						}
+																						return out;
+																					};
+																					norm = safeNormalizeCoords(data && data.coords);
+																					try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																					const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																					break;
+																				} catch (je) {
+																					let txt = null;
+																					try { txt = await resp.text(); } catch (te) { /* ignore */ }
+																					try {
+																						console.debug('[map] leg-geometry parse/process failed (cached)', {
+																							line: String(line),
+																							rid,
+																							error: je && je.message ? je.message : String(je),
+																							contentType: resp.headers ? resp.headers.get('content-type') : null,
+																							textSample: txt ? String(txt).slice(0, 300) : null,
+																						});
+																					} catch (e) { /* ignore */ }
+																					continue;
+																				}
+																				if (data && data.source === 'linear') {
+																					try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
+																					continue;
+																				}
+																			}
+																		}
+																	} catch (ee) {
+																			// ignore geom failures
+																	}
+																	// Attach label to the selectedVehicleTrack if still selected.
+																	// (Don't overwrite coords here; only augment.)
+																	if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
+																	setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, label: labelData } : prev);
 													} catch (err) {
 														// label fetch non-fatal — log and ignore
-														// eslint-disable-next-line no-console
+														 
 														console.warn('[map] fetchRouteLabel failed (cached) for line=', line, err && err.message ? err.message : err);
 													}
-												})();
+														})(selectionToken);
+												// Important: in cached mode we kick off the label/geometry fetch above.
+												// Don't run the synchronous variant-selection logic below, because it can
+												// overwrite the just-fetched in-memory track/label overlay.
+												const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+												// Don't set coords to [] here — wait for route_tracks fetch to succeed.
+												setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
+												try {
+													try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+													onOpenPopup(marker.id);
+												} catch (e) { /* ignore */ }
+												return;
 											} else {
 												// No cache: fetch route first (strict), then request label.
 												const controller = new AbortController();
@@ -1145,20 +1629,103 @@ const makeMarkerSignature = (m) => {
 													clearTimeout(timeout);
 												}
 												var __routeData_local = routeData;
-												// Fetch label asynchronously (non-fatal)
-												(async () => {
+													// Fetch label/geometry asynchronously (non-fatal)
+													(async (tokenAtStart) => {
 													try {
 														const controllerLabel = new AbortController();
 														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
 														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
 														clearTimeout(tlabel);
+															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
+														// Best-effort: if backend provides canonical route_ids for this line,
+														// try to fetch the in-memory route_tracks geometry and render it.
+														try {
+															const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
+															const pos = marker && Array.isArray(marker.position) ? marker.position : null;
+														try { console.debug('[map] label route_ids (post-route)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+															if (routeIds && routeIds.length && pos && pos.length === 2) {
+																const eps = 0.0001;
+																for (const ridRaw of routeIds) {
+																	const rid = ridRaw != null ? String(ridRaw) : null;
+																	if (!rid) continue;
+																	try { console.debug('[map] trying route_id (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																	let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																	url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																	url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
+																	try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																	const controllerGeom = new AbortController();
+																	const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
+																	const resp = await fetch(url, { signal: controllerGeom.signal });
+																	clearTimeout(tgeom);
+																	if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
+																		try { console.debug('[map] token mismatch after fetch (post-route) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																		break;
+																	}
+																	if (!resp) {
+																		try { console.debug('[map] leg-geometry no response (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																		continue;
+																	}
+																	try { console.debug('[map] leg-geometry status (post-route)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
+																	if (!resp.ok) continue;
+																	let data = null;
+																	let norm = null;
+																	try {
+																		data = await resp.json();
+																		const safeNormalizeCoords = (raw) => {
+																			if (typeof normalizeCoords === 'function') return normalizeCoords(raw);
+																			if (!Array.isArray(raw)) return [];
+																			const out = [];
+																			for (const pt of raw) {
+																				if (!Array.isArray(pt) || pt.length < 2) continue;
+																				const a = Number(pt[0]);
+																				const b = Number(pt[1]);
+																				if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+																				out.push([a, b]);
+																			}
+																			return out;
+																		};
+																		norm = safeNormalizeCoords(data && data.coords);
+																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
+																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																		break;
+																	} catch (je) {
+																		let txt = null;
+																		try { txt = await resp.text(); } catch (te) { /* ignore */ }
+																		try {
+																			console.debug('[map] leg-geometry parse/process failed (post-route)', {
+																				line: String(line),
+																				rid,
+																				error: je && je.message ? je.message : String(je),
+																				contentType: resp.headers ? resp.headers.get('content-type') : null,
+																				textSample: txt ? String(txt).slice(0, 300) : null,
+																			});
+																		} catch (e) { /* ignore */ }
+																		continue;
+																	}
+																	if (data && data.source === 'linear') {
+																		try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
+																		continue;
+																	}
+																	if (norm && norm.length >= 2 && data && data.source === 'route_tracks') {
+																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																		break;
+																	}
+																}
+															}
+														} catch (ee) {
+															// ignore geometry failures
+														}
+														if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 														setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, label: labelData } : prev);
 													} catch (err) {
 														// non-fatal label fetch
-														// eslint-disable-next-line no-console
+														 
 														console.warn('[map] fetchRouteLabel failed (post-route) for line=', line, err && err.message ? err.message : err);
 													}
-												})();
+													})(selectionToken);
 											}
 								
 											// After either path above, selection logic will run using __routeData_local
@@ -1181,15 +1748,24 @@ const makeMarkerSignature = (m) => {
 											const pos = marker.position;
 
 											if (metaRouteId) {
-												const match = routeData.variants.find(v => v && (v.route_id === metaRouteId || String(v.route_id) === String(metaRouteId)));
+												// Production policy: frontends MUST use the backend's
+												// file-prefixed canonical route_id (contains '::').
+												// Only perform an exact equality match here to avoid
+												// accidentally matching suffix-only or legacy ids.
+												const metaStr = String(metaRouteId);
+												const match = routeData.variants.find(v => {
+													if (!v || v.route_id == null) return false;
+													const vr = String(v.route_id);
+													return vr === metaStr;
+												});
 												if (match) {
 													let geom = Array.isArray(match.geometry) ? match.geometry : stopsToLatLngs(match.stops);
 													const stops = Array.isArray(match.stops) ? stopsToLatLngs(match.stops) : [];
 													if (Array.isArray(geom) && geom.length >= 2) {
 														const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
-														const color = busIconColor(marker.delayMinutes);
+														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 														// Label will be attached asynchronously when/if the fetch completes.
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops, label: null });
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
 														try { 
 															// Notify parent of the popup open and its signature (optional)
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
@@ -1199,8 +1775,8 @@ const makeMarkerSignature = (m) => {
 													}
 													if (stops.length >= 2) {
 														const norm = stops.map((pt) => ([Number(pt[0]), Number(pt[1])]));
-														const color = busIconColor(marker.delayMinutes);
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops, label: null });
+														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
 														try { 
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 															onOpenPopup(marker.id);
@@ -1237,7 +1813,7 @@ const makeMarkerSignature = (m) => {
 												return;
 											}
 
-											const color = busIconColor(marker.delayMinutes);
+											const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 											const stops = Array.isArray(best.variant && best.variant.stops) ? stopsToLatLngs(best.variant.stops) : [];
 											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
 											try { 
@@ -1249,7 +1825,7 @@ const makeMarkerSignature = (m) => {
 											setSelectedVehicleTrack(null);
 											try {
 												const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-												// eslint-disable-next-line no-console
+												 
 												console.warn(`[map] route/label fetch failed for line=${line} marker=${marker.id}:`, e, `took=${Math.round(t1-t0)}ms`);
 												setLoadingError({ id: marker.id, message: (e && e.message) ? e.message : String(e) });
 											} catch (ee) { /* ignore */ }
@@ -1284,7 +1860,7 @@ const makeMarkerSignature = (m) => {
 												gap: '4px',
 												padding: '2px 10px',
 												borderRadius: '10px',
-												backgroundColor: busIconColor(marker.delayMinutes),
+												backgroundColor: busIconColor(marker.delayMinutes, isBusMappedLocal(marker)),
 												color: 'white',
 												fontSize: '13px',
 												fontWeight: '700',

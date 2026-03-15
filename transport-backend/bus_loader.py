@@ -1,10 +1,8 @@
-import bisect
 import io
 import os
 import pickle
 import re
 import psycopg
-from psycopg.rows import dict_row
 import ssl
 import tempfile
 import json
@@ -12,9 +10,7 @@ import urllib.request
 from urllib.parse import urlparse
 import zipfile
 from bus_data import BusData
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 # Use lxml for faster XML parsing (~2-3x vs stdlib ElementTree)
 try:
@@ -76,7 +72,7 @@ class BusLoader:
         datasets = []
         for src in sources:
             try:
-                resp = _ur.urlopen(src, context=ctx, timeout=30)
+                resp = _ur.urlopen(src, context=ctx, timeout=10)
             except _ue.HTTPError as he:
                 # Treat HTTP errors (403/401 etc) as non-fatal for startup —
                 # warn and skip this source so initialization can continue.
@@ -104,7 +100,7 @@ class BusLoader:
 
         for src, desc in desc_sources:
             try:
-                resp = _ur.urlopen(src, context=ctx, timeout=30)
+                resp = _ur.urlopen(src, context=ctx, timeout=10)
             except _ue.HTTPError as he:
                 print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
                 continue
@@ -202,12 +198,17 @@ class BusLoader:
                 revision   INTEGER,
                 PRIMARY KEY (route_id, atco_code)
             );
+            -- Allow a single journey to map to multiple route sections.
+            -- Use a composite primary key (journey_id, route_id) so a
+            -- VehicleJourney that spans multiple JourneyPatternSections
+            -- can be associated with each section separately.
             CREATE TABLE IF NOT EXISTS bus_journey_routes (
-                journey_id TEXT PRIMARY KEY,
+                journey_id TEXT,
                 route_id   TEXT NOT NULL,
                 line_name  TEXT,
                 destination_display TEXT,
-                revision   INTEGER
+                revision   INTEGER,
+                PRIMARY KEY (journey_id, route_id)
             );
             CREATE TABLE IF NOT EXISTS bus_journey_times (
                 journey_id     TEXT,
@@ -258,6 +259,21 @@ class BusLoader:
                 lon         DOUBLE PRECISION NOT NULL,
                 PRIMARY KEY (route_id, seq)
             );
+            -- Per-RouteSection/RouteLink track waypoints with explicit
+            -- from/to ATCOs so we can map a track fragment to a specific
+            -- stop-pair. This preserves RouteLink boundaries instead of
+            -- blind concatenation into a single route polyline.
+            CREATE TABLE IF NOT EXISTS bus_route_section_tracks (
+                route_id    TEXT NOT NULL,
+                section_id  TEXT NOT NULL,
+                seq         INTEGER NOT NULL,
+                lat         DOUBLE PRECISION NOT NULL,
+                lon         DOUBLE PRECISION NOT NULL,
+                from_atco   TEXT,
+                to_atco     TEXT,
+                PRIMARY KEY (route_id, section_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_section_tracks_route ON bus_route_section_tracks(route_id);
             -- Logged journey records (JSONB) captured during routing
             CREATE TABLE IF NOT EXISTS bus_journeys (
                 id          TEXT PRIMARY KEY,
@@ -270,6 +286,11 @@ class BusLoader:
             -- Upgrade: add revision columns if they don't exist (for existing DBs)
             ALTER TABLE bus_route_stops ADD COLUMN IF NOT EXISTS revision INTEGER;
             ALTER TABLE bus_journey_routes ADD COLUMN IF NOT EXISTS revision INTEGER;
+            -- Ensure primary key is composite (journey_id, route_id). If an
+            -- older DB has a single-column PK on journey_id, replace it so
+            -- multiple rows per journey (one per section) are permitted.
+            ALTER TABLE bus_journey_routes DROP CONSTRAINT IF EXISTS bus_journey_routes_pkey;
+            ALTER TABLE bus_journey_routes ADD CONSTRAINT bus_journey_routes_pkey PRIMARY KEY (journey_id, route_id);
         '''
         import re as _re
         cur = conn.cursor()
@@ -387,10 +408,16 @@ class BusLoader:
 
         # --- Parse <RouteSections> track waypoints (lat/lon from <Mapping>) ---
         route_section_tracks = {}  # section_id -> list of (lat, lon)
+        # Also keep per-RouteLink items so we can persist per-section
+        # link-level tracks along with their From/To ATCO refs.
+        route_section_links = {}  # section_id -> list of (from_atco, to_atco, [(lat, lon), ...])
         for rs in root.findall(f'{ns}RouteSections/{ns}RouteSection'):
             rs_id = rs.attrib.get('id', '')
             waypoints = []
             for rl in rs.findall(f'{ns}RouteLink'):
+                # Capture explicit from/to stop refs for this RouteLink
+                rl_from = rl.findtext(f'{ns}From/{ns}StopPointRef') or ''
+                rl_to = rl.findtext(f'{ns}To/{ns}StopPointRef') or ''
                 # Mapping elements sometimes appear under Track/Mapping,
                 # sometimes directly under RouteLink, and some providers
                 # nest Location nodes in slightly different ways. Be
@@ -404,6 +431,7 @@ class BusLoader:
                 # Find Location nodes anywhere under the mapping/track
                 # element (handles both direct children and nested
                 # Translation wrappers).
+                link_waypoints = []
                 for loc in mapping.findall(f'.//{ns}Location'):
                     # TXC files vary: some providers wrap coords in
                     # <Translation><Latitude> / <Longitude></Translation>
@@ -418,28 +446,43 @@ class BusLoader:
                     lon_s = (lon_s or '').strip()
                     if lat_s and lon_s:
                         try:
-                            waypoints.append((float(lat_s), float(lon_s)))
+                            point = (float(lat_s), float(lon_s))
                         except ValueError:
-                            # try swapping if parsing failed (some files put
-                            # lon/lat in reversed order inside the tags)
                             try:
-                                waypoints.append((float(lon_s), float(lat_s)))
+                                point = (float(lon_s), float(lat_s))
                             except Exception:
-                                pass
+                                point = None
+                        if point is not None:
+                            waypoints.append(point)
+                            link_waypoints.append(point)
+                # Record the per-link waypoints + from/to refs if present
+                if link_waypoints:
+                    route_section_links.setdefault(rs_id, []).append((rl_from, rl_to, link_waypoints))
             if waypoints:
                 route_section_tracks[rs_id] = waypoints
 
-        # --- Parse <Routes> and assemble full track polylines per Route ---
-        route_tracks_raw = {}  # route_id (XML-level) -> [(lat, lon), ...]
-        for rt in root.findall(f'{ns}Routes/{ns}Route'):
-            rt_id = rt.attrib.get('id', '')
-            track = []
-            for sec_ref in rt.findall(f'{ns}RouteSectionRef'):
-                sec_id = sec_ref.text
-                if sec_id in route_section_tracks:
-                    track.extend(route_section_tracks[sec_id])
-            if track:
-                route_tracks_raw[rt_id] = track
+        # --- Parse <Routes> and collect per-section/per-link track rows ---
+        # We'll treat each RouteSection (JourneyPatternSection) as its own
+        # route. `route_section_tracks` already maps section_id -> [(lat,lon),...]
+        # and `route_section_links` contains per-RouteLink waypoints with
+        # from/to ATCO refs. Build per-section per-link rows using the
+        # section id as the canonical route_id so downstream logic can
+        # write section-level `bus_route_tracks` and `bus_route_stops`.
+        route_section_track_rows = []  # (route_id, section_id, seq, lat, lon, from_atco, to_atco)
+        for sec_id, waypoints in route_section_tracks.items():
+            # Use the same canonical route key format as route_stops/route_tracks
+            # so route_ids match across tables. Include service_code when
+            # available to preserve the service-scoped namespace.
+            rkey = f"{service_code}:{sec_id}" if service_code else sec_id
+            if sec_id in route_section_links:
+                for link in route_section_links[sec_id]:
+                    from_atco, to_atco, lw = link
+                    for seq, (lat, lon) in enumerate(lw):
+                        route_section_track_rows.append((rkey, sec_id, seq, lat, lon, from_atco, to_atco))
+            else:
+                # If no per-link split, emit rows for the whole section
+                for seq, (lat, lon) in enumerate(waypoints):
+                    route_section_track_rows.append((rkey, sec_id, seq, lat, lon, None, None))
 
         def section_stops(sid):
             links = jps_data[sid]
@@ -494,58 +537,58 @@ class BusLoader:
             dest_display = jp.findtext(f'{ns}DestinationDisplay', '')
             jp_map[jp_id] = {'route_ref': route_ref, 'section_ids': sec_refs, 'destination_display': dest_display}
 
-        route_stop_lists = {}
-        for jp_id, info in jp_map.items():
-            rref = info['route_ref']
-            stops = []
-            for sid in info['section_ids']:
-                stops.extend(section_stops(sid))
-
-            # First collapse consecutive duplicates produced by joining
-            # adjacent sections (e.g. repeated StopPointRefs). Then enforce
-            # global uniqueness (preserve first occurrence) so the final
-            # route stop list contains each ATCO once and stop_order will
-            # be contiguous when inserted into the DB (table PK forbids
-            # duplicate atco per route).
-            collapsed = []
-            prev = None
-            for s in stops:
-                if s == prev:
+        # Build a strict per-file JPS -> RS mapping from the Routes section
+        # If a JourneyPattern's JourneyPatternSectionRefs length equals the
+        # corresponding Route's RouteSectionRefs length we map by position.
+        jps_to_rs_local = {}
+        routes_el = root.find(f'{ns}Routes')
+        routes_map = {}
+        if routes_el is not None:
+            for route in routes_el.findall(f'{ns}Route'):
+                rid = route.attrib.get('id')
+                if not rid:
                     continue
-                collapsed.append(s)
-                prev = s
+                refs = [r.text for r in route.findall(f'.//{ns}RouteSectionRef') if r.text]
+                routes_map[rid] = refs
 
-            ordered = []
-            seen_glob = set()
-            for s in collapsed:
-                if s in seen_glob:
-                    continue
-                seen_glob.add(s)
-                ordered.append(s)
+        # Walk JourneyPatterns again to build mapping
+        if std is not None:
+            for jp in std.findall(f'{ns}JourneyPattern'):
+                route_ref = jp.findtext(f'{ns}RouteRef')
+                jps_refs = [s.text for s in jp.findall(f'{ns}JourneyPatternSectionRefs') if s.text]
+                rs_refs = routes_map.get(route_ref) or []
+                if jps_refs and rs_refs and len(jps_refs) == len(rs_refs):
+                    for jps, rs in zip(jps_refs, rs_refs):
+                        jps_to_rs_local[jps] = rs
 
-            # Prefer the longest observed pattern for a given RouteRef
-            if rref not in route_stop_lists or len(ordered) > len(route_stop_lists[rref]):
-                route_stop_lists[rref] = ordered
-
+        # Build route_stops per JourneyPatternSection (section -> stops)
+        # Prefer canonical RS ids when a strict per-file mapping exists.
         route_stops_rows = []
-        for route_id, stops in route_stop_lists.items():
-            rkey = f"{service_code}:{route_id}" if service_code else route_id
+        for sid in jps_data.keys():
+            stops = section_stops(sid)
+            if not stops:
+                continue
+            mapped_sid = jps_to_rs_local.get(sid)
+            sid_use = mapped_sid or sid
+            rkey = f"{service_code}:{sid_use}" if service_code else sid_use
             for idx, atco in enumerate(stops):
                 route_stops_rows.append((rkey, atco, idx))
 
-        # --- Build route track rows (route_id, seq, lat, lon) ---
-        # Simplify each track to at most ~100 points to keep DB size manageable.
+        # --- Build route track rows (route_id, seq, lat, lon) per section ---
+        # Simplify each section track to at most ~100 points to keep DB size manageable.
         route_track_rows = []
-        for route_id, track in route_tracks_raw.items():
-            rkey = f"{service_code}:{route_id}" if service_code else route_id
-            n = len(track)
+        for sec_id, pts in route_section_tracks.items():
+            mapped_sid = jps_to_rs_local.get(sec_id)
+            sid_use = mapped_sid or sec_id
+            rkey = f"{service_code}:{sid_use}" if service_code else sid_use
+            n = len(pts)
             if n <= 100:
-                simplified = track
+                simplified = pts
             else:
                 step = n / 100.0
-                simplified = [track[int(i * step)] for i in range(100)]
-                if track[-1] != simplified[-1]:
-                    simplified.append(track[-1])
+                simplified = [pts[int(i * step)] for i in range(100)]
+                if pts[-1] != simplified[-1]:
+                    simplified.append(pts[-1])
             for seq, (lat, lon) in enumerate(simplified):
                 route_track_rows.append((rkey, seq, lat, lon))
 
@@ -591,8 +634,21 @@ class BusLoader:
                         jkey = vj_code
             else:
                 jkey = ''
-            rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
-            journey_routes_rows.append((jkey, rkey, line_name, destination_display))
+            # Map this vehicle journey to each JourneyPatternSection it
+            # traverses. This makes Journey→Route mappings section-scoped
+            # (JPS) so downstream code can treat each section as an
+            # independent route. If no section ids are present, fall
+            # back to the enclosing RouteRef.
+            sec_ids = info.get('section_ids') or []
+            if sec_ids:
+                for sid in sec_ids:
+                    mapped_sid = jps_to_rs_local.get(sid)
+                    sid_use = mapped_sid or sid
+                    rkey_sec = f"{service_code}:{sid_use}" if service_code else sid_use
+                    journey_routes_rows.append((jkey, rkey_sec, line_name, destination_display))
+            else:
+                rkey = f"{service_code}:{route_ref}" if service_code and route_ref else (route_ref or '')
+                journey_routes_rows.append((jkey, rkey, line_name, destination_display))
 
             op = vj.find(f'{ns}OperatingProfile')
             dow_mask = 127
@@ -643,7 +699,7 @@ class BusLoader:
                             cum = min_time
                     journey_times_rows.append((jkey, to_stop, cum))
 
-    # --- Determine a file-level RevisionNumber if present ---
+        # --- Determine a file-level RevisionNumber if present ---
         # Some TXC payloads put RevisionNumber attributes on elements
         # (e.g. VehicleJourney). We take the maximum RevisionNumber seen
         # as a coarse file-level revision. If none present, revision=None.
@@ -667,19 +723,19 @@ class BusLoader:
 
         return (route_stops_rows, journey_routes_rows, journey_times_rows,
                 stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-                route_track_rows, file_rev, file_provided_name)
+                route_track_rows, route_section_track_rows, file_rev, file_provided_name)
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
         rows = self._parse_file(file_path)
         if not rows:
             return
-        *data_rows, file_rev, file_provided_name = rows
+        *data_rows, route_section_tracks_rows, file_rev, file_provided_name = rows
         # When loading a single file directly we don't apply per-file
         # namespacing here (load_folder handles namespacing for batch
         # imports). Still pass the file-level revision through to
         # populate so revision-aware behaviour works.
-        self.populate(*data_rows, revision=file_rev)
+        self.populate(*data_rows, route_section_tracks=route_section_tracks_rows, revision=file_rev)
 
     def load_folder(self, folder_path, tag=None):
         """Parse every .xml file in a folder sequentially and bulk-insert.
@@ -711,7 +767,7 @@ class BusLoader:
         # Helper to apply per-file namespacing and merge parsed rows into buckets
         def _merge_parsed(fname, parsed):
             nonlocal counts
-            route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, file_rev, file_provided_name = parsed
+            route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, route_section_tracks, file_rev, file_provided_name = parsed
 
             # Per-file namespacing: prefer provider FileName attribute
             if file_provided_name:
@@ -753,18 +809,22 @@ class BusLoader:
             def _pref_file_route_tracks(rt_list):
                 return [ (f"{file_prefix}::{rid}", seq, lat, lon) for (rid, seq, lat, lon) in (rt_list or []) ]
 
+            def _pref_file_route_section_tracks(rs_list):
+                return [ (f"{file_prefix}::{rid}", sec, seq, lat, lon, fa, ta) for (rid, sec, seq, lat, lon, fa, ta) in (rs_list or []) ]
+
             route_stops = _pref_file_route_stops(route_stops)
             journey_routes = _pref_file_journey_routes(journey_routes)
             journey_times = _pref_file_journey_times(journey_times)
             journey_ops = _pref_file_journey_ops(journey_ops)
             route_tracks = _pref_file_route_tracks(route_tracks)
+            route_section_tracks = _pref_file_route_section_tracks(route_section_tracks)
 
             op = fname.split('_', 1)[0] if '_' in fname else 'DEFAULT'
             if op not in buckets:
                 buckets[op] = {
                     'route_stops': [], 'journey_routes': [], 'journey_times': [],
                     'stop_names': [], 'service_ops': [], 'serviced_orgs': [], 'journey_ops': [],
-                    'route_tracks': [], 'revision': None, 'file_count': 0,
+                    'route_tracks': [], 'route_section_tracks': [], 'revision': None, 'file_count': 0,
                 }
             b = buckets[op]
             b['route_stops'].extend(route_stops)
@@ -775,6 +835,7 @@ class BusLoader:
             b['serviced_orgs'].extend(serviced_orgs)
             b['journey_ops'].extend(journey_ops)
             b['route_tracks'].extend(route_tracks)
+            b['route_section_tracks'].extend(route_section_tracks)
             if file_rev is not None:
                 if b['revision'] is None or (file_rev and file_rev > b['revision']):
                     b['revision'] = file_rev
@@ -817,7 +878,7 @@ class BusLoader:
                 self.populate(
                     b['route_stops'], b['journey_routes'], b['journey_times'],
                     b['stop_names'], b['service_ops'], b['serviced_orgs'], b['journey_ops'],
-                    b['route_tracks'], revision=b['revision'], tag=None,
+                    b['route_tracks'], route_section_tracks=b.get('route_section_tracks', []), revision=b['revision'], tag=None,
                 )
             except Exception as e:
                 print(f'  [bus] {prefix}ERR during populate for bucket {op}: {e}')
@@ -847,7 +908,7 @@ class BusLoader:
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None,
-                  route_tracks=None, revision=None, tag=None ):
+                  route_tracks=None, route_section_tracks=None, revision=None, tag=None ):
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
@@ -866,7 +927,7 @@ class BusLoader:
         # When tag is provided, prefix journey_id/route_id values with "{tag}::" so
         # colliding ids from different datasets remain distinct.
         def _apply_namespacing_and_revision():
-            nonlocal route_stops, journey_routes, journey_times, journey_ops, route_tracks
+            nonlocal route_stops, journey_routes, journey_times, journey_ops, route_tracks, route_section_tracks
 
             def _pref(x):
                 if not tag or not x:
@@ -892,6 +953,7 @@ class BusLoader:
                     normalized_jops.append((_pref(jid), svc, operator_noc, dow, s, e, org, orgw))
             journey_ops = normalized_jops
             route_tracks = [( _pref(rid), seq, lat, lon ) for (rid, seq, lat, lon) in (route_tracks or [])]
+            route_section_tracks = [( _pref(rid), sec, seq, lat, lon, fa, ta ) for (rid, sec, seq, lat, lon, fa, ta) in (route_section_tracks or [])]
 
             # Revision-aware skipping/deletion. If the DB table contains a 'revision'
             # column we compare incoming file-level revision (None->0) to existing
@@ -937,6 +999,8 @@ class BusLoader:
                     elif existing_rev < incoming_rev and existing_rev != 0:
                         cursor.execute("DELETE FROM bus_route_tracks WHERE route_id = %s", (rid,))
                         cursor.execute("DELETE FROM bus_route_stops WHERE route_id = %s", (rid,))
+                        # Also delete any per-section rows for this route
+                        cursor.execute("DELETE FROM bus_route_section_tracks WHERE route_id = %s", (rid,))
 
                 if skip_rids:
                     route_stops = [r for r in route_stops if r[0] not in skip_rids]
@@ -1006,6 +1070,11 @@ class BusLoader:
                     )
                     cursor.execute(
                         "DELETE FROM bus_route_stops WHERE route_id = ANY(%s)",
+                        (unique_rids,)
+                    )
+                    # And delete any per-section tracks for these routes
+                    cursor.execute(
+                        "DELETE FROM bus_route_section_tracks WHERE route_id = ANY(%s)",
                         (unique_rids,)
                     )
         except Exception:
@@ -1137,18 +1206,22 @@ class BusLoader:
             on_conflict=_rs_conflict,
             key_indices=(0, 1),  # (route_id, atco_code)
         )
+        # Journey rows now use a composite PK (journey_id, route_id) so a
+        # single VehicleJourney can be associated with multiple section
+        # route IDs. Use ON CONFLICT on the composite key and update
+        # descriptive fields when duplicates are encountered.
         _jr_cols = ['journey_id', 'route_id', 'line_name', 'destination_display']
-        _jr_conflict = 'ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display'
+        _jr_conflict = 'ON CONFLICT (journey_id, route_id) DO UPDATE SET line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display'
         if _jr_has_rev:
             _jr_cols.append('revision')
-            _jr_conflict = 'ON CONFLICT (journey_id) DO UPDATE SET route_id = EXCLUDED.route_id, line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display, revision = EXCLUDED.revision'
+            _jr_conflict = 'ON CONFLICT (journey_id, route_id) DO UPDATE SET line_name = EXCLUDED.line_name, destination_display = EXCLUDED.destination_display, revision = EXCLUDED.revision'
         _chunked_multi_insert(
             cursor,
             'bus_journey_routes',
             _jr_cols,
             journey_routes,
             on_conflict=_jr_conflict,
-            key_indices=(0,),  # (journey_id,)
+            key_indices=(0, 1),  # (journey_id, route_id)
         )
         _chunked_multi_insert(
             cursor,
@@ -1204,6 +1277,21 @@ class BusLoader:
                 on_conflict='ON CONFLICT (route_id, seq) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon',
                 key_indices=(0, 1),  # (route_id, seq)
             )
+        # Insert per-section tracks if present
+        try:
+            if route_section_tracks:
+                _chunked_multi_insert(
+                    cursor,
+                    'bus_route_section_tracks',
+                    ['route_id', 'section_id', 'seq', 'lat', 'lon', 'from_atco', 'to_atco'],
+                    route_section_tracks,
+                    on_conflict='ON CONFLICT (route_id, section_id, seq) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, from_atco = EXCLUDED.from_atco, to_atco = EXCLUDED.to_atco',
+                    key_indices=(0, 1, 2),  # (route_id, section_id, seq)
+                )
+        except Exception:
+            # If section track insertion fails for any reason, continue —
+            # we keep route_tracks insertion as the primary data.
+            pass
         conn.commit()
         conn.close()
 
@@ -1342,17 +1430,14 @@ class BusLoader:
 
         conn = self._connect(self.db_path)
         cur = conn.cursor()
-        t0 = time.perf_counter()
 
         # 1. Load serviced org working-day ranges
-        t1 = time.perf_counter()
         service_ranges = {}   # service_code -> [(start, end), ...]
         for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_serviced_org_working_days"):
             service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
     # timing log removed
 
         # 1b. Load service operating periods (coarse outer boundary)
-        t1b = time.perf_counter()
         svc_periods = {}  # service_code -> (start_date | None, end_date | None)
         for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
             try:
@@ -1365,7 +1450,6 @@ class BusLoader:
 
         # 1c. Hard ceiling for open-ended services: use the latest
         #     explicitly-defined end date anywhere in the DB.
-        t1c = time.perf_counter()
         row = cur.execute(
             "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
         ).fetchone()
@@ -1374,7 +1458,6 @@ class BusLoader:
     # timing log removed
 
         # 2. Determine which journeys operate on this date
-        t2 = time.perf_counter()
         valid_journeys = set()
         cur.execute(
             "SELECT journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working "
@@ -1429,12 +1512,10 @@ class BusLoader:
             return BusData(num_routes=0, num_journeys=0, num_stops=0)
 
         # 3. Build BusData filtering to valid_journeys only
-        t3_start = time.perf_counter()
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
         # Use temp table for valid journey IDs - much faster than IN(...) with thousands of values
-        t3a = time.perf_counter()
         cur.execute("CREATE TEMP TABLE _valid_journeys (journey_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_journeys (journey_id) FROM STDIN") as copy:
             for jid in valid_journeys:
@@ -1442,7 +1523,6 @@ class BusLoader:
     # timing log removed
 
         # Figure out which routes are still needed
-        t3b = time.perf_counter()
         cur.execute(
             "SELECT DISTINCT route_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
@@ -1451,7 +1531,6 @@ class BusLoader:
     # timing log removed
 
         # Create temp table for valid routes too
-        t3c = time.perf_counter()
         cur.execute("CREATE TEMP TABLE _valid_routes (route_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_routes (route_id) FROM STDIN") as copy:
             for rid in valid_routes:
@@ -1461,7 +1540,6 @@ class BusLoader:
         # Count for sizing
         num_routes = len(valid_routes)
         num_journeys = len(valid_journeys)
-        t3d = time.perf_counter()
         cur.execute("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
         num_stops = cur.fetchone()[0] or 0
     # timing log removed
@@ -1470,13 +1548,15 @@ class BusLoader:
 
         # 3a. route_stops — only routes that have valid journeys (use JOIN)
         # Inline mapping to avoid repeated lookups inside BusData.add_route_stop
-        t3a2 = time.perf_counter()
         cur.execute(
             "SELECT rs.route_id, rs.atco_code FROM bus_route_stops rs "
             "JOIN _valid_routes vr ON rs.route_id = vr.route_id "
             "ORDER BY rs.route_id, rs.stop_order"
         )
         current_route = None
+        # pre-define variables to satisfy linters that track assignment paths
+        stops_buf = []
+        r_int = None
         rows = cur.fetchall()
         # Local refs for speed
         map_stops_get = bd.map_stops.get_int
@@ -1504,7 +1584,6 @@ class BusLoader:
 
         # 3b. journey_routes — only valid journeys (use JOIN)
         # Inline mapping to avoid repeated mapping calls in BusData.add_route_journeys
-        t3b2 = time.perf_counter()
         cur.execute(
             "SELECT jr.route_id, jr.journey_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id "
@@ -1540,7 +1619,6 @@ class BusLoader:
         # 3c. journey_times — only valid journeys (use JOIN)
         # Optimize: map ATCO codes to ints here and populate bd.journey_times
         # directly to avoid repeated mapping inside BusData.add_journey_times.
-        t3c2 = time.perf_counter()
         cur.execute(
             "SELECT jt.journey_id, jt.atco_code, jt.arrival_time FROM bus_journey_times jt "
             "JOIN _valid_journeys vj ON jt.journey_id = vj.journey_id "
@@ -1578,7 +1656,6 @@ class BusLoader:
     # timing log removed
 
         # 3d. metadata (use JOIN)
-        t3d2 = time.perf_counter()
         # Include service_code and operator_national_code via LEFT JOIN so
         # per-journey metadata in the date-filtered BusData contains the
         # same operator/service fields as the full DB loader.  Omitting
@@ -1623,7 +1700,6 @@ class BusLoader:
 
         # 3e. route tracks — only routes that have valid journeys
         try:
-            t3e2 = time.perf_counter()
             cur.execute(
                 "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_tracks rt "
                 "JOIN _valid_routes vr ON rt.route_id = vr.route_id "

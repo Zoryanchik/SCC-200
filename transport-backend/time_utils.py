@@ -15,10 +15,10 @@ from datetime import datetime, timedelta
 
 def seconds_since_midnight(time_str: str) -> int:
     """
-    Convert HH:MM:SS to seconds since midnight
+    Convert HH:MM or HH:MM:SS to seconds since midnight
     
     Args:
-        time_str: Time in format "HH:MM:SS" or "H:MM:SS"
+    time_str: Time in format "HH:MM"/"H:MM" or "HH:MM:SS"/"H:MM:SS"
     
     Returns:
         Seconds since midnight (0-86400)
@@ -31,10 +31,13 @@ def seconds_since_midnight(time_str: str) -> int:
         >>> seconds_since_midnight("23:59:59")
         86399
     """
-    parts = time_str.split(":")
+    parts = (time_str or "").strip().split(":")
+    if len(parts) < 2:
+        raise ValueError(f"Invalid time format: {time_str!r}")
+
     hours = int(parts[0])
     minutes = int(parts[1])
-    seconds = int(parts[2])
+    seconds = int(parts[2]) if len(parts) >= 3 and parts[2] != "" else 0
     
     return hours * 3600 + minutes * 60 + seconds
 

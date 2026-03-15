@@ -29,27 +29,27 @@ const MOCK_MARKERS = [
 // `waypoints` is a closed loop of [lat, lon] the bus cycles through.
 const MOCK_BUS_ROUTES = [
   {
-    id: 'mock-bus-1', routeNumber: '1', operator: 'Demo Buses', delayMinutes: 0,
+    id: 'mock-bus-1', routeNumber: '1', operator: 'Stagecoach', delayMinutes: 0, name: 'To: Lancaster University',
     waypoints: [
       [54.0480, -2.8010], [54.0510, -2.7980], [54.0540, -2.8020],
       [54.0520, -2.8060], [54.0490, -2.8050], [54.0480, -2.8010],
     ],
   }, {
-    id: 'mock-bus-2', routeNumber: '2', operator: 'Demo Buses', delayMinutes: 4,
+    id: 'mock-bus-2', routeNumber: '2', operator: 'Stagecoach', delayMinutes: 4, name: 'To: Morecambe',
     waypoints: [
       [54.0460, -2.7990], [54.0440, -2.8040], [54.0430, -2.8090],
       [54.0460, -2.8120], [54.0490, -2.8080], [54.0460, -2.7990],
     ],
   },
   {
-    id: 'mock-bus-3', routeNumber: 'X4', operator: 'Demo Buses', delayMinutes: 12,
+    id: 'mock-bus-3', routeNumber: 'X4', operator: 'Stagecoach', delayMinutes: 12, name: 'To: Preston City Centre',
     waypoints: [
       [54.0530, -2.7950], [54.0560, -2.7900], [54.0580, -2.7960],
       [54.0550, -2.8010], [54.0530, -2.7980], [54.0530, -2.7950],
     ],
   },
   {
-    id: 'mock-bus-4', routeNumber: '41', operator: 'Demo Buses', delayMinutes: 0,
+    id: 'mock-bus-4', routeNumber: '41', operator: 'Stagecoach', delayMinutes: -1, name: 'To: Lancaster Bus Station',
     waypoints: [
       [54.0420, -2.8000], [54.0400, -2.7950], [54.0380, -2.8000],
       [54.0400, -2.8050], [54.0420, -2.8000],
@@ -143,14 +143,11 @@ const { data: busLocations, loading: busLoading, refreshing: busRefreshing, coun
   lat: mapCenter.lat,
   lon: mapCenter.lon,
   refreshInterval: 20000,
-  debounceMs: 800,
+  debounceMs: typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 0 : 3000,
 });
 const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
 // STOMP/websocket is used only for train movements in this deployment.
-// Bus live data is fetched via HTTP polling (useLiveBusLocations). Do
-// not subscribe to bus STOMP topics to avoid conflicting state.
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
-const { data: liveBusUpdate, isConnected: busLiveConnected } = useLiveUpdates('bus');
 
 // Track whether real API data has ever arrived so we know when to stop the mock animation.
 const [hasRealData, setHasRealData] = useState(false);

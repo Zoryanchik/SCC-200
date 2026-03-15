@@ -286,11 +286,29 @@ class RaptorRouter:
                 else:
                     # fallback: just record stop ints
                     stops_slice = [{'stop': s} for s in leg_stops]
+                # Normalize journey metadata so any returned route_id
+                # corresponds to the canonical route id known to the
+                # merged network (via journey_to_route -> route_metadata).
+                jm = None
+                if j_id is not None and j_id < len(net.journey_metadata):
+                    try:
+                        jm = dict(net.journey_metadata[j_id]) if net.journey_metadata[j_id] else None
+                    except Exception:
+                        jm = net.journey_metadata[j_id]
+                try:
+                    if jm is not None and j_id is not None and hasattr(net, 'journey_to_route'):
+                        r_int = net.journey_to_route[j_id] if j_id < len(net.journey_to_route) else None
+                        if r_int is not None and r_int < len(net.route_metadata):
+                            rm = net.route_metadata[r_int]
+                            if isinstance(rm, dict) and rm.get('route_id'):
+                                jm['route_id'] = rm.get('route_id')
+                except Exception:
+                    pass
+
                 leg_meta = {
                     'journey_id': j_id,
                     'mode': net.journey_type(j_id),
-                    'journey_metadata': (net.journey_metadata[j_id]
-                                         if j_id < len(net.journey_metadata) else None),
+                    'journey_metadata': jm,
                     'stops': stops_slice,
                 }
                 lj['legs'].append(leg_meta)
@@ -305,7 +323,32 @@ class RaptorRouter:
                     # it to clients. This keeps the logging side-effect local
                     # but makes the id available for subsequent geometry lookups.
                     try:
-                        fastest_route['_logged_journey_id'] = lj['id']
+                        # Annotate the returned route with a canonical route_id
+                        # that can be used to look up in-memory route_tracks.
+                        # Pick the first journey_metadata.route_id present in legs.
+                        route_id_for_tracks = None
+                        for leg in lj.get('legs', []) or []:
+                            jm_leg = leg.get('journey_metadata') if isinstance(leg, dict) else None
+                            if jm_leg and isinstance(jm_leg, dict) and jm_leg.get('route_id'):
+                                route_id_for_tracks = jm_leg.get('route_id')
+                                break
+                            # Fallback to a pure journey_to_route lookup when
+                            # journey_metadata doesn't carry a route_id.
+                            try:
+                                j_id = leg.get('journey_id') if isinstance(leg, dict) else None
+                                if j_id is None:
+                                    continue
+                                if hasattr(net, 'journey_to_route') and j_id < len(net.journey_to_route):
+                                    r_int = net.journey_to_route[j_id]
+                                    if r_int is not None and r_int >= 0 and hasattr(net, 'route_metadata') and r_int < len(net.route_metadata):
+                                        rm = net.route_metadata[r_int]
+                                        if isinstance(rm, dict) and rm.get('route_id'):
+                                            route_id_for_tracks = rm.get('route_id')
+                                            break
+                            except Exception:
+                                pass
+                        if route_id_for_tracks:
+                            fastest_route['_route_id'] = route_id_for_tracks
                     except Exception:
                         pass
                     # Persist route geometries (if present) onto the logged

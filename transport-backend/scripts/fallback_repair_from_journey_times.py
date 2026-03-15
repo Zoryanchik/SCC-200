@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from main import BUS_DB_PATH
+from route_id_utils import resolve_prefixed_route_id
 import psycopg
 
 
@@ -115,6 +116,11 @@ def main():
     for route in routes:
         print('\n' + '='*80)
         print(f"Processing route: {route}")
+        # Resolve stored DB-prefixed id (if present) so subsequent queries
+        # target the correct namespaced rows.
+        db_route = resolve_prefixed_route_id(conn, route)
+        if db_route != route:
+            print(f"Resolved {route} -> {db_route} for DB lookups")
         jid = representative_journey(cur, route)
         if not jid:
             print(f"WARNING: No representative journey found for route {route}; skipping")
@@ -122,23 +128,23 @@ def main():
         print(f"Representative journey_id: {jid}")
         rows = build_stop_rows(cur, jid)
         print(f"Found {len(rows)} stops from journey {jid}")
-        preview = sql_preview_for_route(route, rows)
+        preview = sql_preview_for_route(db_route, rows)
         print(preview)
 
         if args.apply:
             confirm = input(f"Apply repair for {route}? Type YES to proceed: ")
             if confirm.strip() == 'YES':
                 # Build and execute transaction: backup + delete + insert
-                backup_table = f"bus_route_stops_backup_{route.replace(':','_').replace('/','_')}"
+                backup_table = f"bus_route_stops_backup_{db_route.replace(':','_').replace('/','_')}"
                 try:
                     with conn.transaction():
                         cur.execute(f"CREATE TABLE IF NOT EXISTS {backup_table} AS TABLE bus_route_stops WITH NO DATA;")
-                        cur.execute("INSERT INTO %s SELECT * FROM bus_route_stops WHERE route_id = %%s;" % backup_table, (route,))
-                        cur.execute("DELETE FROM bus_route_stops WHERE route_id = %s", (route,))
+                        cur.execute("INSERT INTO %s SELECT * FROM bus_route_stops WHERE route_id = %%s;" % backup_table, (db_route,))
+                        cur.execute("DELETE FROM bus_route_stops WHERE route_id = %s", (db_route,))
                         for idx, (atco, name, lat, lon) in enumerate(rows):
                             cur.execute(
                                 "INSERT INTO bus_route_stops (route_id, stop_order, atco_code, name, lat, lon) VALUES (%s, %s, %s, %s, %s, %s)",
-                                (route, idx, atco, name or atco, lat, lon)
+                                (db_route, idx, atco, name or atco, lat, lon)
                             )
                     print(f"Applied repair for {route}; backup in {backup_table}")
                 except Exception as e:

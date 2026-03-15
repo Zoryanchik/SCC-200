@@ -117,8 +117,8 @@ class BusLive:
 
     def __init__(self, urls: Iterable[str] = None, timeout: Optional[float] = None):
         self.urls = list(urls) if urls else list(self.DEFAULT_URLS)
-        # timeout=None means no explicit timeout (block until response)
-        self.timeout = timeout
+        # Default live feed timeout: 10 seconds when not explicitly provided
+        self.timeout = 10 if timeout is None else timeout
 
     def _fetch_xml(self, url: str) -> ET.Element:
         ctx = ssl.create_default_context()
@@ -394,7 +394,7 @@ class BusLive:
         return results
 
 
-def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=20):
+def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=10):
     """Convenience wrapper for BusLive.get_bus_live."""
     bl = BusLive(urls=urls, timeout=timeout)
     return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol)

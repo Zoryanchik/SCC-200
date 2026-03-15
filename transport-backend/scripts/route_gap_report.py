@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 import os
 sys.path.insert(0, str(PROJECT_ROOT))
 from main import BUS_DB_PATH
+from route_id_utils import resolve_prefixed_route_id
 import psycopg
 
 if len(sys.argv) < 2:
@@ -37,6 +38,11 @@ print(f"Connecting to DB: {BUS_DB_PATH}")
 conn = psycopg.connect(BUS_DB_PATH)
 cur = conn.cursor()
 
+# Resolve DB-prefixed id (if available) so queries target stored namespaced rows
+db_route = resolve_prefixed_route_id(conn, route_id)
+if db_route != route_id:
+    print(f"Resolved {route_id} -> {db_route} for DB lookups")
+
 cur.execute(
     """
     SELECT s.stop_order, s.atco_code, sc.lat, sc.lon
@@ -45,7 +51,7 @@ cur.execute(
     WHERE s.route_id = %s
     ORDER BY s.stop_order
     """,
-    (route_id,)
+    (db_route,)
 )
 rows = cur.fetchall()
 if not rows:

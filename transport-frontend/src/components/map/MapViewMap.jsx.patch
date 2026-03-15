@@ -1,0 +1,24 @@
+--- /Users/lty/Desktop/scc200/puppy/SCC-200/transport-frontend/src/components/map/MapViewMap.jsx
++++ /Users/lty/Desktop/scc200/puppy/SCC-200/transport-frontend/src/components/map/MapViewMap.jsx
+@@ -190,6 +190,26 @@
+ };
+ 
++const isBusMappedLocal = (m) => {
++  if (!m || m.type !== 'bus') return false;
++  if (m.mock === true) return true;
++  if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
++  const meta = m.meta || {};
++  const top = m.logged_journey_id || m.journey_id || m.route_id || null;
++  if (top) return true;
++  const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
++  if (mr != null) return String(mr).toLowerCase() === 'matched';
++  const keys = Object.keys(meta).map(k => String(k).toLowerCase());
++  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
++  for (const w of want) {
++    if (keys.includes(w)) return true;
++    if (meta[w] || meta[w.replace(/_/g, '')]) return true;
++  }
++  return false;
++};
++
+ const TRAIN_ICON = createCustomIcon('train', '#2e7d32', null, null);
