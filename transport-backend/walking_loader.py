@@ -39,13 +39,46 @@ class WalkingLoader:
         conn = self._connect(self.db_path)
         cur = conn.cursor()
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS walking_transfers (
+            CREATE UNLOGGED TABLE IF NOT EXISTS walking_transfers (
                 from_atco   TEXT NOT NULL,
                 to_atco     TEXT NOT NULL,
                 walk_seconds INTEGER NOT NULL,
                 PRIMARY KEY (from_atco, to_atco)
             );
         """)
+        conn.commit()
+        conn.close()
+
+    def _bulk_insert_transfers(self, records):
+        """High performance bulk insert for walking transfers using COPY and temp table."""
+        if not records:
+            return
+            
+        # Deduplicate records in memory first (by from_atco, to_atco) keeping minimum walk_seconds
+        deduped = {}
+        for (src, dst, sec) in records:
+            k = (src, dst)
+            if k not in deduped or sec < deduped[k]:
+                deduped[k] = sec
+        unique_records = [(k[0], k[1], v) for k, v in deduped.items()]
+        
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        
+        cur.execute("CREATE TEMP TABLE _tmp_walking_transfers (LIKE walking_transfers) ON COMMIT DROP")
+        
+        # Use COPY for fast writes without constraint checks
+        with cur.copy("COPY _tmp_walking_transfers (from_atco, to_atco, walk_seconds) FROM STDIN") as copy:
+            for r in unique_records:
+                copy.write_row(r)
+                
+        # Merge temp table back to actual table
+        cur.execute("""
+            INSERT INTO walking_transfers (from_atco, to_atco, walk_seconds)
+            SELECT from_atco, to_atco, walk_seconds FROM _tmp_walking_transfers
+            ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds
+        """)
+        
         conn.commit()
         conn.close()
 
@@ -99,6 +132,11 @@ class WalkingLoader:
               f" ({len(done_sources)} already done, {total_pending} pending) "
               f"using {max_workers} threads...")
 
+        import requests
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=max_workers, pool_maxsize=max_workers)
+        session.mount('http://', adapter)
+        
         def query_one_stop(src_idx):
             """Query OSRM for one source stop, return list of (src_atco, dst_atco, dur) or []."""
             src_atco = atco_list[src_idx]
@@ -109,12 +147,24 @@ class WalkingLoader:
             hi = bisect.bisect_right(sorted_lats, src_lat + bbox_margin)
 
             neighbors = []
+            import math
+            def fast_dist_m(lat1, lon1, lat2, lon2):
+                r_lat1 = math.radians(lat1)
+                x = math.radians(lon2 - lon1) * math.cos(r_lat1)
+                y = math.radians(lat2 - lat1)
+                return 6371000.0 * math.sqrt(x*x + y*y)
+                
+            max_straight_m = max_walk_seconds * 2.0  # conservative leeway
+
             for j in range(lo, hi):
                 nb_idx = indexed[j]
-                if nb_idx == src_idx:
+                # Only process each pair once by enforcing a strict ordering
+                if nb_idx <= src_idx:
                     continue
                 if abs(lon_list[nb_idx] - src_lon) <= bbox_margin:
-                    neighbors.append(nb_idx)
+                    dist = fast_dist_m(src_lat, src_lon, lat_list[nb_idx], lon_list[nb_idx])
+                    if dist <= max_straight_m:
+                        neighbors.append(nb_idx)
 
             if not neighbors:
                 return []
@@ -124,9 +174,10 @@ class WalkingLoader:
             osrm_url = f"{osrm_base}/table/v1/foot/{coord_str}?sources=0&annotations=duration"
 
             try:
-                resp = urllib.request.urlopen(osrm_url, timeout=10)
-                data = json.loads(resp.read())
-                resp.close()
+                resp = session.get(osrm_url, timeout=10)
+                if resp.status_code != 200:
+                    return []
+                data = resp.json()
             except Exception:
                 return []
 
@@ -142,7 +193,9 @@ class WalkingLoader:
                     continue
                 nb_idx = all_indices[k]
                 dst_atco = atco_list[nb_idx]
-                results.append((src_atco, dst_atco, int(dur)))
+                d = int(dur)
+                results.append((src_atco, dst_atco, d))
+                results.append((dst_atco, src_atco, d))
             return results
 
         transfers = []
@@ -161,16 +214,7 @@ class WalkingLoader:
                 # Flush to DB periodically
                 if processed % 500 == 0:
                     if transfers:
-                        conn = self._connect(self.db_path)
-                        cur = conn.cursor()
-                        cur.executemany(
-                            "INSERT INTO walking_transfers "
-                            "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
-                            transfers,
-                        )
-                        conn.commit()
-                        conn.close()
+                        self._bulk_insert_transfers(transfers)
                         total_found += len(transfers)
                         self.precompute_inserted = total_found
                         transfers = []
@@ -178,16 +222,7 @@ class WalkingLoader:
 
         # Final flush
         if transfers:
-            conn = self._connect(self.db_path)
-            cur = conn.cursor()
-            cur.executemany(
-                "INSERT INTO walking_transfers "
-                "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
-                "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
-                transfers,
-            )
-            conn.commit()
-            conn.close()
+            self._bulk_insert_transfers(transfers)
             total_found += len(transfers)
             self.precompute_inserted = total_found
 
@@ -209,15 +244,13 @@ class WalkingLoader:
         for nearby stops (selected via the same latitude bbox heuristic used
         for OSRM), and inserts pairs whose computed time ≤ max_walk_seconds.
         """
-        def haversine_m(lat1, lon1, lat2, lon2):
-            R = 6371000.0
-            phi1 = math.radians(lat1)
-            phi2 = math.radians(lat2)
-            dphi = math.radians(lat2 - lat1)
-            dlambda = math.radians(lon2 - lon1)
-            a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
-            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-            return R * c
+        def fast_dist_m(lat1, lon1, lat2, lon2):
+            # Equirectangular approximation for very short distances (<10km)
+            # ~10x faster than full spherical Haversine in pure Python
+            r_lat1 = math.radians(lat1)
+            x = math.radians(lon2 - lon1) * math.cos(r_lat1)
+            y = math.radians(lat2 - lat1)
+            return 6371000.0 * math.sqrt(x*x + y*y)
 
         # Mark progress state
         self.precomputing = True
@@ -264,7 +297,7 @@ class WalkingLoader:
             neighbors = []
             for j in range(lo, hi):
                 nb_idx = indexed[j]
-                if nb_idx == src_idx:
+                if nb_idx <= src_idx:
                     continue
                 if abs(lon_list[nb_idx] - src_lon) <= bbox_margin:
                     neighbors.append(nb_idx)
@@ -276,43 +309,27 @@ class WalkingLoader:
                 dst_atco = atco_list[nb_idx]
                 lat2 = lat_list[nb_idx]
                 lon2 = lon_list[nb_idx]
-                dist_m = haversine_m(src_lat, src_lon, lat2, lon2)
+                dist_m = fast_dist_m(src_lat, src_lon, lat2, lon2)
                 secs = int(dist_m / walk_speed_mps)
                 if secs <= 0 or secs > max_walk_seconds:
                     continue
                 transfers.append((src_atco, dst_atco, secs))
+                transfers.append((dst_atco, src_atco, secs))
 
             processed += 1
             # update progress
             self.precompute_processed = processed
-            if processed % 500 == 0:
-                conn = self._connect(self.db_path)
-                cur = conn.cursor()
-                cur.executemany(
-                    "INSERT INTO walking_transfers "
-                    "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
-                    transfers,
-                )
-                conn.commit()
-                conn.close()
-                total_found += len(transfers)
-                self.precompute_inserted = total_found
-                transfers = []
+            if processed % 1000 == 0:
+                if transfers:
+                    self._bulk_insert_transfers(transfers)
+                    total_found += len(transfers)
+                    self.precompute_inserted = total_found
+                    transfers = []
                 print(f"    [{processed}/{len(atco_list) - len(done_sources)}]"
                       f" {total_found} transfers saved (approx)")
 
         if transfers:
-            conn = self._connect(self.db_path)
-            cur = conn.cursor()
-            cur.executemany(
-                "INSERT INTO walking_transfers "
-                "(from_atco, to_atco, walk_seconds) VALUES (%s, %s, %s) "
-                "ON CONFLICT (from_atco, to_atco) DO UPDATE SET walk_seconds = EXCLUDED.walk_seconds",
-                transfers,
-            )
-            conn.commit()
-            conn.close()
+            self._bulk_insert_transfers(transfers)
             total_found += len(transfers)
             self.precompute_inserted = total_found
         print(f"  ✓ {total_found} approx walking transfers stored")

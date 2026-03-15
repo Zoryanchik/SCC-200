@@ -255,10 +255,27 @@ def initialize_base():
 
     # Load all 3 days' data in parallel (shared between AM and PM)
     train_loader = TrainLoader(TRAIN_DB_PATH)
+    # Try to use per-date pickled caches to avoid rebuilding BusData when the
+    # underlying DB hasn't changed. Fall back to building and save the cache
+    # for future runs. Train loaders keep their existing behaviour.
+    def _maybe_cached_bus_load(date_s):
+        try:
+            cached = loader.load_cache_for_date(date_s)
+            if cached is not None:
+                return cached
+        except Exception:
+            pass
+        bd = loader.load_busdata_for_date(date_s)
+        try:
+            loader.save_cache_for_date(date_s, bd)
+        except Exception:
+            pass
+        return bd
+
     with ThreadPoolExecutor(max_workers=6) as ex:
-        bus_yesterday_f = ex.submit(loader.load_busdata_for_date, yesterday_str)
-        bus_today_f = ex.submit(loader.load_busdata_for_date, today_str)
-        bus_tomorrow_f = ex.submit(loader.load_busdata_for_date, tomorrow_str)
+        bus_yesterday_f = ex.submit(_maybe_cached_bus_load, yesterday_str)
+        bus_today_f = ex.submit(_maybe_cached_bus_load, today_str)
+        bus_tomorrow_f = ex.submit(_maybe_cached_bus_load, tomorrow_str)
         train_yesterday_f = ex.submit(train_loader.load_traindata_for_date, yesterday_str)
         train_today_f = ex.submit(train_loader.load_traindata_for_date, today_str)
         train_tomorrow_f = ex.submit(train_loader.load_traindata_for_date, tomorrow_str)

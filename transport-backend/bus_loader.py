@@ -336,16 +336,14 @@ class BusLoader:
         parts = hms.split(':')
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
 
-    def _parse_file(self, file_path):
+    @staticmethod
+    def _parse_txc_file(file_path):
         """Parse a TransXChange XML file and return row-lists without touching the DB.
 
         Returns a 9-tuple:
             (route_stops_rows, journey_routes_rows, journey_times_rows,
              stop_names_rows, service_op_rows, serviced_org_rows, journey_op_rows,
-             route_track_rows, file_revision)
-
-        file_revision is the max RevisionNumber attribute found in the XML
-        (int), or None if no RevisionNumber attributes are present.
+             route_track_rows, route_section_tracks, file_revision, file_provided_name)
         """
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -401,7 +399,7 @@ class BusLoader:
                 jptl_id   = jptl.attrib['id']
                 from_stop = jptl.findtext(f'{ns}From/{ns}StopPointRef')
                 to_stop   = jptl.findtext(f'{ns}To/{ns}StopPointRef')
-                run_sec   = self._parse_duration(jptl.findtext(f'{ns}RunTime'))
+                run_sec   = BusLoader._parse_duration(jptl.findtext(f'{ns}RunTime'))
                 to_day_shift = int(jptl.findtext(f'{ns}To/{ns}DepartureDayShift') or '0')
                 links.append((jptl_id, from_stop, to_stop, run_sec, to_day_shift))
             jps_data[sid] = links
@@ -608,7 +606,7 @@ class BusLoader:
             vj_code = vj.findtext(f'{ns}VehicleJourneyCode')
             jp_ref = vj.findtext(f'{ns}JourneyPatternRef')
             dep_hms = vj.findtext(f'{ns}DepartureTime')
-            dep_sec = self._hms_to_seconds(dep_hms)
+            dep_sec = BusLoader._hms_to_seconds(dep_hms)
             line_ref = vj.findtext(f'{ns}LineRef', '')
             line_name = line_names.get(line_ref, '')
             if line_name:
@@ -682,7 +680,7 @@ class BusLoader:
                 ref = vjtl.findtext(f'{ns}JourneyPatternTimingLinkRef')
                 rt = vjtl.findtext(f'{ns}RunTime')
                 if ref and rt:
-                    overrides[ref] = self._parse_duration(rt)
+                    overrides[ref] = BusLoader._parse_duration(rt)
 
             cum = dep_sec
             first = True
@@ -727,7 +725,7 @@ class BusLoader:
 
     def load_file(self, file_path):
         """Parse a TransXChange XML file and populate the database."""
-        rows = self._parse_file(file_path)
+        rows = BusLoader._parse_txc_file(file_path)
         if not rows:
             return
         *data_rows, route_section_tracks_rows, file_rev, file_provided_name = rows
@@ -842,30 +840,23 @@ class BusLoader:
             b['file_count'] += 1
             counts += 1
 
-        # Process files in batches of 30 to control memory/CPU use
-        batch_size = 30
-        from math import ceil
-        num_batches = ceil(total / batch_size)
-        for bi in range(num_batches):
-            batch_start = bi * batch_size
-            batch = files[batch_start: batch_start + batch_size]
-            # Use a modest number of threads per batch
-            max_workers = min(10, len(batch))
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = { ex.submit(self._parse_file, os.path.join(folder_path, fname)): fname for fname in batch }
-                for fut in as_completed(futures):
-                    idx += 1
-                    fname = futures[fut]
-                    try:
-                        r = fut.result()
-                        if not r:
-                            continue
-                        _merge_parsed(fname, r)
-                        # Only print every 10th file or the last one to reduce log noise
-                        if idx % 10 == 0 or idx == total:
-                            print(f'  [bus] {prefix}parsed [{idx}/{total}]')
-                    except Exception as e:
-                        print(f'  [bus] {prefix}ERR [{idx}/{total}] {fname}: {e}')
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor() as ex:
+            futures = { ex.submit(BusLoader._parse_txc_file, os.path.join(folder_path, fname)): fname for fname in files }
+            for fut in as_completed(futures):
+                idx += 1
+                fname = futures[fut]
+                try:
+                    r = fut.result()
+                    if not r:
+                        continue
+                    _merge_parsed(fname, r)
+                    # Only print every 10th file or the last one to reduce log noise
+                    if idx % 10 == 0 or idx == total:
+                        print(f'  [bus] {prefix}parsed [{idx}/{total}]')
+                except Exception as e:
+                    print(f'  [bus] {prefix}ERR [{idx}/{total}] {fname}: {e}')
 
         # Now populate per-operator bucket so inserts are chunked into
         # fewer transactions. Use the bucket-level max revision.

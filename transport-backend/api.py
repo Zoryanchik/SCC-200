@@ -2721,22 +2721,28 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         simple_line = line_name.split(":")[-1] if line_name else ""
         if line_q and simple_line != line_q:
             continue
-        # Destination matching: prefer explicit feed-provided ATCO when present.
+        # Endpoint matching: require EITHER the destination OR the origin to match.
         try:
             jt = merged.journey_times[j_id]
             if not jt:
                 continue
-            dest_stop_int = jt[-1][0]
-            journey_dest_atco = merged.get_atco_code(dest_stop_int)
+            dest_atcos = []
+            for i in range(1, min(4, len(jt) + 1)):
+                atco = merged.get_atco_code(jt[-i][0])
+                if atco: dest_atcos.append(str(atco).strip())
+            
+            origin_atcos = []
+            for i in range(min(3, len(jt))):
+                atco = merged.get_atco_code(jt[i][0])
+                if atco: origin_atcos.append(str(atco).strip())
         except Exception:
             continue
 
+        dest_match = False
         if feed_destination_atco:
-            # Feed supplied an ATCO code — require exact equality
-            if not journey_dest_atco or str(journey_dest_atco).strip() != str(feed_destination_atco).strip():
-                continue
+            if str(feed_destination_atco).strip() in dest_atcos:
+                dest_match = True
         else:
-            # Fall back to resolving free-text destination to ATCO(s)
             candidate_dest_atcos = set()
             if dest_q:
                 for sname_key, sidx_list in stop_name_map.items():
@@ -2744,12 +2750,27 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                         for si in sidx_list:
                             atco = merged.get_atco_code(si)
                             if atco:
-                                candidate_dest_atcos.add(atco)
-            # strict mode: require feed destination to resolve to an ATCO and match
-            if not candidate_dest_atcos:
-                continue
-            if not journey_dest_atco or journey_dest_atco not in candidate_dest_atcos:
-                continue
+                                candidate_dest_atcos.add(str(atco).strip())
+            if candidate_dest_atcos and any(da in candidate_dest_atcos for da in dest_atcos):
+                dest_match = True
+
+        origin_match = False
+        if feed_origin_atco:
+            if str(feed_origin_atco).strip() in origin_atcos:
+                origin_match = True
+        else:
+            try:
+                nearby = walking.reachable_stops((lat_v, lon_v))
+                if nearby:
+                    nearest_stop_int, walk_secs = nearby[0]
+                    nearest_atco = merged.get_atco_code(nearest_stop_int)
+                    if nearest_atco and str(nearest_atco).strip() in origin_atcos:
+                        origin_match = True
+            except Exception:
+                pass
+
+        if not dest_match and not origin_match:
+            continue
 
         # Strict operator/service match: require journey's recorded service_code
         # to match the feed-provided operator_ref. If the journey metadata
@@ -2779,6 +2800,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             if not jt:
                 continue
             start_dep = jt[0][2]   # departure time of first stop
+            # Override start_dep if it is only a dest match and feed_origin_atco is present
+            if not origin_match and feed_origin_atco:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == str(feed_origin_atco).strip():
+                        if dep_t is not None:
+                            start_dep = dep_t
+                        elif arr_t is not None:
+                            start_dep = arr_t
+                        break
             # Safe end_arr: prefer arrival, fallback to departure
             end_arr = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
         except Exception:
@@ -2854,33 +2885,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             # If walking lookup fails, don't block — fall back to other checks
             pass
 
-        # ── Origin checks (strict) ──
-        # Origin checks: prefer explicit feed-provided origin ATCO when present.
-        try:
-            first_stop_int = jt[0][0]
-            journey_first_atco = merged.get_atco_code(first_stop_int)
-        except Exception:
-            continue
-
-        if feed_origin_atco:
-            # Feed supplied an origin ATCO — require exact equality
-            if not journey_first_atco or str(journey_first_atco).strip() != str(feed_origin_atco).strip():
-                continue
-        else:
-            # Determine nearest reachable stop(s) to vehicle location and compare
-            try:
-                nearby = walking.reachable_stops((lat_v, lon_v))
-                if not nearby:
-                    # strict mode: if we cannot determine the vehicle's nearby stop, reject
-                    continue
-                nearest_stop_int, walk_secs = nearby[0]
-                nearest_atco = merged.get_atco_code(nearest_stop_int)
-                if not nearest_atco or not journey_first_atco or nearest_atco != journey_first_atco:
-                    # vehicle is not at/near the scheduled origin stop
-                    continue
-            except Exception:
-                # If walking lookup failed, reject (strict requirement)
-                continue
+        # ── Origin checks removed as they are now evaluated alongside destination above ──
 
         # ── OriginAimedDepartureTime gate (optional) ──
         # Use the feed-provided OriginAimedDepartureTime when present. Feeds
@@ -3416,28 +3421,24 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
         reasons.append("no_line_match")
         return reasons
 
-    # 2) destination check (prefer feed ATCO)
+    # 2 & 4) destination AND/OR origin ATCO checks (unified)
+    # We require at least one match for either destination or origin across all candidates.
+    dest_ok = False
     dest_matches = []
-    for j_id, jm in line_candidates:
-        try:
-            jt = merged.journey_times[j_id]
-            dest_stop_int = jt[-1][0]
-            journey_dest_atco = merged.get_atco_code(dest_stop_int)
-        except Exception:
-            journey_dest_atco = None
-        if feed_destination_atco:
-            if journey_dest_atco and str(journey_dest_atco).strip() == str(feed_destination_atco).strip():
+    if feed_destination_atco:
+        for j_id, jm in line_candidates:
+            try:
+                jt = merged.journey_times[j_id]
+                dest_atcos = []
+                for i in range(1, min(4, len(jt) + 1)):
+                    atco = merged.get_atco_code(jt[-i][0])
+                    if atco: dest_atcos.append(str(atco).strip())
+            except Exception:
+                dest_atcos = []
+            if str(feed_destination_atco).strip() in dest_atcos:
                 dest_matches.append((j_id, jm))
-        else:
-            # build stop name map lazily
-            pass
-
-    if feed_destination_atco and not dest_matches:
-        reasons.append("destination_atco_mismatch")
-        return reasons
-
-    if not feed_destination_atco:
-        # attempt to resolve free-text dest -> ATCOs
+                dest_ok = True
+    else:
         stop_name_map = {}
         try:
             for si, sname in enumerate(merged.stop_metadata or []):
@@ -3447,7 +3448,6 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
                 stop_name_map.setdefault(key, []).append(si)
         except Exception:
             stop_name_map = {}
-
         candidate_dest_atcos = set()
         if dest_q:
             for sname_key, sidx_list in stop_name_map.items():
@@ -3455,25 +3455,51 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
                     for si in sidx_list:
                         atco = merged.get_atco_code(si)
                         if atco:
-                            candidate_dest_atcos.add(atco)
-        if not candidate_dest_atcos:
-            reasons.append("destination_unresolvable")
-            return reasons
-        # check if any journey's final ATCO in line_candidates matches
-        any_match = False
-        for j_id, jm in line_candidates:
-            try:
-                jt = merged.journey_times[j_id]
-                dest_stop_int = jt[-1][0]
-                journey_dest_atco = merged.get_atco_code(dest_stop_int)
-            except Exception:
-                journey_dest_atco = None
-            if journey_dest_atco and journey_dest_atco in candidate_dest_atcos:
-                any_match = True
+                            candidate_dest_atcos.add(str(atco).strip())
+        if candidate_dest_atcos:
+            for j_id, jm in line_candidates:
+                try:
+                    jt = merged.journey_times[j_id]
+                    dest_atcos = []
+                    for i in range(1, min(4, len(jt) + 1)):
+                        atco = merged.get_atco_code(jt[-i][0])
+                        if atco: dest_atcos.append(str(atco).strip())
+                except Exception:
+                    dest_atcos = []
+                if any(da in candidate_dest_atcos for da in dest_atcos):
+                    dest_ok = True
+                    break
+
+    origin_ok = False
+    for j_id, jm in line_candidates:
+        try:
+            jt = merged.journey_times[j_id]
+            origin_atcos = []
+            for i in range(min(3, len(jt))):
+                atco = merged.get_atco_code(jt[i][0])
+                if atco: origin_atcos.append(str(atco).strip())
+        except Exception:
+            continue
+        if feed_origin_atco:
+            if str(feed_origin_atco).strip() in origin_atcos:
+                origin_ok = True
                 break
-        if not any_match:
-            reasons.append("destination_atco_mismatch")
-            return reasons
+        else:
+            try:
+                nearby = walking.reachable_stops((lat_v, lon_v))
+                if not nearby:
+                    continue
+                nearest_stop_int, walk_secs = nearby[0]
+                nearest_atco = merged.get_atco_code(nearest_stop_int)
+                if nearest_atco and str(nearest_atco).strip() in origin_atcos:
+                    origin_ok = True
+                    break
+            except Exception:
+                continue
+
+    if not dest_ok and not origin_ok:
+        reasons.append("destination_and_origin_atco_mismatch")
+        return reasons
 
     # 3) operator/service check — prefer authoritative operator_national_code
     # when present, otherwise fall back to service_code or line prefix.
@@ -3498,36 +3524,6 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
             reasons.append("operator_mismatch")
             return reasons
 
-    # 4) origin ATCO/time checks
-    origin_ok = False
-    for j_id, jm in line_candidates:
-        try:
-            jt = merged.journey_times[j_id]
-            start_dep = jt[0][2]
-            first_stop_int = jt[0][0]
-            journey_first_atco = merged.get_atco_code(first_stop_int)
-        except Exception:
-            continue
-        if feed_origin_atco:
-            if journey_first_atco and str(journey_first_atco).strip() == str(feed_origin_atco).strip():
-                origin_ok = True
-                break
-        else:
-            try:
-                nearby = walking.reachable_stops((lat_v, lon_v))
-                if not nearby:
-                    continue
-                nearest_stop_int, walk_secs = nearby[0]
-                nearest_atco = merged.get_atco_code(nearest_stop_int)
-                if nearest_atco and journey_first_atco and nearest_atco == journey_first_atco:
-                    origin_ok = True
-                    break
-            except Exception:
-                continue
-    if not origin_ok:
-        reasons.append("origin_atco_mismatch_or_unreachable")
-        return reasons
-
     # 5) origin_dep_secs (fatal)
     if origin_dep_secs is None:
         # Treat missing OriginAimedDepartureTime as a fatal rejection: the
@@ -3551,6 +3547,23 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
         try:
             jt = merged.journey_times[j_id]
             start_dep = jt[0][2]
+            
+            origin_match = False
+            if feed_origin_atco:
+                first_stop_int = jt[0][0]
+                journey_first_atco = merged.get_atco_code(first_stop_int)
+                if journey_first_atco and str(journey_first_atco).strip() == str(feed_origin_atco).strip():
+                    origin_match = True
+            
+            if not origin_match and feed_origin_atco:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == str(feed_origin_atco).strip():
+                        if dep_t is not None:
+                            start_dep = dep_t
+                        elif arr_t is not None:
+                            start_dep = arr_t
+                        break
         except Exception:
             continue
         try:
@@ -4688,6 +4701,27 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     from time_utils import seconds_to_time
     import math
 
+    # Try to augment stop_coords with ATCO metadata for nodes missing from the walking graph
+    atco_coords_dict = {}
+    try:
+        if globals().get('_base_cache') and _base_cache.get("atco_loader"):
+            atco_coords_dict = _base_cache["atco_loader"].get_all_stop_coords()
+    except Exception:
+        pass
+
+    def _get_stop_coord(s_idx):
+        # 1. Direct from passed stop_coords (typically the walking graph)
+        if isinstance(stop_coords, dict) and s_idx in stop_coords:
+            return stop_coords[s_idx]
+        # 2. Fall back to canonical ATCO coordinates
+        try:
+            a_code = merged.get_atco_code(s_idx)
+            if a_code in atco_coords_dict:
+                return atco_coords_dict[a_code]
+        except Exception:
+            pass
+        return None
+
     if not route_result:
         return {
             "success": True,
@@ -4825,8 +4859,9 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             atco = None
         lat = lon = None
         try:
-            if isinstance(stop_coords, dict) and idx in stop_coords:
-                lat, lon = stop_coords.get(idx)
+            coord = _get_stop_coord(idx)
+            if coord:
+                lat, lon = coord
         except Exception:
             lat = lon = None
         out = {
@@ -4910,7 +4945,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     # -- Start walking leg --
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
         first_int = ordered[0][0]
-        first_coord = stop_coords.get(first_int)
+        first_coord = _get_stop_coord(first_int)
         first_name = _display_name(first_int)
         to_loc = {"name": first_name}
         if first_coord:
@@ -4979,8 +5014,8 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
         transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
-        prev_coord = stop_coords.get(prev_int)
-        curr_coord = stop_coords.get(curr_int)
+        prev_coord = _get_stop_coord(prev_int)
+        curr_coord = _get_stop_coord(curr_int)
 
         # Include a stable stop id (ATCO code) so the frontend can request
         # bus route_tracks subsegments.
@@ -5084,10 +5119,44 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         else:
             geo_name = transport.title() if transport else "Unknown"
         coords = []
-        if prev_coord:
-            coords.append([prev_coord[0], prev_coord[1]])
-        if curr_coord:
-            coords.append([curr_coord[0], curr_coord[1]])
+
+        track_coords = None
+        if transport != "walking":
+            try:
+                j_info = curr_info.get("journey_info") or {}
+                if isinstance(j_info, dict) and j_info.get("route_id"):
+                    route_id = j_info.get("route_id")
+                    
+                    try:
+                        prev_atco = merged.get_atco_code(prev_int)
+                    except Exception:
+                        prev_atco = None
+                        
+                    try:
+                        curr_atco = merged.get_atco_code(curr_int)
+                    except Exception:
+                        curr_atco = None
+                        
+                    if prev_atco and curr_atco:
+                        local_coords = {}
+                        if prev_coord:
+                            local_coords[prev_atco] = prev_coord
+                        if curr_coord:
+                            local_coords[curr_atco] = curr_coord
+                            
+                        seg = _subsegment_from_tracks(route_id, [prev_atco, curr_atco], local_coords)
+                        if seg and len(seg) >= 2:
+                            track_coords = seg
+            except Exception as exc:
+                pass
+
+        if track_coords:
+            coords = track_coords
+        else:
+            if prev_coord:
+                coords.append([prev_coord[0], prev_coord[1]])
+            if curr_coord:
+                coords.append([curr_coord[0], curr_coord[1]])
 
         geometries.append({
             "id": f"{transport}-{geo_idx}",
@@ -5101,7 +5170,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     if (destination_point and len(destination_point) >= 2
             and end_walk > 0 and ordered):
         last_int = ordered[-1][0]
-        last_coord = stop_coords.get(last_int)
+        last_coord = _get_stop_coord(last_int)
         last_name = _display_name(last_int)
         from_loc = {"name": last_name}
         if last_coord:

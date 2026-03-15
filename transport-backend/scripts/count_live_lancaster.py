@@ -9,7 +9,7 @@ import urllib.request
 import sys
 from collections import Counter
 
-URL = "http://localhost:5050/bus/live/all?lat=54.05&lon=-2.8&latTol=2.0&lonTol=2.0"
+URL = "http://localhost:5050/bus/live/all?lat=54.05&lon=-2.8&latTol=0.15&lonTol=0.15"
 
 try:
     with urllib.request.urlopen(URL, timeout=60) as resp:

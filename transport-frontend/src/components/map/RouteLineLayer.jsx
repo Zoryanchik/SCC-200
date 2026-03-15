@@ -129,11 +129,6 @@ function SingleRouteLine({ routeData, onRouteClick }) {
             <Polyline
               positions={positions}
               eventHandlers={{
-                add: (e) => {
-                  try {
-                    e.target.bindTooltip(`<strong style="font-size: 1.2em;">Line ${routeData.line}</strong>`, { sticky: true });
-                  } catch (err) {}
-                },
                 click: (e) => {
                   try {
                     if (e && e.originalEvent) {
@@ -163,11 +158,6 @@ function SingleRouteLine({ routeData, onRouteClick }) {
             <Polyline
               positions={positions}
               eventHandlers={{
-                add: (e) => {
-                  try {
-                    e.target.bindTooltip(`<strong style="font-size: 1.2em;">Line ${routeData.line}</strong>`, { sticky: true });
-                  } catch (err) {}
-                },
                 click: (e) => {
                   try {
                     if (e && e.originalEvent) {
