@@ -143,7 +143,8 @@ const { data: busLocations, loading: busLoading, refreshing: busRefreshing, coun
   lat: mapCenter.lat,
   lon: mapCenter.lon,
   refreshInterval: 20000,
-  debounceMs: typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 0 : 3000,
+  // Don't auto-refresh during zoom/pan; only refresh when the timer is up.
+  debounceOnMove: false,
 });
 const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
 // STOMP/websocket is used only for train movements in this deployment.

@@ -165,7 +165,19 @@ export async function fetchRouteLabel(line, opts = {}) {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/routes/label/${encodeURIComponent(line)}`, { signal });
+    let url = `${API_BASE}/routes/label/${encodeURIComponent(line)}`;
+    try {
+      const lat = opts && opts.lat != null ? Number(opts.lat) : null;
+      const lon = opts && opts.lon != null ? Number(opts.lon) : null;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        const qs = new URLSearchParams({ lat: String(lat), lon: String(lon), strict_geo: '1' });
+        url += `?${qs.toString()}`;
+      }
+    } catch (e) {
+      // ignore query param construction errors
+    }
+
+    const res = await fetch(url, { signal });
     if (timeout) clearTimeout(timeout);
     // Treat 404 as "no label available" (not a fatal error) so callers
     // that only need geometry can proceed. Other HTTP errors remain fatal.

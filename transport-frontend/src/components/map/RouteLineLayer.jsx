@@ -1,6 +1,23 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Polyline, CircleMarker, Tooltip } from 'react-leaflet';
 import { stopsToLatLngs } from '../../services/routeLineApi';
+
+/**
+ * Leaflet tooltips open immediately on hover by default; this wrapper delays
+ * mounting the Tooltip so users must dwell on the feature for a short time
+ * before it appears.
+ */
+function HoverTooltip({ delayMs = 500, children, ...tooltipProps }) {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    const id = setTimeout(() => setEnabled(true), delayMs);
+    return () => clearTimeout(id);
+  }, [delayMs]);
+
+  if (!enabled) return null;
+  return <Tooltip {...tooltipProps}>{children}</Tooltip>;
+}
 
 /**
  * A vibrant palette that cycles for different route variants so
@@ -149,9 +166,9 @@ function SingleRouteLine({ routeData, onRouteClick }) {
                 dashArray: idx > 0 ? '8 6' : undefined,
               }}
             >
-              <Tooltip sticky>
+              <HoverTooltip sticky delayMs={500}>
                 <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
-              </Tooltip>
+              </HoverTooltip>
             </Polyline>
 
             {/* The route polyline (on top) */}
@@ -178,9 +195,9 @@ function SingleRouteLine({ routeData, onRouteClick }) {
                 dashArray: idx > 0 ? '8 6' : undefined, // dash secondary variants
               }}
             >
-              <Tooltip sticky>
+              <HoverTooltip sticky delayMs={500}>
                 <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
-              </Tooltip>
+              </HoverTooltip>
             </Polyline>
             {/* Small circles at each stop along the route */}
             {variant.stops
@@ -197,9 +214,9 @@ function SingleRouteLine({ routeData, onRouteClick }) {
                     fillOpacity: 1,
                   }}
                 >
-                  <Tooltip direction="top" offset={[0, -6]}>
+                  <HoverTooltip direction="top" offset={[0, -6]} delayMs={500}>
                     <span style={{ fontWeight: 600 }}>{stop.name}</span>
-                  </Tooltip>
+                  </HoverTooltip>
                 </CircleMarker>
               ))}
           </React.Fragment>

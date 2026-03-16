@@ -1094,6 +1094,9 @@ const makeMarkerSignature = (m) => {
 	const [vehicleTrackRenderKey, setVehicleTrackRenderKey] = React.useState(0);
 	// Used to avoid stale async responses overwriting newer selections.
 	const selectedVehicleReqTokenRef = React.useRef(0);
+	// Cooldown to avoid rapid repeated clicks triggering overlapping async selection flows.
+	// Stores a timestamp (ms) until which bus clicks are ignored.
+	const busClickCooldownUntilRef = React.useRef(0);
 
 	// Debugging: log when showRouteLines changes and when we clear routes
 	React.useEffect(() => {
@@ -1115,7 +1118,8 @@ const makeMarkerSignature = (m) => {
 		try { setSelectedVehicleTrack(null); } catch (e) { /* ignore */ }
 		try { setLoadingPopupId(null); } catch (e) { /* ignore */ }
 		try { setLoadingError(null); } catch (e) { /* ignore */ }
-		try { onClosePopup(); } catch (e) { /* ignore */ }
+		// We no longer use the click popup UI for vehicles; hover tooltips are sufficient.
+		// Keep this as a no-op to avoid relying on parent popup state.
 	}, [onClosePopup]);
 
 	// Note: selectedVehicleTrack is independent of route overlays.
@@ -1499,6 +1503,23 @@ const makeMarkerSignature = (m) => {
 									} catch (e) { /* ignore */ }
 
 									if (marker.type === 'bus') {
+										// Throttle bus clicks for 1 second after a handled click.
+										// This prevents overlapping async selection flows from rapid double-clicks.
+										try {
+											const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+											if (now < (busClickCooldownUntilRef.current || 0)) return;
+											busClickCooldownUntilRef.current = now + 1000;
+										} catch (e) {
+											// If anything goes wrong with timing APIs, don't block clicks.
+										}
+											// If the bus is unmatched (grey), do nothing on click.
+											// This avoids falling back to route tracks/mock geometry for
+											// vehicles that aren't mapped to a timetable journey.
+											try {
+												if (!isBusMappedLocal(marker)) return;
+											} catch (e) {
+												return;
+											}
 										const line = marker.routeNumber || marker.route || null;
 									
 										if (!line) return;
@@ -1525,9 +1546,15 @@ const makeMarkerSignature = (m) => {
 													// Fetch label/geometry asynchronously (do not block display of route).
 													(async (tokenAtStart) => {
 													try {
+														const pos = marker && Array.isArray(marker.position) ? marker.position : null;
 														const controllerLabel = new AbortController();
 														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
-														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
+														const labelData = await fetchRouteLabel(String(line), {
+															signal: controllerLabel.signal,
+															timeoutMs: 5000,
+															lat: pos && pos.length === 2 ? pos[0] : undefined,
+															lon: pos && pos.length === 2 ? pos[1] : undefined,
+														});
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 																	// Best-effort: if backend provides canonical route_ids for this line,
@@ -1548,10 +1575,11 @@ const makeMarkerSignature = (m) => {
 																				url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
 																				url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
 																				try { console.debug('[map] leg-geometry request (cached)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
-																				const controllerGeom = new AbortController();
-																				const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
-																				const resp = await fetch(url, { signal: controllerGeom.signal });
-																				clearTimeout(tgeom);
+																				// IMPORTANT: Don't use a short AbortController timeout here.
+																				// In practice, other selection interactions can abort pending
+																				// requests, and the extra controller/timeout increases the chance
+																				// we self-abort before the backend responds.
+																				const resp = await fetch(url);
 																				if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
 																					try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
 																					break;
@@ -1582,11 +1610,20 @@ const makeMarkerSignature = (m) => {
 																						}
 																						return out;
 																					};
-																					norm = safeNormalizeCoords(data && data.coords);
-																					try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																					const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																					break;
+																						norm = safeNormalizeCoords(data && data.coords);
+																						if (!norm || norm.length < 2) {
+																							try { console.debug('[map] leg-geometry returned empty coords (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																							// No track returned: DO NOT fall back to stops/linear geometry.
+																							continue;
+																						}
+																						if (data && data.source === 'linear') {
+																								try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																								continue;
+																						}
+																						try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																						const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																						break;
 																				} catch (je) {
 																					let txt = null;
 																					try { txt = await resp.text(); } catch (te) { /* ignore */ }
@@ -1628,7 +1665,7 @@ const makeMarkerSignature = (m) => {
 												setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
 												try {
 													try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
-													onOpenPopup(marker.id);
+																																																												// Intentionally not opening click popup (hover tooltips only).
 												} catch (e) { /* ignore */ }
 												return;
 											} else {
@@ -1647,10 +1684,15 @@ const makeMarkerSignature = (m) => {
 													// Fetch label/geometry asynchronously (non-fatal)
 													(async (tokenAtStart) => {
 													try {
-														const controllerLabel = new AbortController();
-														const tlabel = setTimeout(() => controllerLabel.abort(), 5000);
-														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
-														clearTimeout(tlabel);
+														// IMPORTANT: Don't pass an AbortSignal for cached label fetch.
+														// We've seen these get aborted in practice ("Fetch is aborted"),
+														// which prevents us from ever discovering route_ids => route_tracks.
+														const pos = marker && Array.isArray(marker.position) ? marker.position : null;
+														const labelData = await fetchRouteLabel(String(line), {
+															timeoutMs: 8000,
+															lat: pos && pos.length === 2 ? pos[0] : undefined,
+															lon: pos && pos.length === 2 ? pos[1] : undefined,
+														});
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 														// Best-effort: if backend provides canonical route_ids for this line,
 														// try to fetch the in-memory route_tracks geometry and render it.
@@ -1699,11 +1741,20 @@ const makeMarkerSignature = (m) => {
 																			}
 																			return out;
 																		};
-																		norm = safeNormalizeCoords(data && data.coords);
-																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
-																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																		break;
+																				norm = safeNormalizeCoords(data && data.coords);
+																				if (!norm || norm.length < 2) {
+																					try { console.debug('[map] leg-geometry returned empty coords (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					// No track returned: do NOT fall back to stops/linear geometry.
+																					continue;
+																				}
+																				if (data && data.source === 'linear') {
+																						try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																						continue;
+																				}
+																				try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																				break;
 																	} catch (je) {
 																		let txt = null;
 																		try { txt = await resp.text(); } catch (te) { /* ignore */ }
@@ -1722,12 +1773,12 @@ const makeMarkerSignature = (m) => {
 																		try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
 																		continue;
 																	}
-																	if (norm && norm.length >= 2 && data && data.source === 'route_tracks') {
-																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																		break;
-																	}
+																			if (data && data.source === 'route_tracks' && norm && norm.length >= 2) {
+																				try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																				break;
+																			}
 																}
 															}
 														} catch (ee) {
@@ -1742,6 +1793,20 @@ const makeMarkerSignature = (m) => {
 													}
 													})(selectionToken);
 											}
+
+											// IMPORTANT: From here on, do not run any synchronous
+											// variant-selection / stop-based geometry logic. Those
+											// paths can overwrite a valid route_tracks polyline once
+											// it arrives, or cause us to accept fallback geometry.
+											// We only want the /route/leg-geometry route_id flow to
+											// populate coords.
+											const _vehicleTrackColor = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+											setSelectedVehicleTrack({ id: marker.id, coords: null, color: _vehicleTrackColor, stops: [], label: null });
+											try {
+												try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+																																																								// Intentionally not opening click popup (hover tooltips only).
+											} catch (e) { /* ignore */ }
+											return;
 								
 											// After either path above, selection logic will run using __routeData_local
 
@@ -1784,7 +1849,7 @@ const makeMarkerSignature = (m) => {
 														try { 
 															// Notify parent of the popup open and its signature (optional)
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
-															onOpenPopup(marker.id);
+																																																																																																						// Intentionally not opening click popup (hover tooltips only).
 														} catch (e) { /* ignore */ }
 														return;
 													}
@@ -1794,7 +1859,7 @@ const makeMarkerSignature = (m) => {
 														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
 														try { 
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
-															onOpenPopup(marker.id);
+																																																																																																						// Intentionally not opening click popup (hover tooltips only).
 														} catch (e) { /* ignore */ }
 														return;
 													}
@@ -1833,7 +1898,7 @@ const makeMarkerSignature = (m) => {
 											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
 											try { 
 												try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
-												onOpenPopup(marker.id);
+																																																																																																						// Intentionally not opening click popup (hover tooltips only).
 											} catch (e) { /* ignore */ }
 										} catch (e) {
 											// If either request failed or timed out, ensure no partial UI is shown.

@@ -44,7 +44,7 @@ const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
  */
 export const useLiveBusLocations = (
   operatorCode,
-  { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
+  { lat, lon, refreshInterval = 30000, debounceMs = 800, debounceOnMove = true } = {}
 ) => {
   // Enforce a minimum refresh interval of 5 seconds to avoid overly
   // aggressive polling from callers that pass very small values.
@@ -62,6 +62,14 @@ export const useLiveBusLocations = (
   const debounceRef = useRef(null);
   const intervalRef = useRef(null);
   const countdownRef = useRef(null);
+  const latestLatRef = useRef(lat);
+  const latestLonRef = useRef(lon);
+
+  // Always keep the latest coords available without forcing timers to reset.
+  useEffect(() => {
+    latestLatRef.current = lat;
+    latestLonRef.current = lon;
+  }, [lat, lon]);
 
   // Start a 1 s tick countdown that resets after each fetch.
   const startCountdown = useCallback((seconds) => {
@@ -110,8 +118,14 @@ export const useLiveBusLocations = (
     }
   }, [operatorCode, refreshInterval, startCountdown]);
 
-  // Debounce lat/lon changes, then set up auto-refresh interval
+  // Timer-only polling uses a stable interval that reads latest lat/lon from refs.
+  const fetchLatestData = useCallback(() => {
+    fetchData(latestLatRef.current, latestLonRef.current);
+  }, [fetchData]);
+
+  // Debounced mode: lat/lon changes schedule an immediate fetch and reset the polling interval.
   useEffect(() => {
+    if (!debounceOnMove) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (intervalRef.current) clearInterval(intervalRef.current);
 
@@ -125,9 +139,31 @@ export const useLiveBusLocations = (
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [fetchData, lat, lon, effectiveRefreshInterval, debounceMs, debounceOnMove]);
+
+  // Timer-only mode: interval is independent from lat/lon changes; it always uses latest refs.
+  useEffect(() => {
+    if (debounceOnMove) return;
+    if (intervalRef.current) clearInterval(intervalRef.current);
+
+    // Immediate fetch on enable/first mount.
+    fetchLatestData();
+    intervalRef.current = setInterval(() => {
+      fetchLatestData();
+    }, effectiveRefreshInterval);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [fetchLatestData, effectiveRefreshInterval, debounceOnMove]);
+
+  // Shared cleanup for the countdown timer.
+  useEffect(() => {
+    return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [fetchData, lat, lon, effectiveRefreshInterval, debounceMs]);
+  }, []);
 
   const refetch = useCallback(() => fetchData(lat, lon), [fetchData, lat, lon]);
 
@@ -260,10 +296,8 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
           filteredResult = normalized;
         }
 
-        // If a map centre is provided, keep stop-type results first
-        // (they come from the backend) and sort location-type results
-        // by proximity to the map centre so autocomplete prompts favour
-        // nearby POIs.
+        // If a map centre is provided, prioritise suggestions by proximity
+        // to the current map centre so the prompt favors what's nearby.
         if (mapCenter && Array.isArray(filteredResult) && filteredResult.length > 0) {
           try {
             const { lat: cLat, lon: cLon } = mapCenter;
@@ -277,12 +311,18 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
               const d = 2 * R * Math.asin(Math.sqrt(a));
               return d;
             };
-            let stops = filteredResult.filter((r) => r && r.type === 'stop');
-            const locs = filteredResult.filter((r) => r && r.type === 'location');
-            // Sort both stops and locations by proximity to map center
-            stops.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
-            locs.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
-            setResults([...stops, ...locs]);
+            const sorted = [...filteredResult].sort((a, b) => {
+              // Distance first.
+              const da = haversine(a?.lat, a?.lon);
+              const db = haversine(b?.lat, b?.lon);
+              if (da !== db) return da - db;
+              // Tie-breaker: prefer stop over location.
+              const ta = a?.type === 'stop' ? 0 : 1;
+              const tb = b?.type === 'stop' ? 0 : 1;
+              if (ta !== tb) return ta - tb;
+              return 0;
+            });
+            setResults(sorted);
           } catch (e) {
             setResults(filteredResult);
           }
@@ -299,7 +339,7 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
     }, debounceDelay);
 
     return () => clearTimeout(timeoutId);
-  }, [query, debounceDelay]);
+  }, [query, debounceDelay, mapCenter]);
 
   return { results, loading, error };
 };

@@ -684,7 +684,8 @@ export default function HomePage() {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
     refreshInterval: 20000,
-    debounceMs: typeof process !== 'undefined' && process.env.NODE_ENV === 'test' ? 0 : 3000,
+    // Don't auto-refresh during zoom/pan; only refresh when the timer is up.
+    debounceOnMove: false,
   });
   const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures("LAN", 180000);
 
@@ -733,14 +734,27 @@ export default function HomePage() {
 
           const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 
+          // Derive a human-friendly status when the backend doesn't provide one.
+          // Rules:
+          // - delay >= 2 mins => "Delayed N min(s)"
+          // - delay <= -2 mins => "Early N min(s)"
+          // - otherwise => "On time"
+          const derivedStatus = (() => {
+            if (delayMinutes == null || !Number.isFinite(Number(delayMinutes))) return "On time";
+            const dm = Number(delayMinutes);
+            if (dm >= 2) return `Delayed ${Math.round(dm)} min`;
+            if (dm <= -2) return `Early ${Math.round(Math.abs(dm))} min`;
+            return "On time";
+          })();
+
           newMarkers.push({
             id: id++,
             position: [lat, lon],
             name: displayName,
             type: "bus",
-            status: bus.status || (delayMinutes != null && delayMinutes >= 2 ? `Delayed ${Math.round(delayMinutes)} min` : "On time"),
+            status: bus.status || derivedStatus,
             routeNumber: bus.routeNumber || bus.route || bus.line,
-            delayMinutes,
+            delayMinutes: delayMinutes == null ? null : Number(delayMinutes),
             operator: operatorName,
             bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? null,
             meta: meta,

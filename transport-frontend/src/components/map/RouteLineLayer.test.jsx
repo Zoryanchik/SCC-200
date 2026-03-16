@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 
 // Mock react-leaflet components
 vi.mock('react-leaflet', () => ({
@@ -81,8 +81,14 @@ describe('RouteLineLayer', () => {
   });
 
   it('renders tooltips with stop names', () => {
+    vi.useFakeTimers();
     const routes = new Map([['100', MOCK_ROUTE]]);
     const { getAllByTestId } = render(<RouteLineLayer activeRoutes={routes} />);
+
+    // Tooltips are delayed by 500ms to avoid instant hover popups.
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
     
     const tooltips = getAllByTestId('tooltip');
     expect(tooltips).toHaveLength(5); // 3 stops + 2 polyline labels (one for underlay, one for top line)
@@ -91,6 +97,7 @@ describe('RouteLineLayer', () => {
     expect(texts).toContain('Stop A');
     expect(texts).toContain('Stop B');
     expect(texts).toContain('Stop C');
+    vi.useRealTimers();
   });  it('renders multiple active routes', () => {
     const route2 = {
       line: '1',

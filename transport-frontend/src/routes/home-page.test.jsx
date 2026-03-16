@@ -78,7 +78,9 @@ vi.mock("../components/common/RouteCard", () => ({
 // ---- Helpers ----
 afterEach(() => {
   vi.clearAllMocks();
-  vi.useFakeTimers({ shouldAdvanceTime: true });
+  // Restore real timers so Testing Library's waitFor works reliably.
+  // Individual tests can opt into fake timers as needed.
+  vi.useRealTimers();
   delete window.__testOnMoveEnd;
 });
 
@@ -447,7 +449,7 @@ describe("Bus route number display on markers", () => {
 
 describe("Bus delay handling on markers", () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useRealTimers();
   });
 
   test("bus with no delay shows 'On time' status", async () => {

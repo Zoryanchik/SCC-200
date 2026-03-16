@@ -293,12 +293,97 @@ def debug_route_tracks(route_id: str, sample: int = 5, suggest: int = 10):
     except Exception:
         coords_sample = []
 
+    # Optional: when a VJ-style route_id is provided, show candidate family keys
+    # (RS*/JPS*) that share the same base and whether they actually have tracks.
+    candidates = []
+    try:
+        if isinstance(route_id, str) and ':VJ' in route_id:
+            vj_base = route_id.split(':VJ', 1)[0]
+            # 1) Candidates from in-memory metadata (best-effort)
+            from_meta = []
+            try:
+                cand_ids = _suggest_similar_route_ids(route_id, limit=80)
+                for rid2 in cand_ids:
+                    if isinstance(rid2, str) and (
+                        rid2.startswith(vj_base + ':RS') or rid2.startswith(vj_base + ':JPS')
+                    ):
+                        from_meta.append(rid2)
+            except Exception:
+                from_meta = []
+
+            # 2) Candidates from DB (authoritative for what keys exist)
+            from_db = []
+            try:
+                like_rs = vj_base + ':RS%'
+                like_jps = vj_base + ':JPS%'
+                conn = _get_db_connection()
+                cur = conn.cursor()
+                # Prefer section tracks for RS discovery.
+                try:
+                    cur.execute(
+                        "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT 60",
+                        (like_rs,),
+                    )
+                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 60",
+                        (like_rs,),
+                    )
+                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 60",
+                        (like_jps,),
+                    )
+                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            except Exception:
+                from_db = []
+
+            # De-dup (DB first because it's the source of truth)
+            family = []
+            seen = set()
+            for rid2 in (from_db + from_meta):
+                if not isinstance(rid2, str) or rid2 in seen:
+                    continue
+                if not (rid2.startswith(vj_base + ':RS') or rid2.startswith(vj_base + ':JPS')):
+                    continue
+                seen.add(rid2)
+                family.append(rid2)
+                if len(family) >= 20:
+                    break
+
+            for rid2 in family:
+                t2 = []
+                try:
+                    t2 = _fetch_route_tracks(rid2) or []
+                except Exception:
+                    t2 = []
+                candidates.append({
+                    'route_id': rid2,
+                    'found': bool(isinstance(t2, list) and len(t2) >= 2),
+                    'coords_len': (len(t2) if isinstance(t2, list) else 0),
+                })
+    except Exception:
+        candidates = []
+
     resp = {
         'route_id': route_id,
         'found': bool(isinstance(tracks, list) and len(tracks) >= 2),
         'coords_len': coords_len,
         'coords_sample': coords_sample,
         'suggestions': [],
+        'vj_candidates': candidates,
     }
 
     if not resp['found'] and int(suggest or 0) > 0:
@@ -610,6 +695,357 @@ def _fetch_journey_times_external(journey_id: str):
         return []
 
 
+@app.get("/debug/match_explain")
+async def debug_match_explain(
+    line: str,
+    dest: str,
+    lat: float,
+    lon: float,
+    operator_ref: str = None,
+    origin_dep_secs: int = None,
+    origin_tz_offset_secs: int = 0,
+    origin_atco: str = None,
+    destination_atco: str = None,
+    strict_tol: int = 600,
+    max_candidates: int = 15,
+):
+    """Explain why strict live matching did (or didn't) match.
+
+    This is a *debug/provenance* endpoint intended for local diagnosis.
+    It mirrors the strict matcher's candidate filtering and then exposes
+    the numeric checks used by the final spatial/temporal gate.
+
+    Enable with BUS_LIVE_PROVENANCE=1.
+    """
+    from fastapi import HTTPException
+    import math
+    from datetime import datetime
+
+    bus_provenance = str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes')
+    if not bus_provenance:
+        raise HTTPException(status_code=404, detail='Not Found')
+
+    try:
+        today = datetime.now().date().isoformat()
+        now = datetime.now()
+        now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        merged, router, walking = get_router_for_date(today, start_time=now_seconds, apply_delay=False)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f'no_merged_data: {exc}')
+
+    line_q = (line or '').strip()
+    simple_line = line_q.split(':')[-1].strip()
+    dest_q = (dest or '').strip().lower()
+
+    feed_origin_atco_n = str(origin_atco).strip() if origin_atco else None
+    feed_destination_atco_n = str(destination_atco).strip() if destination_atco else None
+
+    # Helper: get journey stop atcos (first/last few)
+    def _journey_origin_atcos(jt):
+        out = []
+        try:
+            for i in range(min(3, len(jt))):
+                atco = merged.get_atco_code(jt[i][0])
+                if atco:
+                    out.append(str(atco).strip())
+        except Exception:
+            return []
+        return out
+
+    def _journey_dest_atcos(jt):
+        out = []
+        try:
+            for i in range(1, min(4, len(jt) + 1)):
+                atco = merged.get_atco_code(jt[-i][0])
+                if atco:
+                    out.append(str(atco).strip())
+        except Exception:
+            return []
+        return out
+
+    # Stage A: line candidates
+    line_candidates = []
+    for j_id, jm in enumerate(merged.journey_metadata):
+        if not jm:
+            continue
+        ln = (jm.get('line_name') or '')
+        if ln.split(':')[-1].strip() == simple_line:
+            line_candidates.append(j_id)
+    if not line_candidates:
+        return {
+            'input': {'line': line, 'dest': dest, 'lat': lat, 'lon': lon, 'operator_ref': operator_ref},
+            'reasons': ['no_line_match'],
+            'candidates': [],
+        }
+
+    # Stage B: operator filter (match strict matcher behaviour)
+    if operator_ref:
+        opn = str(operator_ref).strip()
+        filtered = []
+        for j_id in line_candidates:
+            jm = merged.journey_metadata[j_id] or {}
+            op_noc = (jm.get('operator_national_code') or '').strip()
+            svc = (jm.get('service_code') or '').strip()
+            if not svc:
+                ln = (jm.get('line_name') or '')
+                if ':' in ln:
+                    svc = ln.split(':')[0].strip()
+            if op_noc == opn or (svc and svc == opn):
+                filtered.append(j_id)
+        line_candidates = filtered
+        if not line_candidates:
+            return {
+                'input': {'line': line, 'dest': dest, 'lat': lat, 'lon': lon, 'operator_ref': operator_ref},
+                'reasons': ['operator_mismatch'],
+                'candidates': [],
+            }
+
+    # Stage C: ATCO latch (similar to _stage_strict_match_candidates)
+    staged = []
+    for j_id in line_candidates:
+        jm = merged.journey_metadata[j_id] or {}
+        try:
+            jt = merged.journey_times[j_id]
+        except Exception:
+            continue
+        dest_atcos = _journey_dest_atcos(jt)
+        origin_atcos = _journey_origin_atcos(jt)
+        staged.append({
+            'j_id': j_id,
+            'journey_id': jm.get('journey_id'),
+            'line_name': jm.get('line_name'),
+            'service_code': jm.get('service_code'),
+            'operator_national_code': jm.get('operator_national_code'),
+            'origin_atcos': origin_atcos,
+            'dest_atcos': dest_atcos,
+        })
+
+    latched_ids = set([x['j_id'] for x in staged])
+    if feed_origin_atco_n:
+        origin_only = set([x['j_id'] for x in staged if feed_origin_atco_n in (x.get('origin_atcos') or [])])
+        if origin_only:
+            latched_ids = origin_only
+    if feed_destination_atco_n and (not feed_origin_atco_n or not latched_ids):
+        dest_only = set([x['j_id'] for x in staged if feed_destination_atco_n in (x.get('dest_atcos') or [])])
+        if dest_only:
+            latched_ids = dest_only
+
+    staged = [x for x in staged if x['j_id'] in latched_ids]
+    if not staged:
+        return {
+            'input': {
+                'line': line,
+                'dest': dest,
+                'lat': lat,
+                'lon': lon,
+                'operator_ref': operator_ref,
+                'origin_atco': origin_atco,
+                'destination_atco': destination_atco,
+            },
+            'reasons': ['destination_and_origin_atco_mismatch'],
+            'candidates': [],
+        }
+
+    # Compute an adjusted origin_dep based on feed tz offset.
+    od_adj = None
+    if origin_dep_secs is not None:
+        try:
+            od_adj = int(origin_dep_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                od_adj = int(origin_dep_secs)
+            except Exception:
+                od_adj = None
+
+    # Rank candidates by a fast proxy: distance from current point to any stop coords (min haversine).
+    def _min_stop_dist_m(j_id: int) -> float:
+        try:
+            jt = merged.journey_times[j_id]
+        except Exception:
+            return float('inf')
+        best = float('inf')
+        for stop_int, _arr_t, _dep_t in jt:
+            try:
+                coords = walking.get_loc_coords(stop_int)
+            except Exception:
+                coords = None
+            if not coords or len(coords) != 2:
+                continue
+            try:
+                d = _haversine_m(lat, lon, coords[0], coords[1])
+            except Exception:
+                continue
+            if d < best:
+                best = d
+        return best
+
+    staged_scored = []
+    for x in staged:
+        j_id = x['j_id']
+        dmin = _min_stop_dist_m(j_id)
+        x2 = dict(x)
+        x2['min_stop_dist_m'] = None if (not math.isfinite(dmin)) else float(dmin)
+        staged_scored.append(x2)
+    staged_scored.sort(key=lambda r: (r.get('min_stop_dist_m') if r.get('min_stop_dist_m') is not None else 1e18))
+    staged_scored = staged_scored[:max(1, int(max_candidates or 15))]
+
+    # For each candidate, compute the same key numbers used by the strict matcher gating:
+    # - whether origin_dep aligns with candidate start dep
+    # - a crude inferred progress using nearest stop index
+    # - expected time at that progress (linear interp by stop times)
+    # NOTE: This is intentionally an explanation tool; it doesn't need to reimplement
+    # the full matcher exactly, but should highlight which numeric checks are violated.
+    explained = []
+    for x in staged_scored:
+        j_id = x['j_id']
+        jm = merged.journey_metadata[j_id] or {}
+        try:
+            jt = merged.journey_times[j_id]
+        except Exception:
+            continue
+
+        # Determine candidate start_dep at the origin ATCO if provided.
+        start_dep = None
+        try:
+            start_dep = jt[0][2]
+        except Exception:
+            start_dep = None
+        origin_stop_time = None
+        if feed_origin_atco_n:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        origin_stop_time = dep_t if dep_t is not None else arr_t
+                        break
+            except Exception:
+                origin_stop_time = None
+            if origin_stop_time is not None:
+                start_dep = origin_stop_time
+
+        origin_dep_aligned = None
+        if od_adj is not None and start_dep is not None:
+            try:
+                origin_dep_aligned = abs(int(start_dep) - int(od_adj)) <= int(strict_tol)
+            except Exception:
+                origin_dep_aligned = None
+
+        # Find nearest stop index and use it as a crude progress proxy.
+        nearest = None
+        nearest_i = None
+        nearest_stop = None
+        for i, (stop_int, arr_t, dep_t) in enumerate(jt):
+            try:
+                coords = walking.get_loc_coords(stop_int)
+            except Exception:
+                coords = None
+            if not coords or len(coords) != 2:
+                continue
+            try:
+                d = _haversine_m(lat, lon, coords[0], coords[1])
+            except Exception:
+                continue
+            if nearest is None or d < nearest:
+                nearest = d
+                nearest_i = i
+                nearest_stop = stop_int
+
+        progress = None
+        if nearest_i is not None and len(jt) > 1:
+            try:
+                progress = float(nearest_i) / float(max(1, (len(jt) - 1)))
+            except Exception:
+                progress = None
+
+        # Expected time at this progress (simple stop-time interpolation).
+        expected_time = None
+        if nearest_i is not None:
+            try:
+                # pick dep if available else arr
+                t_here = jt[nearest_i][2] if jt[nearest_i][2] is not None else jt[nearest_i][1]
+                expected_time = t_here
+            except Exception:
+                expected_time = None
+
+        temporal_delta_s = None
+        if expected_time is not None:
+            try:
+                temporal_delta_s = int(now_seconds) - int(expected_time)
+            except Exception:
+                temporal_delta_s = None
+
+        explained.append({
+            'j_id': j_id,
+            'journey_id': jm.get('journey_id'),
+            'line_name': jm.get('line_name'),
+            'service_code': jm.get('service_code'),
+            'operator_national_code': jm.get('operator_national_code'),
+            'min_stop_dist_m': x.get('min_stop_dist_m'),
+            'nearest_stop_dist_m': None if nearest is None else float(nearest),
+            'nearest_stop_index': nearest_i,
+            'nearest_stop_atco': (merged.get_atco_code(nearest_stop) if nearest_stop is not None else None),
+            'progress_proxy': progress,
+            'start_dep_candidate': start_dep,
+            'origin_dep_adj': od_adj,
+            'origin_dep_aligned': origin_dep_aligned,
+            'expected_time_at_nearest_stop': expected_time,
+            'now_seconds': now_seconds,
+            'temporal_delta_s_now_minus_expected': temporal_delta_s,
+            'origin_atco_in_first3': (feed_origin_atco_n in (x.get('origin_atcos') or []) if feed_origin_atco_n else None),
+            'dest_atco_in_last3': (feed_destination_atco_n in (x.get('dest_atcos') or []) if feed_destination_atco_n else None),
+        })
+
+    # Also call the existing coarse diagnosis and the actual matcher to show what it decided.
+    coarse = _diagnose_match_failure(
+        line,
+        dest,
+        lat,
+        lon,
+        origin_dep_secs=origin_dep_secs,
+        operator_ref=operator_ref,
+        strict_tol=strict_tol,
+        feed_origin_atco=origin_atco,
+        feed_destination_atco=destination_atco,
+        origin_tz_offset_secs=origin_tz_offset_secs,
+    )
+    matched = None
+    try:
+        matched = _compute_delay_from_timetable(
+            line,
+            dest,
+            lat,
+            lon,
+            return_jid=True,
+            origin_dep_secs=origin_dep_secs,
+            origin_tz_offset_secs=origin_tz_offset_secs,
+            operator_ref=operator_ref,
+            strict_tol=strict_tol,
+            feed_origin_atco=origin_atco,
+            feed_destination_atco=destination_atco,
+        )
+    except Exception as exc:
+        matched = {'error': str(exc)}
+
+    return {
+        'input': {
+            'line': line,
+            'dest': dest,
+            'lat': lat,
+            'lon': lon,
+            'operator_ref': operator_ref,
+            'origin_dep_secs': origin_dep_secs,
+            'origin_tz_offset_secs': origin_tz_offset_secs,
+            'origin_atco': origin_atco,
+            'destination_atco': destination_atco,
+            'strict_tol': strict_tol,
+            'max_candidates': max_candidates,
+        },
+        'coarse_reject_reasons': coarse,
+        'matcher_return': repr(matched),
+        'candidates': explained,
+    }
+
+
 def _query_osrm_for_coords(osrm_base: str, coords_lonlat: list):
     """Call OSRM route with a list of 'lon,lat' strings; return list of [lat,lon] or None on failure."""
     if not coords_lonlat:
@@ -802,6 +1238,97 @@ def _fetch_route_tracks(route_id: str):
     the loader populated. Fall back to DB lookups only if no in-memory
     candidate is found.
     """
+    # Some live/matching flows use a VJ-specific identifier (e.g. ...:VJ1234:45600)
+    # while timetable `route_metadata[*].route_id` keys route_tracks by RS variant
+    # (e.g. ...:RS5). When given a VJ id, we should fall back to the RS id
+    # sharing the same "base" prefix so we can still return the authoritative
+    # timetable track.
+    vj_base = None
+    try:
+        if isinstance(route_id, str) and ':VJ' in route_id:
+            vj_base = route_id.split(':VJ', 1)[0]
+    except Exception:
+        vj_base = None
+
+    def _db_candidate_route_ids_for_vj_base(vj_base: str, limit: int = 200):
+        """Return candidate route_ids (RS/JPS families) from DB for a VJ base prefix.
+
+        This is needed because many datasets store route_tracks keyed by RS ids
+        only (no VJ/JPS keys), so a pure in-memory scan that only considers
+        JPS keys can miss the actual RS key with geometry.
+        """
+        if not vj_base:
+            return []
+        # Limit for safety; we only need a handful to find a non-empty track.
+        lim = max(1, min(int(limit or 200), 1000))
+        rs_like = vj_base + ':RS%'
+        jps_like = vj_base + ':JPS%'
+        out = []
+        try:
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            # Prefer section tracks (more specific), but either table is fine.
+            try:
+                cur.execute(
+                    "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT %s",
+                    (rs_like, lim),
+                )
+                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT %s",
+                    (rs_like, lim),
+                )
+                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+            except Exception:
+                pass
+            # Also include JPS family if present in DB.
+            try:
+                cur.execute(
+                    "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT %s",
+                    (jps_like, lim),
+                )
+                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        except Exception:
+            return []
+
+        # De-dup while preserving order.
+        seen = set()
+        uniq = []
+        for rid in out:
+            if rid in seen:
+                continue
+            seen.add(rid)
+            uniq.append(rid)
+        return uniq
+
+    def _matches_vj_family(rid2: str) -> bool:
+        if not vj_base or not isinstance(rid2, str):
+            return False
+        # Known timetable families for route_tracks keys.
+        return (
+            rid2.startswith(vj_base + ':RS')
+            or rid2.startswith(vj_base + ':JPS')
+        )
+
+    db_vj_candidates = []
+    # Precompute DB-backed RS/JPS candidates for VJ ids. This helps when the
+    # in-memory MergedData doesn't contain a route_metadata entry for the
+    # route_id family we need (common with RS-only tracks).
+    try:
+        if vj_base:
+            db_vj_candidates = _db_candidate_route_ids_for_vj_base(vj_base)
+    except Exception:
+        db_vj_candidates = []
+
     # 1) Try in-memory caches (prebuilt_cache in _base_cache, then _router_cache)
     try:
         # Check prebuilt merged timetables (fast path)
@@ -820,17 +1347,48 @@ def _fetch_route_tracks(route_id: str):
                         # (map_routes/map_journeys) like the raw BusData.
                         # Resolve an int route index by scanning metadata.
                         r_int = None
+                        candidate_ints = []
                         try:
                             for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
                                 if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
                                     r_int = i
                                     break
+                                if meta and isinstance(meta, dict) and vj_base:
+                                    rid2 = meta.get('route_id')
+                                    if _matches_vj_family(rid2):
+                                        candidate_ints.append(i)
                         except Exception:
                             r_int = None
+
+                        # If not an exact hit, choose the first candidate that has non-empty tracks.
+                        if r_int is None and candidate_ints:
+                            try:
+                                for i in candidate_ints:
+                                    if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                        r_int = i
+                                        break
+                                if r_int is None:
+                                    r_int = candidate_ints[0]
+                            except Exception:
+                                r_int = candidate_ints[0]
                         if r_int is not None and r_int < len(merged.route_tracks):
                             tracks = merged.route_tracks[r_int]
                             if tracks:
                                 return [[t[0], t[1]] for t in tracks]
+
+                        # If we still didn't find anything, try resolving via DB-backed
+                        # candidate ids (usually RS keys) and look those up in this merged.
+                        if r_int is None and db_vj_candidates:
+                            try:
+                                meta_list = getattr(merged, 'route_metadata', []) or []
+                                for cand in db_vj_candidates:
+                                    for i, meta in enumerate(meta_list):
+                                        if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
+                                            if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                                return [[t[0], t[1]] for t in merged.route_tracks[i]]
+                                            break
+                            except Exception:
+                                pass
             except Exception:
                 # best-effort only
                 pass
@@ -856,17 +1414,45 @@ def _fetch_route_tracks(route_id: str):
                     if not merged:
                         continue
                     r_int = None
+                    candidate_ints = []
                     try:
                         for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
                             if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
                                 r_int = i
                                 break
+                            if meta and isinstance(meta, dict) and vj_base:
+                                rid2 = meta.get('route_id')
+                                if _matches_vj_family(rid2):
+                                    candidate_ints.append(i)
                     except Exception:
                         r_int = None
+
+                    if r_int is None and candidate_ints:
+                        try:
+                            for i in candidate_ints:
+                                if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                    r_int = i
+                                    break
+                            if r_int is None:
+                                r_int = candidate_ints[0]
+                        except Exception:
+                            r_int = candidate_ints[0]
                     if r_int is not None and r_int < len(merged.route_tracks):
                         tracks = merged.route_tracks[r_int]
                         if tracks:
                             return [[t[0], t[1]] for t in tracks]
+
+                    if r_int is None and db_vj_candidates:
+                        try:
+                            meta_list = getattr(merged, 'route_metadata', []) or []
+                            for cand in db_vj_candidates:
+                                for i, meta in enumerate(meta_list):
+                                    if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
+                                        if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                            return [[t[0], t[1]] for t in merged.route_tracks[i]]
+                                        break
+                        except Exception:
+                            pass
         except Exception:
             pass
     except Exception:
@@ -903,13 +1489,29 @@ def _fetch_route_tracks(route_id: str):
                     if not merged:
                         continue
                     r_int = None
+                    candidate_ints = []
                     try:
                         for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
                             if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
                                 r_int = i
                                 break
+                            if meta and isinstance(meta, dict) and vj_base:
+                                rid2 = meta.get('route_id')
+                                if _matches_vj_family(rid2):
+                                    candidate_ints.append(i)
                     except Exception:
                         r_int = None
+
+                    if r_int is None and candidate_ints:
+                        try:
+                            for i in candidate_ints:
+                                if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                    r_int = i
+                                    break
+                            if r_int is None:
+                                r_int = candidate_ints[0]
+                        except Exception:
+                            r_int = candidate_ints[0]
                     if r_int is not None and r_int < len(merged.route_tracks):
                         tracks = merged.route_tracks[r_int]
                         if tracks:
@@ -918,8 +1520,55 @@ def _fetch_route_tracks(route_id: str):
         pass
 
     # 2) In this deployment we only use in-memory route_tracks.
-    # If no in-memory candidate found above, return empty so callers
-    # fall back to OSRM or other strategies.
+    # If no in-memory candidate found above, fall back to DB so we can
+    # still serve geometry for historical dataset prefixes (common when
+    # load_busdata_for_date filters away those route_ids).
+    try:
+        # Helper: fetch polyline points for an exact route_id from DB.
+        def _db_fetch_tracks_exact(rid: str):
+            if not rid:
+                return []
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq",
+                (rid,),
+            )
+            rows = cur.fetchall() or []
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if not rows:
+                return []
+            return [[float(a), float(b)] for (a, b) in rows if a is not None and b is not None]
+
+        # 2a) Try exact route_id
+        direct = _db_fetch_tracks_exact(route_id)
+        if direct and len(direct) >= 2:
+            return direct
+
+        # 2b) If VJ id, try DB-discovered RS/JPS candidates first.
+        if db_vj_candidates:
+            for cand in db_vj_candidates:
+                t = _db_fetch_tracks_exact(cand)
+                if t and len(t) >= 2:
+                    return t
+
+        # 2c) As a final best-effort, try to resolve a prefixed candidate
+        # (handles callers that pass an un-prefixed route_id).
+        try:
+            pref = _find_prefixed_route_candidate(route_id)
+            if pref and pref != route_id:
+                t = _db_fetch_tracks_exact(pref)
+                if t and len(t) >= 2:
+                    return t
+        except Exception:
+            pass
+    except Exception:
+        # DB fallback is best-effort only.
+        pass
+
     return []
 
 
@@ -1896,8 +2545,88 @@ _route_line_cache: Dict[str, Any] = {}
 _route_label_cache: Dict[str, Any] = {}
 
 
+def _geo_cache_suffix(lat: Optional[float], lon: Optional[float], bucket_deg: float = 0.25) -> str:
+    """Stable cache suffix for optional geo point.
+
+    Bucketed to avoid unbounded cache growth while preventing global
+    collisions for short line names like "1".
+    """
+    try:
+        if lat is None or lon is None:
+            return ""
+        blat = int(float(lat) / bucket_deg)
+        blon = int(float(lon) / bucket_deg)
+        return f"@{bucket_deg}:{blat}:{blon}"
+    except Exception:
+        return ""
+
+
+def _filter_variants_near_point(
+    variants: List[Dict[str, Any]],
+    lat: Optional[float],
+    lon: Optional[float],
+    max_km: Optional[float] = None,
+) -> tuple[List[Dict[str, Any]], bool]:
+    """Filter route variants to those with at least one stop near (lat, lon).
+
+    Guardrail against line-name collisions across national datasets.
+    Falls back to original variants if filtering removes everything.
+    """
+    if lat is None or lon is None:
+        return variants, True
+    try:
+        max_km_f = float(max_km) if max_km is not None else float(os.environ.get('ROUTE_LABEL_MAX_KM', '30'))
+    except Exception:
+        max_km_f = 30.0
+
+    try:
+        import math
+        cos_lat = math.cos(math.radians(float(lat)))
+    except Exception:
+        cos_lat = 1.0
+
+    max_lat_deg = max_km_f / 111.32
+    max_lon_deg = max_km_f / (111.32 * max(cos_lat, 0.2))
+
+    out: List[Dict[str, Any]] = []
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        stops = v.get('stops')
+        if not isinstance(stops, list) or not stops:
+            continue
+        keep = False
+        for s in stops:
+            if not isinstance(s, dict):
+                continue
+            slat = s.get('lat')
+            slon = s.get('lon')
+            if slat is None or slon is None:
+                continue
+            try:
+                dlat = abs(float(slat) - float(lat))
+                dlon = abs(float(slon) - float(lon))
+            except Exception:
+                continue
+            if dlat <= max_lat_deg and dlon <= max_lon_deg:
+                keep = True
+                break
+        if keep:
+            out.append(v)
+
+    if out:
+        return out, True
+    # nothing near the point
+    return variants, False
+
+
 @app.get("/routes/label/{line}")
-async def route_label(line: str):
+async def route_label(
+    line: str,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    strict_geo: int = 0,
+):
     """Return a compact label/metadata payload for a route line.
 
     The frontend uses this for lightweight display when a user clicks a live
@@ -1919,14 +2648,15 @@ async def route_label(line: str):
     if not line_key:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-    if line_key in _route_label_cache:
-        return _route_label_cache[line_key]
+    cache_key = f"{line_key}{_geo_cache_suffix(lat, lon)}"
+    if cache_key in _route_label_cache:
+        return _route_label_cache[cache_key]
 
     # Prefer reusing the /routes/line cache; compute if needed.
     try:
-        data = _route_line_cache.get(line_key)
+        data = _route_line_cache.get(cache_key) or _route_line_cache.get(line_key)
         if not data:
-            data = await routes_for_line(line_key)
+            data = await routes_for_line(line_key, lat=lat, lon=lon)
     except Exception:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
@@ -1936,6 +2666,15 @@ async def route_label(line: str):
 
     variants = data.get('variants') if isinstance(data, dict) else None
     if not isinstance(variants, list) or len(variants) == 0:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    # Filter variants by proximity when a reference point is supplied.
+    geo_ok = True
+    try:
+        variants, geo_ok = _filter_variants_near_point(variants, lat, lon)
+    except Exception:
+        geo_ok = True
+    if strict_geo and (lat is not None and lon is not None) and not geo_ok:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     route_ids = []
@@ -1968,12 +2707,17 @@ async def route_label(line: str):
         "variant_count": int(len(variants)),
         "route_ids": route_ids,
     }
-    _route_label_cache[line_key] = payload
+    _route_label_cache[cache_key] = payload
     return payload
 
 
 @app.get("/routes/line/{line}")
-async def routes_for_line(line: str):
+async def routes_for_line(
+    line: str,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    strict_geo: int = 0,
+):
     """Return route variants for a bus line, each with ordered stops + coords.
 
     Response::
@@ -2008,8 +2752,9 @@ async def routes_for_line(line: str):
     max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
     mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
 
-    if line_key in _route_line_cache:
-        return _route_line_cache[line_key]
+    cache_key = f"{line_key}{_geo_cache_suffix(lat, lon)}"
+    if cache_key in _route_line_cache:
+        return _route_line_cache[cache_key]
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     import time
@@ -2253,7 +2998,18 @@ async def routes_for_line(line: str):
     # recomputed on subsequent calls so late-initialised data can populate
     # the response.
     if unique:
-        _route_line_cache[line_key] = result
+        # Apply optional geo filtering before caching so /routes/label reuse is safe.
+        try:
+            filtered_unique, geo_ok = _filter_variants_near_point(unique, lat, lon)
+            if strict_geo and (lat is not None and lon is not None) and not geo_ok:
+                # Don't cache a wrong global answer; allow callers to handle 404.
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
+            result = {"line": line, "variants": filtered_unique}
+        except Exception:
+            pass
+
+        _route_line_cache[cache_key] = result
     return result
 
 
@@ -2963,12 +3719,23 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     cand_ids = [c[0] for c in candidates]
     latched = set()
 
-    # Stage 2 latch: origin ATCO + origin start time match.
+    # Stage 2 latch: origin ATCO + origin start time match (preferred).
+    # SAFE SOFT-GATE: if we can't find any time-aligned candidates but we *do*
+    # have a strong anchor (origin ATCO exists in the journey), we keep those
+    # as candidates rather than dropping everything.
     if feed_origin_atco_n and od_adj is not None:
+        aligned = set()
+        origin_only = set()
         for j_id in cand_ids:
             f = staged_flags.get(j_id) or {}
-            if f.get('origin_atco') and f.get('origin_time_aligned'):
-                latched.add(j_id)
+            if f.get('origin_atco'):
+                origin_only.add(j_id)
+                if f.get('origin_time_aligned'):
+                    aligned.add(j_id)
+        if aligned:
+            latched = aligned
+        elif origin_only:
+            latched = origin_only
 
     # Stage 3 latch: destination ATCO (for those not already latched)
     if not latched and feed_destination_atco_n:
@@ -3155,9 +3922,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # via MATCH_SEGMENT_DIST_M (default 50m).
         try:
             try:
-                MATCH_SEGMENT_DIST_M = int(os.environ.get('MATCH_SEGMENT_DIST_M', '50'))
+                MATCH_SEGMENT_DIST_M = int(os.environ.get('MATCH_SEGMENT_DIST_M', '500'))
             except Exception:
-                MATCH_SEGMENT_DIST_M = 50
+                MATCH_SEGMENT_DIST_M = 500
             if MATCH_SEGMENT_DIST_M is not None and dist_m > MATCH_SEGMENT_DIST_M:
                 if not allow_offtrack:
                     if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
@@ -3248,14 +4015,28 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # Near-end checks removed by request: do not reject candidates
         # for being slightly past the scheduled end or not near the terminus.
 
-        # Strict time window: reject candidates that are clearly outside a
-        # short tolerance around their scheduled window. This prevents
-        # matching vehicles that are far before/after the scheduled run.
+        # Strict time window.
+        #
+        # SAFE SOFT-GATE: if we have strong anchors (origin ATCO+time aligned),
+        # don't hard-reject late-running services just because they're outside
+        # the scheduled window by a small/medium amount. Instead, let the
+        # abs(delay) scoring pick the best match.
+        anchored = False
+        try:
+            f = staged_flags.get(j_id) or {}
+            anchored = bool(f.get('origin_atco') and f.get('origin_time_aligned'))
+        except Exception:
+            anchored = False
+
         if now_seconds < start_dep - MATCH_ALLOW_BEFORE_S or now_seconds > end_arr + MATCH_ALLOW_AFTER_S:
-            if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                logger.info("matcher: candidate j_id=%s outside_strict_window (start_dep=%d now=%d end_arr=%d allow_before=%d allow_after=%d)", j_id, start_dep, now_seconds, end_arr, MATCH_ALLOW_BEFORE_S, MATCH_ALLOW_AFTER_S)
-            # Fatal: skip candidate
-            continue
+            if not anchored:
+                if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+                    logger.info("matcher: candidate j_id=%s outside_strict_window (start_dep=%d now=%d end_arr=%d allow_before=%d allow_after=%d)", j_id, start_dep, now_seconds, end_arr, MATCH_ALLOW_BEFORE_S, MATCH_ALLOW_AFTER_S)
+                # Fatal: skip candidate
+                continue
+            else:
+                if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+                    logger.info("matcher: candidate j_id=%s outside_strict_window_but_anchored (start_dep=%d now=%d end_arr=%d allow_before=%d allow_after=%d)", j_id, start_dep, now_seconds, end_arr, MATCH_ALLOW_BEFORE_S, MATCH_ALLOW_AFTER_S)
 
         # Journey fully elapsed and not near terminus — log but do not reject
         if journey_dur > 0 and now_seconds > end_arr + max(600, journey_dur * 0.5):
@@ -3443,26 +4224,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         #   old j_id tiebreaker picked the *earliest* departure, producing
         #   huge phantom delays.
         # Tertiary: j_id for absolute determinism when everything ties.
-        # Penalise candidates whose OriginAimedDepartureTime did not align
-        # with the scheduled start (if the feed provided one). This lets
-        # origin times act as a soft preference rather than a fatal gate.
+        # Soft preference: if we have a feed origin time, prefer candidates
+        # where the journey's origin-stop time aligned within strict_tol.
+        # This is *not* fatal — we still allow selection based on smallest
+        # abs(delay) when vehicles are very late / the feed origin time is
+        # unreliable.
         origin_penalty = 0
         try:
             if origin_dep_secs is not None:
-                try:
-                    od = int(origin_dep_secs)
-                except Exception:
-                    od = origin_dep_secs
-                tz_off = int(origin_tz_offset_secs or 0)
-                try:
-                    adj = od + int(tz_off)
-                except Exception:
-                    adj = od
-                try:
-                    origin_aligned = abs(start_dep - adj) <= int(strict_tol)
-                except Exception:
-                    origin_aligned = False
-                if not origin_aligned:
+                f = staged_flags.get(j_id) or {}
+                if not f.get('origin_time_aligned'):
                     origin_penalty = int(strict_tol) * 2
         except Exception:
             origin_penalty = 0
