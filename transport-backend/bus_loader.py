@@ -251,14 +251,6 @@ class BusLoader:
                 org_working  INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (journey_id)
             );
-            -- Track waypoints (lat/lon polyline) extracted from <Mapping><track>
-            CREATE TABLE IF NOT EXISTS bus_route_tracks (
-                route_id    TEXT NOT NULL,
-                seq         INTEGER NOT NULL,
-                lat         DOUBLE PRECISION NOT NULL,
-                lon         DOUBLE PRECISION NOT NULL,
-                PRIMARY KEY (route_id, seq)
-            );
             -- Per-RouteSection/RouteLink track waypoints with explicit
             -- from/to ATCOs so we can map a track fragment to a specific
             -- stop-pair. This preserves RouteLink boundaries instead of
@@ -464,8 +456,8 @@ class BusLoader:
         # route. `route_section_tracks` already maps section_id -> [(lat,lon),...]
         # and `route_section_links` contains per-RouteLink waypoints with
         # from/to ATCO refs. Build per-section per-link rows using the
-        # section id as the canonical route_id so downstream logic can
-        # write section-level `bus_route_tracks` and `bus_route_stops`.
+    # section id as the canonical route_id so downstream logic can
+    # write section-level `bus_route_section_tracks` and `bus_route_stops`.
         route_section_track_rows = []  # (route_id, section_id, seq, lat, lon, from_atco, to_atco)
         for sec_id, waypoints in route_section_tracks.items():
             # Use the same canonical route key format as route_stops/route_tracks
@@ -988,7 +980,6 @@ class BusLoader:
                     if existing_rev > incoming_rev:
                         skip_rids.add(rid)
                     elif existing_rev < incoming_rev and existing_rev != 0:
-                        cursor.execute("DELETE FROM bus_route_tracks WHERE route_id = %s", (rid,))
                         cursor.execute("DELETE FROM bus_route_stops WHERE route_id = %s", (rid,))
                         # Also delete any per-section rows for this route
                         cursor.execute("DELETE FROM bus_route_section_tracks WHERE route_id = %s", (rid,))
@@ -1027,7 +1018,6 @@ class BusLoader:
                             existing_r = {r[0] for r in cursor.fetchall()}
                             if existing_r:
                                 route_stops = [r for r in route_stops if r[0] not in existing_r]
-                                route_tracks = [r for r in route_tracks if r[0] not in existing_r]
                 except Exception:
                     # If anything goes wrong with the fallback queries, ignore
                     # and proceed — existing revision logic (if present) still applies.
@@ -1055,10 +1045,6 @@ class BusLoader:
                 if unique_rids:
                     # Remove any existing tracks/stops for these routes so
                     # the subsequent bulk insert is an atomic replacement.
-                    cursor.execute(
-                        "DELETE FROM bus_route_tracks WHERE route_id = ANY(%s)",
-                        (unique_rids,)
-                    )
                     cursor.execute(
                         "DELETE FROM bus_route_stops WHERE route_id = ANY(%s)",
                         (unique_rids,)
@@ -1259,15 +1245,6 @@ class BusLoader:
                 on_conflict='ON CONFLICT (journey_id) DO UPDATE SET service_code = EXCLUDED.service_code, operator_national_code = EXCLUDED.operator_national_code, days_of_week = EXCLUDED.days_of_week, start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date, org_ref = EXCLUDED.org_ref, org_working = EXCLUDED.org_working',
                 key_indices=(0,),  # (journey_id,)
             )
-        if route_tracks:
-            _chunked_multi_insert(
-                cursor,
-                'bus_route_tracks',
-                ['route_id', 'seq', 'lat', 'lon'],
-                route_tracks,
-                on_conflict='ON CONFLICT (route_id, seq) DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon',
-                key_indices=(0, 1),  # (route_id, seq)
-            )
         # Insert per-section tracks if present
         try:
             if route_section_tracks:
@@ -1280,8 +1257,7 @@ class BusLoader:
                     key_indices=(0, 1, 2),  # (route_id, section_id, seq)
                 )
         except Exception:
-            # If section track insertion fails for any reason, continue —
-            # we keep route_tracks insertion as the primary data.
+            # If section track insertion fails for any reason, continue.
             pass
         conn.commit()
         conn.close()
@@ -1393,8 +1369,8 @@ class BusLoader:
         # Canonical source: bus_route_section_tracks.
         # Each `route_id` in this table represents a canonical route polyline
         # (already ordered by seq). We do NOT concatenate sections.
-        # NOTE: We intentionally do *not* fall back to the legacy
-        # bus_route_tracks table at runtime.
+    # NOTE: Legacy table `bus_route_tracks` is fully deprecated and is
+    # not read or written by this code.
         def _load_tracks_from_table(table: str) -> bool:
             try:
                 cursor.execute(f"SELECT route_id, lat, lon FROM {table} ORDER BY route_id, seq")
@@ -1710,32 +1686,10 @@ class BusLoader:
                 }
     # timing log removed
 
-        # 3e. route tracks — only routes that have valid journeys
-        try:
-            cur.execute(
-                "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_tracks rt "
-                "JOIN _valid_routes vr ON rt.route_id = vr.route_id "
-                "ORDER BY rt.route_id, rt.seq"
-            )
-            current_route = None
-            track_buf = []
-            rows = cur.fetchall()
-            map_routes_get = bd.map_routes.get_int
-            ensure_route = bd._ensure_route_capacity
-            for route_id, lat, lon in rows:
-                if route_id != current_route:
-                    if current_route is not None:
-                        bd.route_tracks[r_int] = track_buf
-                    current_route = route_id
-                    r_int = map_routes_get(route_id)
-                    ensure_route(r_int)
-                    track_buf = []
-                track_buf.append((lat, lon))
-            if current_route is not None:
-                bd.route_tracks[r_int] = track_buf
-            # timing log removed
-        except Exception:
-            pass  # table may not exist in older DBs
+        # 3e. route tracks
+        # Deprecated: legacy bus_route_tracks is no longer loaded.
+        # Tracks are loaded from bus_route_section_tracks in load_busdata()'s
+        # canonical section-tracks loader.
 
         conn.commit()  # commit to drop temp tables
     # timing log removed

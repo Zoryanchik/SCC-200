@@ -23,11 +23,11 @@ BusLoader = _bl_mod.BusLoader
 
 def _cleanup(conn, prefix):
     cur = conn.cursor()
-    cur.execute("DELETE FROM bus_route_tracks WHERE route_id LIKE %s", (f"{prefix}%",))
     cur.execute("DELETE FROM bus_journey_operating_profile WHERE journey_id LIKE %s", (f"{prefix}%",))
     cur.execute("DELETE FROM bus_journey_times WHERE journey_id LIKE %s", (f"{prefix}%",))
     cur.execute("DELETE FROM bus_journey_routes WHERE journey_id LIKE %s", (f"{prefix}%",))
     cur.execute("DELETE FROM bus_route_stops WHERE route_id LIKE %s", (f"{prefix}%",))
+    cur.execute("DELETE FROM bus_route_section_tracks WHERE route_id LIKE %s", (f"{prefix}%",))
     conn.commit()
 
 

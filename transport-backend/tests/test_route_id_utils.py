@@ -55,7 +55,7 @@ def test_finds_candidate_in_section_tracks():
 
 def test_does_not_fall_back_to_legacy_route_tracks_when_no_section_candidate():
     # If section_tracks has no match, we intentionally do NOT query legacy
-    # bus_route_tracks; we return the original un-prefixed id.
+    # the legacy `bus_route_tracks`; we return the original un-prefixed id.
     cursor = FakeCursor([None])
     conn = FakeConn(cursor)
     out = resolve_prefixed_route_id(conn, "PC000:1:RS1", prefer_section=True)

@@ -48,11 +48,11 @@ run_explain(jt_query + " LIMIT 100000", (dow_bit,))
 # 2) count distinct stops
 run_explain("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
 
-# 3) route_tracks join
+# 3) route_section_tracks join (canonical geometry store)
 run_explain(
-    "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_tracks rt "
+    "SELECT rt.route_id, rt.lat, rt.lon FROM bus_route_section_tracks rt "
     "JOIN (SELECT DISTINCT route_id FROM bus_journey_routes) vr ON rt.route_id = vr.route_id "
-    "ORDER BY rt.route_id, rt.seq LIMIT 100000"
+    "ORDER BY rt.route_id, rt.section_id, rt.seq LIMIT 100000"
 )
 
 conn.close()

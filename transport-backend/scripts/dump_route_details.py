@@ -52,18 +52,18 @@ for rid in route_ids:
     except Exception as e:
         print(f"  ERROR querying bus_route_stops: {e}")
 
-    # route_tracks
+    # route_section_tracks (canonical)
     try:
         cur.execute(
-            "SELECT route_id, seq, lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq",
+            "SELECT route_id, section_id, seq, lat, lon, from_atco, to_atco FROM bus_route_section_tracks WHERE route_id = %s ORDER BY section_id, seq",
             (db_rid,)
         )
         rows = cur.fetchall()
-        print(f"bus_route_tracks ({len(rows)} rows):")
+        print(f"bus_route_section_tracks ({len(rows)} rows):")
         for r in rows[:200]:
             print('  ', r)
     except Exception as e:
-        print(f"  ERROR querying bus_route_tracks: {e}")
+        print(f"  ERROR querying bus_route_section_tracks: {e}")
 
     # journey_routes referencing this route
     try:
