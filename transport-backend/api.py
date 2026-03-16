@@ -2807,19 +2807,11 @@ async def routes_for_line(
     # line_name may be prefixed like "PC0002407:425:100" — match the
     # part after the last colon, which is what the frontend shows.
     matching_routes: list[int] = []
-    for r_idx, meta in enumerate(merged.route_metadata):
-        if meta is None:
-            continue
-        raw_line = (meta.get("line_name") or "").strip()
-        rline = raw_line.split(":")[-1].upper()
-        if rline == line_key:
-            matching_routes.append(r_idx)
+    match_source: str = "metadata"
 
-    # If the requested line is ambiguous across regions (e.g. "1" exists in
-    # multiple cities), and the caller provided a lat/lon, try a stop-local
-    # hint: find nearby stops (within a bbox window) that advertise this line
-    # label, then collect routes that serve those stops.
-    if (not matching_routes) and (lat is not None and lon is not None):
+    # When a reference point is supplied, prefer the stop-local hint first.
+    # This avoids wrong-city line-name collisions (e.g. multiple "1" lines).
+    if lat is not None and lon is not None:
         try:
             # Prefer the cached geo-enriched stops list (same data as /stops/geo).
             # Keep the bbox fairly tight to avoid picking up wrong-city lines.
@@ -2827,18 +2819,18 @@ async def routes_for_line(
             dlon = 0.06
             south, west, north, east = float(lat) - dlat, float(lon) - dlon, float(lat) + dlat, float(lon) + dlon
 
-            stops_geo = _stops_geo_cache
-            if stops_geo is None:
+            stops_geo_list = _stops_geo_cache
+            if stops_geo_list is None:
                 # Lazily build the cache if needed.
                 try:
                     _ = await stops_geo()  # populates _stops_geo_cache
-                    stops_geo = _stops_geo_cache
+                    stops_geo_list = _stops_geo_cache
                 except Exception:
-                    stops_geo = None
+                    stops_geo_list = None
 
-            if stops_geo:
+            if stops_geo_list:
                 near_atcos = []
-                for s in stops_geo:
+                for s in stops_geo_list:
                     try:
                         slat, slon = float(s.get('lat')), float(s.get('lon'))
                         if not (south <= slat <= north and west <= slon <= east):
@@ -2864,10 +2856,24 @@ async def routes_for_line(
                         for s_int in atco_to_stopints.get(ac, []):
                             for rid in merged.stop_to_routes[s_int]:
                                 mr.add(rid)
-                    matching_routes = sorted(mr)
+                    if mr:
+                        matching_routes = sorted(mr)
+                        match_source = "nearby_stops"
         except Exception:
             # Don't block if the stop-based hint fails.
             pass
+
+    # If stop-local hint didn't find anything, fall back to route_metadata suffix match.
+    if not matching_routes:
+        for r_idx, meta in enumerate(merged.route_metadata):
+            if meta is None:
+                continue
+            raw_line = (meta.get("line_name") or "").strip()
+            rline = raw_line.split(":")[-1].upper()
+            if rline == line_key:
+                matching_routes.append(r_idx)
+
+    # (stop-local hint previously lived here; it now runs first when lat/lon are provided)
 
     # ── Build variants from *journey-level* stop sequences ───────
     # Using route_stops directly can produce interleaved inbound/outbound

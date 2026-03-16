@@ -1464,11 +1464,16 @@ class BusLoader:
             except ValueError:
                 continue
 
-            # Fall back to service operating period for missing bounds
+            # Fall back to service operating period for missing bounds.
+            # IMPORTANT: some feeds/loads create invalid service periods
+            # (e.g. empty end_date). Never let a malformed (start,end)
+            # exclude a journey that otherwise has valid operating dates.
             svc_s, svc_e = svc_periods.get(svc_code, (None, None))
-            if s is None:
+            if svc_s and svc_e and svc_s > svc_e:
+                svc_s, svc_e = None, None
+            if s is None and svc_s is not None:
                 s = svc_s
-            if e is None:
+            if e is None and svc_e is not None:
                 e = svc_e
 
             # If still no end date, apply the hard ceiling
