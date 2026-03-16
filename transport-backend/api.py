@@ -741,10 +741,21 @@ async def debug_match_explain(
     feed_destination_atco_n = str(destination_atco).strip() if destination_atco else None
 
     # Helper: get journey stop atcos (first/last few)
+    #
+    # NOTE: some feeds shift the "effective" origin/destination by a couple
+    # of stops (e.g. short turns / timing-point differences). For staged
+    # latching/gating, allow a small stop-index shift window rather than
+    # requiring an exact match strictly in the first/last 3.
+    try:
+        ENDPOINT_SHIFT_STOPS = int(os.environ.get('MATCH_ENDPOINT_SHIFT_STOPS', '2'))
+    except Exception:
+        ENDPOINT_SHIFT_STOPS = 2
+
     def _journey_origin_atcos(jt):
         out = []
         try:
-            for i in range(min(3, len(jt))):
+            n = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
+            for i in range(n):
                 atco = merged.get_atco_code(jt[i][0])
                 if atco:
                     out.append(str(atco).strip())
@@ -755,7 +766,8 @@ async def debug_match_explain(
     def _journey_dest_atcos(jt):
         out = []
         try:
-            for i in range(1, min(4, len(jt) + 1)):
+            n = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
+            for i in range(1, n + 1):
                 atco = merged.get_atco_code(jt[-i][0])
                 if atco:
                     out.append(str(atco).strip())
@@ -2570,7 +2582,8 @@ def _filter_variants_near_point(
     """Filter route variants to those with at least one stop near (lat, lon).
 
     Guardrail against line-name collisions across national datasets.
-    Falls back to original variants if filtering removes everything.
+    When nothing is near the point, we return an empty list and geo_ok=False.
+    Callers can decide whether to fall back (non-strict) or 404 (strict_geo).
     """
     if lat is None or lon is None:
         return variants, True
@@ -2616,8 +2629,10 @@ def _filter_variants_near_point(
 
     if out:
         return out, True
-    # nothing near the point
-    return variants, False
+    # Nothing near the point. IMPORTANT: do NOT fall back to the original
+    # (possibly far-away) variants here; strict_geo callers rely on an empty
+    # result to avoid wrong-city line-name collisions.
+    return [], False
 
 
 @app.get("/routes/label/{line}")
@@ -2799,6 +2814,60 @@ async def routes_for_line(
         rline = raw_line.split(":")[-1].upper()
         if rline == line_key:
             matching_routes.append(r_idx)
+
+    # If the requested line is ambiguous across regions (e.g. "1" exists in
+    # multiple cities), and the caller provided a lat/lon, try a stop-local
+    # hint: find nearby stops (within a bbox window) that advertise this line
+    # label, then collect routes that serve those stops.
+    if (not matching_routes) and (lat is not None and lon is not None):
+        try:
+            # Prefer the cached geo-enriched stops list (same data as /stops/geo).
+            # Keep the bbox fairly tight to avoid picking up wrong-city lines.
+            dlat = 0.04
+            dlon = 0.06
+            south, west, north, east = float(lat) - dlat, float(lon) - dlon, float(lat) + dlat, float(lon) + dlon
+
+            stops_geo = _stops_geo_cache
+            if stops_geo is None:
+                # Lazily build the cache if needed.
+                try:
+                    _ = await stops_geo()  # populates _stops_geo_cache
+                    stops_geo = _stops_geo_cache
+                except Exception:
+                    stops_geo = None
+
+            if stops_geo:
+                near_atcos = []
+                for s in stops_geo:
+                    try:
+                        slat, slon = float(s.get('lat')), float(s.get('lon'))
+                        if not (south <= slat <= north and west <= slon <= east):
+                            continue
+                        lines = s.get('lines') or []
+                        if line_key in [str(x).strip().upper() for x in lines]:
+                            atco_code = s.get('atco_code') or s.get('id')
+                            if atco_code:
+                                near_atcos.append(str(atco_code).strip())
+                    except Exception:
+                        continue
+
+                if near_atcos:
+                    # Map ATCO -> stop_int(s)
+                    atco_to_stopints = {}
+                    for s_int in range(len(merged.stop_to_routes)):
+                        code = merged.get_atco_code(s_int)
+                        if code:
+                            atco_to_stopints.setdefault(code, []).append(s_int)
+                    # Collect matching routes that pass through any nearby stop
+                    mr = set()
+                    for ac in near_atcos:
+                        for s_int in atco_to_stopints.get(ac, []):
+                            for rid in merged.stop_to_routes[s_int]:
+                                mr.add(rid)
+                    matching_routes = sorted(mr)
+        except Exception:
+            # Don't block if the stop-based hint fails.
+            pass
 
     # ── Build variants from *journey-level* stop sequences ───────
     # Using route_stops directly can produce interleaved inbound/outbound
@@ -3519,15 +3588,26 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             jt = merged.journey_times[j_id]
             if not jt:
                 continue
+            # Allow small start/end stop index shifts when latching by
+            # origin/destination ATCO. Some feeds report the "origin" stop as
+            # the 2nd/3rd stop (timing points) and similarly for destination.
+            try:
+                ENDPOINT_SHIFT_STOPS = int(os.environ.get('MATCH_ENDPOINT_SHIFT_STOPS', '2'))
+            except Exception:
+                ENDPOINT_SHIFT_STOPS = 2
+            n_end = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
+
             dest_atcos = []
-            for i in range(1, min(4, len(jt) + 1)):
+            for i in range(1, min(n_end, len(jt)) + 1):
                 atco = merged.get_atco_code(jt[-i][0])
-                if atco: dest_atcos.append(str(atco).strip())
-            
+                if atco:
+                    dest_atcos.append(str(atco).strip())
+
             origin_atcos = []
-            for i in range(min(3, len(jt))):
+            for i in range(min(n_end, len(jt))):
                 atco = merged.get_atco_code(jt[i][0])
-                if atco: origin_atcos.append(str(atco).strip())
+                if atco:
+                    origin_atcos.append(str(atco).strip())
         except Exception:
             continue
 
