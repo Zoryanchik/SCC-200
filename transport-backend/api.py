@@ -2721,9 +2721,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # vehicle to avoid cross-region matches when short line names are
     # ambiguous. Read threshold from env so it can be tuned.
     try:
-        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '1200'))
+        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '2000'))
     except Exception:
-        MATCH_MAX_TRACK_DIST_M = 1200
+        MATCH_MAX_TRACK_DIST_M = 2000
     # New staged matching (requested):
     #   1) line (+operator) match (same as before)
     #   2) try latch by origin_atco + origin_dep_secs (time compare at that stop)
@@ -3038,9 +3038,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # candidate. Make this configurable via env var so operators can tune
     # for noisy GPS or coarse route geometry.
     try:
-        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '1200'))
+        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '2000'))
     except Exception:
-        MATCH_MAX_TRACK_DIST_M = 1200
+        MATCH_MAX_TRACK_DIST_M = 2000
 
     # Configurable stricter gating thresholds (seconds/metres). These
     # default to conservative values but can be tuned via env vars.
@@ -3109,14 +3109,14 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 continue
             cum = _cum_distances(track)
             _track_cache[r_int] = (track, cum)
-        else:
-            cached = _track_cache[r_int]
-            if cached is None:
-                continue
-            track, cum = cached
+        cached = _track_cache[r_int]
+        if cached is None:
+            continue
+        track, cum = cached
 
-            # Project vehicle onto track (edge-interpolated)
-            dist_m, progress, proj_seg_idx, proj_t = _project_onto_track(lat_v, lon_v, track, cum)
+        # Project vehicle onto track (edge-interpolated). This must run
+        # both when we just built the cache and when we re-use it.
+        dist_m, progress, proj_seg_idx, proj_t = _project_onto_track(lat_v, lon_v, track, cum)
 
         # Spatial gate: only accept candidates that can be considered
         # "on-track". We use the edge-projection distance plus a small
@@ -4094,16 +4094,28 @@ async def bus_live_operator(
                 if matched:
                     # matched is expected to be a (delay_s, jid_int) tuple when return_jid=True.
                     computed, matched_jid = matched
-                    # In provenance mode we treat "matched" as requiring a real journey id.
-                    # _compute_delay_from_timetable(return_jid=True) should always return
-                    # (delay, jid) or (None, None), but guard anyway.
-                    if matched_jid is not None:
-                        if bus_provenance:
-                            match_reason = 'matched'
-                    else:
+
+                    # (None, None) means "no match" (not a contract violation).
+                    if computed is None or matched_jid is None:
                         computed = None
                         matched_jid = None
                         if bus_provenance:
+                            try:
+                                reject_reasons = _diagnose_match_failure(
+                                    line_ref, dest, lat_v, lon_v,
+                                    origin_dep_secs=origin_dep,
+                                    origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
+                                    operator_ref=op_for_match,
+                                    strict_tol=600,
+                                    feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                                    feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+                                )
+                            except Exception:
+                                reject_reasons = ['diagnosis_failed']
+
+                        # Only flag invalid_match_missing_jid when the matcher claims
+                        # it found a delay but did not provide a jid.
+                        if bus_provenance and computed is not None and matched_jid is None:
                             reject_reasons = reject_reasons or []
                             if 'invalid_match_missing_jid' not in reject_reasons:
                                 reject_reasons.append('invalid_match_missing_jid')
@@ -4112,7 +4124,6 @@ async def bus_live_operator(
                                     'raw_match_return': repr(matched),
                                     'raw_match_type': str(type(matched)),
                                 }
-                                # keep small; only attach when debugging contract violations
                                 meta_dbg = {
                                     'line': line_ref,
                                     'dest': dest,
@@ -4121,11 +4132,12 @@ async def bus_live_operator(
                                     'origin_atco': (meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
                                     'destination_atco': (meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
                                 }
-                                # stash in reject reasons payload fields later
-                                # (we can't attach to entry yet because it's built below)
                                 meta['_match_contract_debug'] = {'match': entry_match_dbg, 'ctx': meta_dbg}
                             except Exception:
                                 pass
+                    else:
+                        if bus_provenance:
+                            match_reason = 'matched'
                 else:
                     computed = None
                     # perform diagnosis to explain rejection only when provenance enabled
