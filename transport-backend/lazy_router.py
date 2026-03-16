@@ -366,6 +366,8 @@ class RaptorRouter:
         self.recursive_raptor(final_list,
             n_transfer, transfer_limit, reach_stops, walking,
             switch_b, allowed_modes,
+            initial_walk_stops=initial_walk_stops,
+            debug_stop_ids=debug_stop_ids,
         )
 
     # ── scan a route for the earliest usable journey from *stop* ──

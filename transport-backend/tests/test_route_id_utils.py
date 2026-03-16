@@ -53,13 +53,13 @@ def test_finds_candidate_in_section_tracks():
     assert "%::PC000:1:RS1" in cursor.last_params[0]
 
 
-def test_falls_back_to_route_tracks_when_no_section_candidate():
-    # First fetchone returns None (no section match), second returns candidate
-    candidate = ("OTHERFILE::PC000:1:RS1",)
-    cursor = FakeCursor([None, candidate])
+def test_does_not_fall_back_to_legacy_route_tracks_when_no_section_candidate():
+    # If section_tracks has no match, we intentionally do NOT query legacy
+    # bus_route_tracks; we return the original un-prefixed id.
+    cursor = FakeCursor([None])
     conn = FakeConn(cursor)
     out = resolve_prefixed_route_id(conn, "PC000:1:RS1", prefer_section=True)
-    assert out == candidate[0]
+    assert out == "PC000:1:RS1"
 
 
 def test_returns_original_when_no_candidate():

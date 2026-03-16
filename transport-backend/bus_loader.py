@@ -1390,21 +1390,37 @@ class BusLoader:
                 }
 
         # --- 5. load route tracks (lat/lon polylines) ---
-        try:
-            cursor.execute("SELECT route_id, lat, lon FROM bus_route_tracks ORDER BY route_id, seq")
-            current_route = None
-            track_buf = []
-            for route_id, lat, lon in cursor.fetchall():
-                if route_id != current_route:
-                    if current_route is not None:
-                        bd.add_route_track(current_route, track_buf)
-                    current_route = route_id
-                    track_buf = []
-                track_buf.append((lat, lon))
-            if current_route is not None:
-                bd.add_route_track(current_route, track_buf)
-        except Exception:
-            pass  # table may not exist in older DBs
+        # Canonical source: bus_route_section_tracks.
+        # Each `route_id` in this table represents a canonical route polyline
+        # (already ordered by seq). We do NOT concatenate sections.
+        # NOTE: We intentionally do *not* fall back to the legacy
+        # bus_route_tracks table at runtime.
+        def _load_tracks_from_table(table: str) -> bool:
+            try:
+                cursor.execute(f"SELECT route_id, lat, lon FROM {table} ORDER BY route_id, seq")
+                rows = cursor.fetchall()
+                if not rows:
+                    return False
+                current_route = None
+                track_buf = []
+                wrote_any = False
+                for route_id, lat, lon in rows:
+                    if route_id != current_route:
+                        if current_route is not None and track_buf:
+                            bd.add_route_track(current_route, track_buf)
+                            wrote_any = True
+                        current_route = route_id
+                        track_buf = []
+                    track_buf.append((lat, lon))
+                if current_route is not None and track_buf:
+                    bd.add_route_track(current_route, track_buf)
+                    wrote_any = True
+                return wrote_any
+            except Exception:
+                return False
+
+        # Only load canonical section tracks.
+        _load_tracks_from_table("bus_route_section_tracks")
 
         conn.close()
         return bd

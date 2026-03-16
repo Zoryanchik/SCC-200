@@ -115,6 +115,7 @@ class JourneyPlanRequest(BaseModel):
     date: str              # YYYY-MM-DD
     maxTransfers: int = 5
     mode: str = "both"     # bus | train | both
+    includeGeometry: bool = False
 
 # — Lifespan (startup / shutdown) ——————————————————————————
 
@@ -323,22 +324,6 @@ def debug_route_tracks(route_id: str, sample: int = 5, suggest: int = 10):
                     cur.execute(
                         "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT 60",
                         (like_rs,),
-                    )
-                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-                except Exception:
-                    pass
-                try:
-                    cur.execute(
-                        "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 60",
-                        (like_rs,),
-                    )
-                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-                except Exception:
-                    pass
-                try:
-                    cur.execute(
-                        "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 60",
-                        (like_jps,),
                     )
                     from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
                 except Exception:
@@ -1170,7 +1155,12 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                 'to': (to_lat, to_lon),
             })
 
-        if route_id and mode != 'walking':
+        # Normalize common frontend mode labels.
+        norm_mode = (mode or '').strip().lower()
+        if norm_mode == 'walk':
+            norm_mode = 'walking'
+
+        if route_id and norm_mode != 'walking':
             tracks = _fetch_route_tracks(route_id)
             if trace:
                 try:
@@ -1204,9 +1194,11 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                     stop_coords[to_stop_id] = b
                     except Exception:
                         pass
-                    if from_stop_id not in stop_coords:
+                    # If the cache didn't have them, use the explicit query endpoints.
+                    # This makes the endpoint usable even without a populated walking cache.
+                    if from_stop_id not in stop_coords and isinstance(from_lat, (int, float)) and isinstance(from_lon, (int, float)):
                         stop_coords[from_stop_id] = (from_lat, from_lon)
-                    if to_stop_id not in stop_coords:
+                    if to_stop_id not in stop_coords and isinstance(to_lat, (int, float)) and isinstance(to_lon, (int, float)):
                         stop_coords[to_stop_id] = (to_lat, to_lon)
 
                     seg = _subsegment_from_tracks(route_id, [from_stop_id, to_stop_id], stop_coords)
@@ -1214,10 +1206,20 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                         if trace:
                             print('[route_leg_geometry] returning route_tracks subsegment', {'len': len(seg)})
                         return {"coords": seg, "source": "route_tracks"}
-                # Fallback: return full track.
-                if trace:
-                    print('[route_leg_geometry] returning full route_tracks', {'len': len(tracks)})
-                return {"coords": tracks, "source": "route_tracks"}
+                    # Guardrail: if caller provided stop ids but slicing failed,
+                    # DO NOT return the full track. That draws an entire line
+                    # for a short hop and can override correct embedded geometry
+                    # from /journey/plan. Fall through to OSRM/linear.
+                    if trace:
+                        print('[route_leg_geometry] stop_ids present but slice_failed; falling back to OSRM/linear', {
+                            'route_id': route_id,
+                            'tracks_len': len(tracks),
+                        })
+                else:
+                    # No stop context; safe to return the full route track.
+                    if trace:
+                        print('[route_leg_geometry] returning full route_tracks', {'len': len(tracks)})
+                    return {"coords": tracks, "source": "route_tracks"}
     except Exception:
         # Best-effort only; fall through to OSRM/linear.
         if trace:
@@ -1227,7 +1229,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
         pass
 
     osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
-    profile = 'foot' if mode == 'walking' else 'driving'
+    profile = 'foot' if norm_mode == 'walking' else 'driving'
     try:
         coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
         coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
@@ -1256,11 +1258,17 @@ def _fetch_route_tracks(route_id: str):
     # sharing the same "base" prefix so we can still return the authoritative
     # timetable track.
     vj_base = None
+    jps_base = None
     try:
         if isinstance(route_id, str) and ':VJ' in route_id:
             vj_base = route_id.split(':VJ', 1)[0]
+        # Many schedules use JPS keys for journey patterns but store
+        # authoritative route_tracks against RS ids for the same base.
+        if isinstance(route_id, str) and ':JPS' in route_id:
+            jps_base = route_id.split(':JPS', 1)[0]
     except Exception:
         vj_base = None
+        jps_base = None
 
     def _db_candidate_route_ids_for_vj_base(vj_base: str, limit: int = 200):
         """Return candidate route_ids (RS/JPS families) from DB for a VJ base prefix.
@@ -1279,28 +1287,11 @@ def _fetch_route_tracks(route_id: str):
         try:
             conn = _get_db_connection()
             cur = conn.cursor()
-            # Prefer section tracks (more specific), but either table is fine.
+            # Prefer section tracks (canonical).
             try:
                 cur.execute(
                     "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT %s",
                     (rs_like, lim),
-                )
-                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-            except Exception:
-                pass
-            try:
-                cur.execute(
-                    "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT %s",
-                    (rs_like, lim),
-                )
-                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-            except Exception:
-                pass
-            # Also include JPS family if present in DB.
-            try:
-                cur.execute(
-                    "SELECT DISTINCT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT %s",
-                    (jps_like, lim),
                 )
                 out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
             except Exception:
@@ -1322,6 +1313,41 @@ def _fetch_route_tracks(route_id: str):
             uniq.append(rid)
         return uniq
 
+    def _db_candidate_route_ids_for_jps_base(jps_base: str, limit: int = 200):
+        """Return candidate RS route_ids for a JPS base prefix."""
+        if not jps_base:
+            return []
+        lim = max(1, min(int(limit or 200), 1000))
+        rs_like = jps_base + ':RS%'
+        out = []
+        try:
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            # Prefer section tracks (canonical).
+            try:
+                cur.execute(
+                    "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT %s",
+                    (rs_like, lim),
+                )
+                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        except Exception:
+            return []
+
+        seen = set()
+        uniq = []
+        for rid in out:
+            if rid in seen:
+                continue
+            seen.add(rid)
+            uniq.append(rid)
+        return uniq
+
     def _matches_vj_family(rid2: str) -> bool:
         if not vj_base or not isinstance(rid2, str):
             return False
@@ -1332,6 +1358,7 @@ def _fetch_route_tracks(route_id: str):
         )
 
     db_vj_candidates = []
+    db_jps_candidates = []
     # Precompute DB-backed RS/JPS candidates for VJ ids. This helps when the
     # in-memory MergedData doesn't contain a route_metadata entry for the
     # route_id family we need (common with RS-only tracks).
@@ -1340,6 +1367,13 @@ def _fetch_route_tracks(route_id: str):
             db_vj_candidates = _db_candidate_route_ids_for_vj_base(vj_base)
     except Exception:
         db_vj_candidates = []
+
+    # Precompute DB-backed RS candidates for JPS ids.
+    try:
+        if jps_base:
+            db_jps_candidates = _db_candidate_route_ids_for_jps_base(jps_base)
+    except Exception:
+        db_jps_candidates = []
 
     # 1) Try in-memory caches (prebuilt_cache in _base_cache, then _router_cache)
     try:
@@ -1394,6 +1428,19 @@ def _fetch_route_tracks(route_id: str):
                             try:
                                 meta_list = getattr(merged, 'route_metadata', []) or []
                                 for cand in db_vj_candidates:
+                                    for i, meta in enumerate(meta_list):
+                                        if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
+                                            if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                                return [[t[0], t[1]] for t in merged.route_tracks[i]]
+                                            break
+                            except Exception:
+                                pass
+
+                        # If caller provided a JPS id, try resolving to RS ids that have tracks.
+                        if r_int is None and db_jps_candidates:
+                            try:
+                                meta_list = getattr(merged, 'route_metadata', []) or []
+                                for cand in db_jps_candidates:
                                     for i, meta in enumerate(meta_list):
                                         if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
                                             if i < len(merged.route_tracks) and merged.route_tracks[i]:
@@ -1458,6 +1505,18 @@ def _fetch_route_tracks(route_id: str):
                         try:
                             meta_list = getattr(merged, 'route_metadata', []) or []
                             for cand in db_vj_candidates:
+                                for i, meta in enumerate(meta_list):
+                                    if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
+                                        if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                            return [[t[0], t[1]] for t in merged.route_tracks[i]]
+                                        break
+                        except Exception:
+                            pass
+
+                    if r_int is None and db_jps_candidates:
+                        try:
+                            meta_list = getattr(merged, 'route_metadata', []) or []
+                            for cand in db_jps_candidates:
                                 for i, meta in enumerate(meta_list):
                                     if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
                                         if i < len(merged.route_tracks) and merged.route_tracks[i]:
@@ -1531,56 +1590,6 @@ def _fetch_route_tracks(route_id: str):
     except Exception:
         pass
 
-    # 2) In this deployment we only use in-memory route_tracks.
-    # If no in-memory candidate found above, fall back to DB so we can
-    # still serve geometry for historical dataset prefixes (common when
-    # load_busdata_for_date filters away those route_ids).
-    try:
-        # Helper: fetch polyline points for an exact route_id from DB.
-        def _db_fetch_tracks_exact(rid: str):
-            if not rid:
-                return []
-            conn = _get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq",
-                (rid,),
-            )
-            rows = cur.fetchall() or []
-            try:
-                conn.close()
-            except Exception:
-                pass
-            if not rows:
-                return []
-            return [[float(a), float(b)] for (a, b) in rows if a is not None and b is not None]
-
-        # 2a) Try exact route_id
-        direct = _db_fetch_tracks_exact(route_id)
-        if direct and len(direct) >= 2:
-            return direct
-
-        # 2b) If VJ id, try DB-discovered RS/JPS candidates first.
-        if db_vj_candidates:
-            for cand in db_vj_candidates:
-                t = _db_fetch_tracks_exact(cand)
-                if t and len(t) >= 2:
-                    return t
-
-        # 2c) As a final best-effort, try to resolve a prefixed candidate
-        # (handles callers that pass an un-prefixed route_id).
-        try:
-            pref = _find_prefixed_route_candidate(route_id)
-            if pref and pref != route_id:
-                t = _db_fetch_tracks_exact(pref)
-                if t and len(t) >= 2:
-                    return t
-        except Exception:
-            pass
-    except Exception:
-        # DB fallback is best-effort only.
-        pass
-
     return []
 
 
@@ -1606,17 +1615,6 @@ def _find_prefixed_route_candidate(route_id: str):
                 return r[0]
         except Exception:
             logger.exception("_find_prefixed_route_candidate: error querying bus_route_section_tracks LIKE %s", f"%::{route_id}")
-        try:
-            pattern2 = f"%::{route_id}"
-            logger.debug("_find_prefixed_route_candidate: checking bus_route_tracks LIKE %s", pattern2)
-            cur.execute("SELECT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 1", (pattern2,))
-            r = cur.fetchone()
-            if r and r[0]:
-                logger.debug("_find_prefixed_route_candidate: found bus_route_tracks candidate %s for %s", r[0], route_id)
-                conn.close()
-                return r[0]
-        except Exception:
-            logger.exception("_find_prefixed_route_candidate: error querying bus_route_tracks LIKE %s", f"%::{route_id}")
         conn.close()
     except Exception:
         logger.exception("_find_prefixed_route_candidate: error opening DB connection to resolve %s", route_id)
@@ -1637,10 +1635,14 @@ def _haversine(lat1, lon1, lat2, lon2):
 def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dict):
     """Return a subsegment of route_tracks for route_id that spans the stops in stop_atcos.
 
-    Strategy:
-      - Load full route track points (lat, lon).
-      - For each stop ATCO, find nearest track index using walking_coords mapping.
-      - Take min..max index range (inclusive) and return that slice.
+        Strategy (order-aware, loop-tolerant):
+            - Load full route track points (lat, lon).
+            - For each stop ATCO, find the *nearest* track index using walking_coords mapping.
+            - If multiple stops provided, choose the slice that follows the provided
+                stop order best (important for loops where a stop may be near the track
+                in multiple places).
+            - For the common 2-stop case, we pick start/end indices anchored to each
+                stop and preserve direction.
     Returns list of [lat, lon] or [] if not possible.
     """
     if not stop_atcos:
@@ -1648,8 +1650,10 @@ def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dic
     tracks = _fetch_route_tracks(route_id)
     if not tracks:
         return []
-    # Build list of indices for each stop
-    indices = []
+    # Map each stop -> list of candidate indices on track.
+    # We keep multiple candidates to handle loop routes where the track passes
+    # near the same stop multiple times.
+    stop_to_candidates: dict[str, list[tuple[float, int]]] = {}
     for atco in stop_atcos:
         coord = None
         if walking_coords:
@@ -1662,24 +1666,56 @@ def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dic
             lat_s, lon_s = float(coord[0]), float(coord[1])
         except Exception:
             continue
-        # find nearest track point
-        best_i = None
-        best_d = None
+        # collect k nearest track points (k small for speed)
+        dists: list[tuple[float, int]] = []
         for i, (tlat, tlon) in enumerate(tracks):
             d = _haversine(lat_s, lon_s, tlat, tlon)
-            if best_d is None or d < best_d:
-                best_d = d
-                best_i = i
-        if best_i is not None:
-            indices.append(best_i)
+            dists.append((d, i))
+        dists.sort(key=lambda x: x[0])
 
-    if not indices:
+        # Keep a few nearest candidates, but also drop extremely-far matches
+        # (prevents random snapping when stop coords are wrong).
+        # Threshold is generous; most good snaps are < 100m.
+        max_keep = 8
+        max_dist_m = 500.0
+        keep = [(d, i) for (d, i) in dists[:max_keep] if d <= max_dist_m]
+        if keep:
+            stop_to_candidates[atco] = keep
+
+    if not stop_to_candidates:
         return []
-    start, end = min(indices), max(indices)
-    if start <= end:
-        return tracks[start:end+1]
-    else:
-        return list(reversed(tracks[end:start+1]))
+
+    # If only one stop resolved, we can't slice meaningfully.
+    if len(stop_to_candidates) < 2:
+        return []
+
+    # Prefer using the first and last stop in the requested order (common case).
+    resolved = [s for s in stop_atcos if s in stop_to_candidates]
+    if len(resolved) < 2:
+        return []
+
+    a = resolved[0]
+    b = resolved[-1]
+
+    # Choose the best (ia, ib) using multiple candidates.
+    # Score = distance_to_a + distance_to_b + lambda * slice_len.
+    # This biases toward (1) close snaps and (2) shorter plausible segments.
+    best = None  # (score, ia, ib, da, db)
+    lam = 0.15  # penalty per point of segment length
+    for da, ia in stop_to_candidates.get(a, []):
+        for db, ib in stop_to_candidates.get(b, []):
+            seg_len = abs(ib - ia) + 1
+            score = float(da) + float(db) + lam * float(seg_len)
+            if best is None or score < best[0]:
+                best = (score, ia, ib, da, db)
+
+    if best is None:
+        return []
+
+    _, ia, ib, _, _ = best
+    if ia <= ib:
+        return tracks[ia:ib + 1]
+    return list(reversed(tracks[ib:ia + 1]))
 
 
 def _sample_coords_for_osrm(points, max_samples=20):
@@ -1699,7 +1735,7 @@ def _sample_coords_for_osrm(points, max_samples=20):
 
 
 def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
-    """Query Nominatim and return candidates filtered to Lancashire.
+    """Query Nominatim and return candidates (optionally county-biased).
 
     Results are restricted to ``countrycodes=gb`` and filtered so that
     only items whose address contains the county string are returned.
@@ -1786,7 +1822,9 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
     resp.raise_for_status()
     payload = resp.json()
 
-    results = []
+    # Build a list of candidates, then apply a lenient county filter.
+    # If filtering yields no results, fall back to unfiltered GB results.
+    raw_candidates = []
     for idx, item in enumerate(payload):
         try:
             lat = float(item.get("lat"))
@@ -1794,33 +1832,28 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
         except (TypeError, ValueError):
             continue
 
-        # Lenient county post-filter: check county, state_district,
-        # display_name and all address values for the county string.
-        # This catches unitary authorities (Blackpool, Lancaster)
-        # whose Nominatim `county` field differs from "Lancashire"
-        # but whose `state_district` is "Lancashire".
-        if county:
-            addr = item.get("address", {}) or {}
-            display = (item.get("display_name") or "").lower()
-            addr_combined = " ".join(
-                str(v) for v in addr.values() if v
-            ).lower()
-            county_lc = county.lower()
-            if county_lc not in addr_combined and county_lc not in display:
-                continue
-
         name = item.get("display_name") or item.get("name") or query
-        results.append({
-            "id": f"loc:{len(results)}",
+        raw_candidates.append({
+            "id": f"loc:{len(raw_candidates)}",
             "name": name,
             "lat": lat,
             "lon": lon,
             "atco_code": None,
             "type": "location",
         })
-        if len(results) >= limit:
-            break
-    return results
+
+    def _county_match(cand: dict) -> bool:
+        # Lenient county post-filter: check display_name. (Address fields
+        # are not preserved in `raw_candidates`.)
+        if not county:
+            return True
+        county_lc = county.lower()
+        name_lc = (cand.get("name") or "").lower()
+        return county_lc in name_lc
+
+    filtered = [c for c in raw_candidates if _county_match(c)]
+    chosen = filtered if filtered else raw_candidates
+    return chosen[:limit]
 
 
 @app.get("/search/stops")
@@ -6102,7 +6135,7 @@ def format_route_text(route_result, merged):
     return "\n".join(out)
 
 
-def build_journey_plan_response(route_result, merged, stop_coords, request_start_seconds=None):
+def build_journey_plan_response(route_result, merged, stop_coords, request_start_seconds=None, include_geometry: bool = False):
     """Convert raw RAPTOR router result into a structured journey plan.
 
     Args:
@@ -6136,6 +6169,122 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         except Exception:
             pass
         return None
+
+    # Best-effort: resolve a canonical route_id for a bus leg when routers
+    # didn't provide journey_info.route_id. This allows geometry to use
+    # stored timetable route_tracks instead of falling back to OSRM/linear.
+    # We do this by looking up known variants for the leg's line and selecting
+    # a variant that contains both from/to ATCO codes in stop order.
+    def _resolve_route_id_for_leg(line_name: str | None, from_atco: str | None, to_atco: str | None):
+        if not line_name or not from_atco or not to_atco:
+            return None
+
+        def _get_line_variants_sync(line_key: str):
+            """Best-effort sync access to /routes/line/{line} variants.
+
+            build_journey_plan_response is synchronous; /routes/line/{line} is
+            implemented as an async endpoint handler. Calling async code from
+            here would create an un-awaited coroutine and silently break
+            route_id resolution (leading to OSRM/linear geometry).
+
+            We therefore use the same cached data structure that the endpoint
+            populates: _route_line_cache.
+            """
+            try:
+                lk = (line_key or '').strip().upper()
+                if not lk:
+                    return []
+                data = _route_line_cache.get(lk)
+                if isinstance(data, dict):
+                    v = data.get('variants')
+                    if isinstance(v, list):
+                        return v
+            except Exception:
+                return []
+            return []
+
+        def _resolve_alias_route_id(rid: str) -> str:
+            """Resolve legacy ids (e.g. JPS*) to canonical ids using existing DB rules.
+
+            This follows the project's established rule system:
+            - route_id_aliases: populated by strict TXC mapping (jps_to_rs_map)
+              and the numeric-suffix rule (JPS<N> -> RS<N>) when canonical exists.
+            """
+            if not rid or not isinstance(rid, str):
+                return rid
+            try:
+                conn = _get_db_connection()
+                cur = conn.cursor()
+                # 1) Explicit alias table (preferred)
+                try:
+                    cur.execute(
+                        "SELECT canonical_id FROM route_id_aliases WHERE legacy_id = %s LIMIT 1",
+                        (rid,),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        return row[0]
+                except Exception:
+                    pass
+
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return rid
+
+        # Small in-process cache to avoid repeatedly scanning variants.
+        cache = globals().setdefault('_line_variants_cache', {})
+        key = (str(line_name),)
+        if key in cache:
+            variants = cache[key]
+        else:
+            variants = []
+            try:
+                variants = _get_line_variants_sync(str(line_name))
+            except Exception:
+                variants = []
+            # Cache even empty lists for this process lifetime.
+            cache[key] = variants
+
+        best = None
+        best_hops = None
+        try:
+            for var in variants:
+                if not isinstance(var, dict):
+                    continue
+                rid = var.get('route_id')
+                stops = var.get('stops') or []
+                if not rid or not isinstance(stops, list) or len(stops) < 2:
+                    continue
+                atcos = [s.get('atco_code') for s in stops if isinstance(s, dict)]
+                if from_atco not in atcos or to_atco not in atcos:
+                    continue
+                i = atcos.index(from_atco)
+                j = atcos.index(to_atco)
+                if j <= i:
+                    continue
+                hops = j - i
+                if best is None or (best_hops is not None and hops < best_hops):
+                    best = rid
+                    best_hops = hops
+        except Exception:
+            return None
+        # Apply the project's rule-based alias resolution (JPS -> canonical RS)
+        # so geometry can use stored section tracks.
+        try:
+            if best and isinstance(best, str):
+                best2 = _resolve_alias_route_id(best)
+                return best2 or best
+        except Exception:
+            pass
+        return best
 
     if not route_result:
         return {
@@ -6535,43 +6684,155 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             geo_name = transport.title() if transport else "Unknown"
         coords = []
 
+        route_id = None
         track_coords = None
+        geom_source = None
+        trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
         if transport != "walking":
             try:
                 j_info = curr_info.get("journey_info") or {}
                 if isinstance(j_info, dict) and j_info.get("route_id"):
                     route_id = j_info.get("route_id")
-                    
+                elif transport == 'bus':
+                    # Router didn't provide route_id, attempt best-effort resolution.
                     try:
                         prev_atco = merged.get_atco_code(prev_int)
                     except Exception:
                         prev_atco = None
-                        
                     try:
                         curr_atco = merged.get_atco_code(curr_int)
                     except Exception:
                         curr_atco = None
+                    try:
+                        line_name = leg.get('line_name')
+                    except Exception:
+                        line_name = None
+                    route_id = _resolve_route_id_for_leg(line_name, prev_atco, curr_atco)
+                    
+                    try:
+                        prev_atco = prev_atco or merged.get_atco_code(prev_int)
+                    except Exception:
+                        prev_atco = None
                         
-                    if prev_atco and curr_atco:
-                        local_coords = {}
-                        if prev_coord:
-                            local_coords[prev_atco] = prev_coord
-                        if curr_coord:
-                            local_coords[curr_atco] = curr_coord
-                            
-                        seg = _subsegment_from_tracks(route_id, [prev_atco, curr_atco], local_coords)
-                        if seg and len(seg) >= 2:
-                            track_coords = seg
+                    try:
+                        curr_atco = curr_atco or merged.get_atco_code(curr_int)
+                    except Exception:
+                        curr_atco = None
+                        
+                    # (handled below) if route_id resolved we will attempt slicing
             except Exception as exc:
+                pass
+
+        # If we have a route_id for a non-walking leg and we know stop ids,
+        # try to slice the track between the two stops.
+        if (transport != "walking") and route_id:
+            try:
+                prev_atco = None
+                curr_atco = None
+                try:
+                    prev_atco = merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+                try:
+                    curr_atco = merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+
+                if trace:
+                    try:
+                        print('[journey_geom] leg', {
+                            'transport': transport,
+                            'line_name': (leg.get('line_name') if isinstance(leg, dict) else None),
+                            'route_id': route_id,
+                            'from_atco': prev_atco,
+                            'to_atco': curr_atco,
+                            'from_name': (from_loc.get('name') if isinstance(from_loc, dict) else None),
+                            'to_name': (to_loc.get('name') if isinstance(to_loc, dict) else None),
+                        })
+                    except Exception:
+                        pass
+
+                if prev_atco and curr_atco:
+                    local_coords = {}
+                    if prev_coord:
+                        local_coords[prev_atco] = prev_coord
+                    if curr_coord:
+                        local_coords[curr_atco] = curr_coord
+
+                    seg = _subsegment_from_tracks(route_id, [prev_atco, curr_atco], local_coords)
+                    if seg and len(seg) >= 2:
+                        track_coords = seg
+                        if trace:
+                            try:
+                                print('[journey_geom] sliced', {
+                                    'len': len(seg),
+                                    'first': seg[0],
+                                    'last': seg[-1],
+                                })
+                            except Exception:
+                                pass
+                    elif trace:
+                        try:
+                            print('[journey_geom] slice_failed', {
+                                'have_prev_atco': bool(prev_atco),
+                                'have_curr_atco': bool(curr_atco),
+                                'have_prev_coord': bool(prev_coord),
+                                'have_curr_coord': bool(curr_coord),
+                            })
+                        except Exception:
+                            pass
+            except Exception:
                 pass
 
         if track_coords:
             coords = track_coords
+            geom_source = "route_tracks"
         else:
-            if prev_coord:
-                coords.append([prev_coord[0], prev_coord[1]])
-            if curr_coord:
-                coords.append([curr_coord[0], curr_coord[1]])
+            # Per-leg fallback: for missing tracks, fall back to OSRM (best-effort)
+            # and then to a straight line. This is intentionally per-leg so a
+            # single missing track doesn't degrade the whole route.
+            try:
+                if prev_coord and curr_coord:
+                    mode_hint = "walking" if transport == "walking" else "driving"
+                    lg = route_leg_geometry(
+                        prev_coord[0], prev_coord[1],
+                        curr_coord[0], curr_coord[1],
+                        mode=mode_hint,
+                        route_id=route_id,
+                        from_stop_id=prev_atco if 'prev_atco' in locals() else None,
+                        to_stop_id=curr_atco if 'curr_atco' in locals() else None,
+                    )
+                    if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
+                        coords = lg.get("coords")
+                        geom_source = lg.get("source")
+            except Exception:
+                pass
+
+            if not coords:
+                if prev_coord:
+                    coords.append([prev_coord[0], prev_coord[1]])
+                if curr_coord:
+                    coords.append([curr_coord[0], curr_coord[1]])
+                geom_source = geom_source or "linear"
+
+        # Attach geometry source to the leg so clients can debug mixed sources.
+        try:
+            if geom_source:
+                leg["geometry_source"] = geom_source
+        except Exception:
+            pass
+
+        # Optionally embed geometry directly into the leg. This keeps the
+        # /journey/* endpoints self-contained for map rendering (no secondary
+        # /route/leg-geometry calls needed).
+        try:
+            if include_geometry and coords and len(coords) >= 2:
+                leg["geometry"] = {
+                    "coords": coords,
+                    "source": geom_source or "linear",
+                }
+        except Exception:
+            pass
 
         geometries.append({
             "id": f"{transport}-{geo_idx}",
@@ -6807,7 +7068,8 @@ async def journey_plan(request: JourneyPlanRequest):
         )
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(
-            result, merged, stop_coords, request_start_seconds=start_seconds)
+            result, merged, stop_coords, request_start_seconds=start_seconds,
+            include_geometry=bool(getattr(request, 'includeGeometry', False)))
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
@@ -6920,11 +7182,12 @@ async def compare_routers(request: JourneyPlanRequest):
         stop_coords = getattr(walking, "_coords", {})
 
         # Build full journey-plan responses (same shape as /journey/plan)
-        main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds) if main_res is not None else None
-        eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds) if eco_res is not None else None
-        cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds) if cosy_res is not None else None
-        lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds) if lazy_res is not None else None
-        greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds) if greedy_res is not None else None
+        include_geom = bool(getattr(request, 'includeGeometry', False))
+        main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if main_res is not None else None
+        eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if eco_res is not None else None
+        cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if cosy_res is not None else None
+        lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if lazy_res is not None else None
+        greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if greedy_res is not None else None
 
         return {
             "success": True,

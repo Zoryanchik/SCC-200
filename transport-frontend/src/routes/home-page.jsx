@@ -325,6 +325,23 @@ const fetchGeometryForLegs = async (legs) => {
       mode,
     };
 
+    // Prefer embedded geometry from the journey response when available.
+    // This keeps the map consistent with the planner's stop-to-stop slicing
+    // and avoids overriding a correct embedded track with a later per-leg call.
+    try {
+      const embedded = leg?.geometry;
+      const embeddedCoords = embedded && Array.isArray(embedded.coords) ? embedded.coords : null;
+      if (embeddedCoords && embeddedCoords.length >= 2) {
+        const normEmbedded = normalizeCoords(embeddedCoords);
+        if (normEmbedded.length >= 2) {
+          segment.coords = normEmbedded;
+          return segment;
+        }
+      }
+    } catch (_e) {
+      // ignore
+    }
+
     // Need both endpoints to request OSRM geometry
     if (typeof fromLat !== 'number' || typeof fromLon !== 'number' ||
         typeof toLat !== 'number' || typeof toLon !== 'number') {
@@ -545,8 +562,64 @@ export default function HomePage() {
   // Index of the card the user has clicked / selected (controls map geometry)
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(null);
   const [showSuggested, setShowSuggested] = useState(false);
-  // Geometry drawn on the map: derived from the selected option
-  const journeyRoute = (typeof selectedRouteIdx === 'number') ? (routeOptions[selectedRouteIdx]?.routeGeometries ?? null) : null;
+  // Geometry drawn on the map: prefer embedded per-leg geometry (legs[].geometry)
+  // from the journey response. Only fall back to prefetched `routeGeometries`
+  // (from per-leg /route/leg-geometry calls) when embedded geometry is missing.
+  const journeyRoute = (() => {
+    if (typeof selectedRouteIdx !== 'number') return null;
+    const opt = routeOptions?.[selectedRouteIdx];
+    if (!opt) return null;
+
+    // Pull the selected plan in a consistent way across /journey/plan and /journey/compare.
+    // In compare mode, opt.sources is a map from label -> {router?, route:{legs...}}.
+    // Some labels may be placeholders (no route). Don’t assume the first entry has legs.
+    const findLegs = (option) => {
+      // Prefer any explicit plan attached on the option
+      if (Array.isArray(option?.legs) && option.legs.length > 0) return option.legs;
+      if (option?.route && Array.isArray(option.route.legs) && option.route.legs.length > 0) return option.route.legs;
+
+      const srcVals = option?.sources ? Object.values(option.sources) : [];
+      for (const src of srcVals) {
+        if (!src) continue;
+        if (src.route && Array.isArray(src.route.legs) && src.route.legs.length > 0) return src.route.legs;
+        if (Array.isArray(src.legs) && src.legs.length > 0) return src.legs;
+        // Some responses nest as {route:{route:{legs}}}
+        if (src.route && src.route.route && Array.isArray(src.route.route.legs) && src.route.route.legs.length > 0) return src.route.route.legs;
+      }
+      return null;
+    };
+
+    const legs = findLegs(opt);
+
+    // Build segments directly from legs[].geometry when present.
+    try {
+      if (legs && legs.length > 0) {
+        const segments = [];
+        for (let i = 0; i < legs.length; i++) {
+          const leg = legs[i];
+          const rawMode = (leg?.mode && String(leg.mode).toLowerCase()) || '';
+          const isWalk = rawMode === 'walking';
+          const mode = rawMode || (leg?.line_name ? 'transit' : 'walking');
+          const embeddedCoords = leg?.geometry && Array.isArray(leg.geometry.coords) ? leg.geometry.coords : null;
+          if (!embeddedCoords || embeddedCoords.length < 2) continue;
+          const norm = normalizeCoords(embeddedCoords);
+          if (norm.length < 2) continue;
+          segments.push({
+            id: isWalk ? `walk-${i}` : `seg-${i}`,
+            name: leg?.line_name || mode || `Segment ${i}`,
+            coords: norm,
+            color: isWalk ? '#000000' : '#1a73e8',
+            mode,
+          });
+        }
+        if (segments.length > 0) return segments;
+      }
+    } catch (_e) {
+      // If anything goes wrong, fall back to prefetched routeGeometries below.
+    }
+
+    return opt.routeGeometries ?? null;
+  })();
 
   // State for showing router/label details when a label chip is clicked
   const [labelDetail, setLabelDetail] = useState({ open: false, label: '', content: null });

@@ -19,11 +19,10 @@ def resolve_prefixed_route_id(conn, route_id: str, prefer_section: bool = True) 
     """Return a prefixed route_id candidate from the DB if available.
 
     - If the provided route_id already contains '::' it is returned as-is.
-    - Otherwise the DB is searched for a matching stored id that ends
-      with the provided route_id (pattern '%%::<route_id>'). If
-      prefer_section is True, the search checks
-      bus_route_section_tracks first (more specific), then
-      bus_route_tracks.
+        - Otherwise the DB is searched for a matching stored id that ends
+            with the provided route_id (pattern '%%::<route_id>'). If
+            prefer_section is True, the search checks
+            bus_route_section_tracks (canonical).
 
     If no candidate is found, the original route_id is returned.
     """
@@ -46,18 +45,8 @@ def resolve_prefixed_route_id(conn, route_id: str, prefer_section: bool = True) 
                 logger.debug("resolve_prefixed_route_id: matched section_tracks candidate %s for %s", candidate, route_id)
                 return candidate
         except Exception:
-            # Ignore DB errors here; fall through to next check
+            # Ignore DB errors here; fall through to returning original
             logger.exception("Error checking bus_route_section_tracks for %s", route_id)
-
-    try:
-        cur.execute("SELECT route_id FROM bus_route_tracks WHERE route_id LIKE %s LIMIT 1", (pattern,))
-        r = cur.fetchone()
-        if r:
-            candidate = r[0]
-            logger.debug("resolve_prefixed_route_id: matched route_tracks candidate %s for %s", candidate, route_id)
-            return candidate
-    except Exception:
-        logger.exception("Error checking bus_route_tracks for %s", route_id)
 
     # No candidate found; return original
     logger.debug("resolve_prefixed_route_id: no prefixed candidate for %s, returning original", route_id)

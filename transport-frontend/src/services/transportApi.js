@@ -369,12 +369,15 @@ export const compareRouters = async (fromStop, toStop, departureTime, options = 
     const { date, time } = normalizeDateTime(departureTime);
     const maxTransfers = typeof options.maxTransfers === 'number' ? options.maxTransfers : 3;
     const mode = typeof options.mode === 'string' ? options.mode : 'combined';
+    // Ask backend to embed per-leg geometry (legs[].geometry.coords) so the UI can
+    // draw the planner's stop-to-stop sliced route tracks without extra per-leg calls.
+    const includeGeometry = options.includeGeometry !== undefined ? !!options.includeGeometry : true;
     const response = await fetch(
       `${API_BASE_URL}/journey/compare`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromStop: from, toStop: to, departureTime: time, date, maxTransfers, mode }),
+        body: JSON.stringify({ fromStop: from, toStop: to, departureTime: time, date, maxTransfers, mode, includeGeometry }),
       }
     );
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);

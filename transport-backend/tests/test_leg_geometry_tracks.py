@@ -26,6 +26,15 @@ def test_leg_geometry_bus_prefers_route_tracks_subsegment(monkeypatch):
 
     monkeypatch.setattr(api, "_fetch_route_tracks", lambda route_id: tracks)
 
+    # Ensure the endpoint can resolve stop coords. It looks in api._base_cache
+    # walking_raw.coords for ATCO->(lat,lon).
+    monkeypatch.setattr(
+        api,
+        "_base_cache",
+        {"walking_raw": {"coords": {"A": (54.01, -2.80), "B": (54.04, -2.80)}}},
+        raising=False,
+    )
+
     # Avoid any OSRM calls: if OSRM logic runs we want the test to fail loudly.
     def _boom(*_a, **_k):
         raise AssertionError("OSRM should not be queried when route_tracks are available")
@@ -37,6 +46,10 @@ def test_leg_geometry_bus_prefers_route_tracks_subsegment(monkeypatch):
     stop_coords = {"A": (54.01, -2.80), "B": (54.04, -2.80)}
     seg = api._subsegment_from_tracks("RID", ["A", "B"], stop_coords)
     assert seg == tracks[1:5]
+
+    # Order matters: reversing the stop order should reverse the slice.
+    seg_rev = api._subsegment_from_tracks("RID", ["B", "A"], stop_coords)
+    assert seg_rev == list(reversed(tracks[1:5]))
 
     client = TestClient(api.app, raise_server_exceptions=True)
 
@@ -59,10 +72,7 @@ def test_leg_geometry_bus_prefers_route_tracks_subsegment(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["source"] == "route_tracks"
-    # Endpoint may fall back to returning the full track if it can't resolve
-    # stop coords from the global walking cache; both behaviors are acceptable
-    # as long as we do not query OSRM and we return stored tracks.
-    assert data["coords"] in (tracks, tracks[1:5])
+    assert data["coords"] == tracks[1:5]
 
 
 def test_leg_geometry_driving_prefers_route_tracks_when_route_id_present(monkeypatch):
