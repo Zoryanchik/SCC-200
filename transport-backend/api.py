@@ -2541,6 +2541,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     line_q = (line_ref or "").strip()
     dest_q = (dest or "").strip().lower()
 
+    # Normalize feed ATCOs once so staged matching is consistent.
+    try:
+        feed_origin_atco_n = str(feed_origin_atco).strip() if feed_origin_atco else None
+    except Exception:
+        feed_origin_atco_n = None
+    try:
+        feed_destination_atco_n = str(feed_destination_atco).strip() if feed_destination_atco else None
+    except Exception:
+        feed_destination_atco_n = None
+
     # ── helper: haversine distance in metres ──
     def _hav(lat1, lon1, lat2, lon2):
         R = 6371000.0
@@ -2714,6 +2724,33 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '1200'))
     except Exception:
         MATCH_MAX_TRACK_DIST_M = 1200
+    # New staged matching (requested):
+    #   1) line (+operator) match (same as before)
+    #   2) try latch by origin_atco + origin_dep_secs (time compare at that stop)
+    #   3) if none latched, try latch by destination_atco
+    #   4) for destination-latched candidates, also require origin_atco to exist
+    #      in the journey and compare feed origin_dep_secs against the arrival/
+    #      departure time at that origin stop.
+    #
+    # Notes:
+    # - We still keep the downstream spatial scoring logic; this block is about
+    #   collecting plausible candidates deterministically.
+    # - If origin_dep_secs is not present, we fall back to the previous endpoint
+    #   heuristics to avoid dropping all candidates.
+
+    staged_flags = {}  # j_id -> {'origin_atco': bool, 'dest_atco': bool, 'origin_time_aligned': bool}
+
+    # Precompute feed origin time adjusted by timezone offset.
+    od_adj = None
+    if origin_dep_secs is not None:
+        try:
+            od_adj = int(origin_dep_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                od_adj = int(origin_dep_secs)
+            except Exception:
+                od_adj = None
+
     for j_id, jmeta in enumerate(merged.journey_metadata):
         if not jmeta:
             continue
@@ -2721,7 +2758,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         simple_line = line_name.split(":")[-1] if line_name else ""
         if line_q and simple_line != line_q:
             continue
-        # Endpoint matching: require EITHER the destination OR the origin to match.
+        # Gather endpoint ATCOs for staged matching.
         try:
             jt = merged.journey_times[j_id]
             if not jt:
@@ -2738,39 +2775,49 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         except Exception:
             continue
 
-        dest_match = False
-        if feed_destination_atco:
-            if str(feed_destination_atco).strip() in dest_atcos:
-                dest_match = True
-        else:
-            candidate_dest_atcos = set()
-            if dest_q:
+        origin_atco_match = bool(feed_origin_atco_n and feed_origin_atco_n in origin_atcos)
+        dest_atco_match = bool(feed_destination_atco_n and feed_destination_atco_n in dest_atcos)
+
+        # If no explicit destination ATCO is provided, fall back to free-text
+        # destination matching (previous behaviour) but do NOT treat that as a
+        # destination-atco latch. It's just a weak hint.
+        weak_dest_text_match = False
+        if not feed_destination_atco_n and dest_q:
+            try:
+                candidate_dest_atcos = set()
                 for sname_key, sidx_list in stop_name_map.items():
                     if dest_q in sname_key or sname_key in dest_q:
                         for si in sidx_list:
                             atco = merged.get_atco_code(si)
                             if atco:
                                 candidate_dest_atcos.add(str(atco).strip())
-            if candidate_dest_atcos and any(da in candidate_dest_atcos for da in dest_atcos):
-                dest_match = True
-
-        origin_match = False
-        if feed_origin_atco:
-            if str(feed_origin_atco).strip() in origin_atcos:
-                origin_match = True
-        else:
-            try:
-                nearby = walking.reachable_stops((lat_v, lon_v))
-                if nearby:
-                    nearest_stop_int, walk_secs = nearby[0]
-                    nearest_atco = merged.get_atco_code(nearest_stop_int)
-                    if nearest_atco and str(nearest_atco).strip() in origin_atcos:
-                        origin_match = True
+                if candidate_dest_atcos and any(da in candidate_dest_atcos for da in dest_atcos):
+                    weak_dest_text_match = True
             except Exception:
-                pass
+                weak_dest_text_match = False
 
-        if not dest_match and not origin_match:
-            continue
+        # Stage 2: origin_atco + time alignment.
+        origin_time_aligned = False
+        origin_stop_time = None
+        if origin_atco_match and od_adj is not None:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        # Use arrival if present, else departure.
+                        origin_stop_time = arr_t if arr_t is not None else dep_t
+                        if origin_stop_time is not None and abs(int(origin_stop_time) - int(od_adj)) <= int(strict_tol):
+                            origin_time_aligned = True
+                        break
+            except Exception:
+                origin_time_aligned = False
+
+        staged_flags[j_id] = {
+            'origin_atco': origin_atco_match,
+            'dest_atco': dest_atco_match,
+            'weak_dest_text': weak_dest_text_match,
+            'origin_time_aligned': origin_time_aligned,
+        }
 
         # Strict operator/service match: require journey's recorded service_code
         # to match the feed-provided operator_ref. If the journey metadata
@@ -2795,22 +2842,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             if not svc or svc.strip() != str(operator_ref).strip():
                 # operator mismatch — in strict mode, reject candidate
                 continue
+        # We defer the endpoint/time latching decision until after we have
+        # scanned all journeys. For now just store basic times.
         try:
-            jt = merged.journey_times[j_id]
-            if not jt:
-                continue
             start_dep = jt[0][2]   # departure time of first stop
-            # Override start_dep if it is only a dest match and feed_origin_atco is present
-            if not origin_match and feed_origin_atco:
-                for stop_int, arr_t, dep_t in jt:
-                    s_atco = merged.get_atco_code(stop_int)
-                    if s_atco and str(s_atco).strip() == str(feed_origin_atco).strip():
-                        if dep_t is not None:
-                            start_dep = dep_t
-                        elif arr_t is not None:
-                            start_dep = arr_t
-                        break
-            # Safe end_arr: prefer arrival, fallback to departure
             end_arr = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
         except Exception:
             continue
@@ -2918,7 +2953,74 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             # Instead, keep the candidate but mark that the origin time did
             # not align so scoring can penalise it (prefer aligned matches).
 
+        # Record as a line/operator candidate. We'll filter to staged latches below.
         candidates.append((j_id, start_dep, end_arr, r_int))
+
+    # Apply staged filtering requested by user.
+    if not candidates:
+        return None
+
+    cand_ids = [c[0] for c in candidates]
+    latched = set()
+
+    # Stage 2 latch: origin ATCO + origin start time match.
+    if feed_origin_atco_n and od_adj is not None:
+        for j_id in cand_ids:
+            f = staged_flags.get(j_id) or {}
+            if f.get('origin_atco') and f.get('origin_time_aligned'):
+                latched.add(j_id)
+
+    # Stage 3 latch: destination ATCO (for those not already latched)
+    if not latched and feed_destination_atco_n:
+        for j_id in cand_ids:
+            f = staged_flags.get(j_id) or {}
+            if f.get('dest_atco'):
+                latched.add(j_id)
+
+    # Stage 4: for destination-latched candidates, require origin ATCO to
+    # exist in the journey and compare origin time against ARRIVAL time at
+    # that stop (arrival preferred; fallback to departure).
+    if latched and feed_destination_atco_n and feed_origin_atco_n and od_adj is not None:
+        refined = set()
+        for j_id in latched:
+            try:
+                jt = merged.journey_times[j_id]
+            except Exception:
+                continue
+            try:
+                stop_time = None
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        break
+                if stop_time is None:
+                    continue
+                if abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
+                    refined.add(j_id)
+            except Exception:
+                continue
+        if refined:
+            latched = refined
+
+    # If we latched anything, restrict candidates to latched set.
+    if latched:
+        candidates = [c for c in candidates if c[0] in latched]
+
+    if DEBUG_MATCH:
+        try:
+            logger.info(
+                "matcher(staged): line=%s op=%s origin_atco=%s dest_atco=%s od_adj=%s candidates=%d latched=%s",
+                line_q,
+                operator_ref,
+                feed_origin_atco_n,
+                feed_destination_atco_n,
+                od_adj,
+                len(candidates),
+                sorted(list(latched)) if latched else [],
+            )
+        except Exception:
+            pass
 
     if not candidates:
         return None
@@ -3389,6 +3491,209 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     return best_delay
 
 
+def _stage_filter_journeys_for_live_bus(
+    merged,
+    walking,
+    *,
+    line_ref: str,
+    operator_ref: str | None = None,
+    dest: str | None = None,
+    feed_origin_atco: str | None = None,
+    feed_destination_atco: str | None = None,
+    origin_dep_secs: int | None = None,
+    origin_tz_offset_secs: int = 0,
+    strict_tol: int = 600,
+):
+    """Return candidate journey ids after applying the staged ATCO/time latch.
+
+    This helper isolates the *new rule* from the rest of the delay matcher
+    (spatial projection + delay scoring). It's used by tests and can be used
+    by provenance tooling.
+
+    Inputs are intentionally similar to _compute_delay_from_timetable, but it
+    requires a preloaded `merged` + `walking`.
+    """
+    line_q = (line_ref or "").strip()
+    dest_q = (dest or "").strip().lower() if dest else ""
+    try:
+        feed_origin_atco_n = str(feed_origin_atco).strip() if feed_origin_atco else None
+    except Exception:
+        feed_origin_atco_n = None
+    try:
+        feed_destination_atco_n = str(feed_destination_atco).strip() if feed_destination_atco else None
+    except Exception:
+        feed_destination_atco_n = None
+
+    od_adj = None
+    if origin_dep_secs is not None:
+        try:
+            od_adj = int(origin_dep_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                od_adj = int(origin_dep_secs)
+            except Exception:
+                od_adj = None
+
+    # stop name map for weak destination matching.
+    stop_name_map = {}
+    try:
+        for si, sname in enumerate(getattr(merged, 'stop_metadata', []) or []):
+            if not sname:
+                continue
+            stop_name_map.setdefault(str(sname).strip().lower(), []).append(si)
+    except Exception:
+        stop_name_map = {}
+
+    candidates: list[int] = []
+    staged_flags: dict[int, dict] = {}
+
+    for j_id, jmeta in enumerate(getattr(merged, 'journey_metadata', []) or []):
+        if not jmeta:
+            continue
+        line_name = jmeta.get('line_name') or ''
+        simple_line = line_name.split(':')[-1] if line_name else ''
+        if line_q and simple_line != line_q:
+            continue
+
+        # Operator filter (same approach as main matcher)
+        if operator_ref:
+            op_noc = jmeta.get('operator_national_code') or None
+            svc = None
+            if op_noc:
+                svc = str(op_noc).strip()
+            else:
+                sc = jmeta.get('service_code') or ''
+                if sc:
+                    svc = str(sc).strip()
+                else:
+                    ln = (jmeta.get('line_name') or '')
+                    if ':' in ln:
+                        svc = ln.split(':')[0]
+            if not svc or svc.strip() != str(operator_ref).strip():
+                continue
+
+        try:
+            jt = merged.journey_times[j_id]
+            if not jt:
+                continue
+        except Exception:
+            continue
+
+        # Endpoint ATCO sets (same as main: a few stops from ends)
+        dest_atcos = []
+        origin_atcos = []
+        try:
+            for i in range(1, min(4, len(jt) + 1)):
+                atco = merged.get_atco_code(jt[-i][0])
+                if atco:
+                    dest_atcos.append(str(atco).strip())
+            for i in range(min(3, len(jt))):
+                atco = merged.get_atco_code(jt[i][0])
+                if atco:
+                    origin_atcos.append(str(atco).strip())
+        except Exception:
+            pass
+
+        origin_atco_match = bool(feed_origin_atco_n and feed_origin_atco_n in origin_atcos)
+        dest_atco_match = bool(feed_destination_atco_n and feed_destination_atco_n in dest_atcos)
+
+        weak_dest_text_match = False
+        if not feed_destination_atco_n and dest_q:
+            try:
+                candidate_dest_atcos = set()
+                for sname_key, sidx_list in stop_name_map.items():
+                    if dest_q in sname_key or sname_key in dest_q:
+                        for si in sidx_list:
+                            atco = merged.get_atco_code(si)
+                            if atco:
+                                candidate_dest_atcos.add(str(atco).strip())
+                if candidate_dest_atcos and any(da in candidate_dest_atcos for da in dest_atcos):
+                    weak_dest_text_match = True
+            except Exception:
+                weak_dest_text_match = False
+
+        origin_time_aligned = False
+        if origin_atco_match and od_adj is not None:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        if stop_time is not None and abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
+                            origin_time_aligned = True
+                        break
+            except Exception:
+                origin_time_aligned = False
+
+        staged_flags[j_id] = {
+            'origin_atco': origin_atco_match,
+            'dest_atco': dest_atco_match,
+            'weak_dest_text': weak_dest_text_match,
+            'origin_time_aligned': origin_time_aligned,
+        }
+
+        candidates.append(j_id)
+
+    if not candidates:
+        return []
+
+    latched: set[int] = set()
+
+    # Stage 2 latch: origin ATCO + origin start time match.
+    if feed_origin_atco_n and od_adj is not None:
+        aligned = set()
+        origin_only = set()
+        for j_id in candidates:
+            f = staged_flags.get(j_id) or {}
+            if f.get('origin_atco'):
+                origin_only.add(j_id)
+                if f.get('origin_time_aligned'):
+                    aligned.add(j_id)
+        # If we have any aligned origin matches, they win outright.
+        if aligned:
+            latched = aligned
+        # Otherwise, restrict to journeys that at least contain the origin ATCO.
+        elif origin_only:
+            latched = origin_only
+
+    # Stage 3 latch: destination ATCO (for those not already latched)
+    if not latched and feed_destination_atco_n:
+        for j_id in candidates:
+            f = staged_flags.get(j_id) or {}
+            if f.get('dest_atco'):
+                latched.add(j_id)
+
+    # Stage 4: for destination-latched candidates, require origin ATCO to exist
+    # and compare origin time against the arrival/departure time at that stop.
+    if latched and feed_destination_atco_n and feed_origin_atco_n and od_adj is not None:
+        refined: set[int] = set()
+        for j_id in latched:
+            try:
+                jt = merged.journey_times[j_id]
+            except Exception:
+                continue
+            stop_time = None
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        break
+            except Exception:
+                stop_time = None
+            if stop_time is None:
+                continue
+            try:
+                if abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
+                    refined.add(j_id)
+            except Exception:
+                continue
+        if refined:
+            latched = refined
+
+    return sorted(latched) if latched else sorted(candidates)
+
+
 def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, operator_ref=None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0):
     """Return a list of reject reasons explaining why strict matching failed.
 
@@ -3787,9 +4092,40 @@ async def bus_live_operator(
                     feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
                 )
                 if matched:
+                    # matched is expected to be a (delay_s, jid_int) tuple when return_jid=True.
                     computed, matched_jid = matched
-                    if bus_provenance:
-                        match_reason = 'matched'
+                    # In provenance mode we treat "matched" as requiring a real journey id.
+                    # _compute_delay_from_timetable(return_jid=True) should always return
+                    # (delay, jid) or (None, None), but guard anyway.
+                    if matched_jid is not None:
+                        if bus_provenance:
+                            match_reason = 'matched'
+                    else:
+                        computed = None
+                        matched_jid = None
+                        if bus_provenance:
+                            reject_reasons = reject_reasons or []
+                            if 'invalid_match_missing_jid' not in reject_reasons:
+                                reject_reasons.append('invalid_match_missing_jid')
+                            try:
+                                entry_match_dbg = {
+                                    'raw_match_return': repr(matched),
+                                    'raw_match_type': str(type(matched)),
+                                }
+                                # keep small; only attach when debugging contract violations
+                                meta_dbg = {
+                                    'line': line_ref,
+                                    'dest': dest,
+                                    'origin_dep_secs': origin_dep,
+                                    'operator_ref': op_for_match,
+                                    'origin_atco': (meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                                    'destination_atco': (meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+                                }
+                                # stash in reject reasons payload fields later
+                                # (we can't attach to entry yet because it's built below)
+                                meta['_match_contract_debug'] = {'match': entry_match_dbg, 'ctx': meta_dbg}
+                            except Exception:
+                                pass
                 else:
                     computed = None
                     # perform diagnosis to explain rejection only when provenance enabled
@@ -3883,17 +4219,79 @@ async def bus_live_operator(
         # diagnostic fields when available so clients can see why a vehicle
         # was rejected by the strict matcher.
         try:
+            _jm_debug = None
             if matched_jid is not None and _merged and matched_jid < len(_merged.journey_metadata):
                 jm = _merged.journey_metadata[matched_jid] or {}
+                if bus_provenance:
+                    try:
+                        if isinstance(jm, dict):
+                            _jm_debug = {
+                                'matched_jid': matched_jid,
+                                'journey_meta_is_none': _merged.journey_metadata[matched_jid] is None,
+                                'journey_meta_keys': sorted(list(jm.keys())),
+                            }
+                        else:
+                            _jm_debug = {
+                                'matched_jid': matched_jid,
+                                'journey_meta_type': str(type(jm)),
+                            }
+                    except Exception:
+                        _jm_debug = {'matched_jid': matched_jid}
                 if jm.get("journey_id"):
                     entry["logged_journey_id"] = jm.get("journey_id")
+                elif bus_provenance:
+                    # In provenance mode, surface a best-effort identifier so the
+                    # frontend can still treat the vehicle as mapped when we have
+                    # a timetable match but no merged journey_id string.
+                    #
+                    # NOTE: This is intentionally best-effort and marked as such.
+                    if meta and isinstance(meta, dict):
+                        fallback_id = (
+                            meta.get("vehicle_journey_code")
+                            or meta.get("dated_journey_ref")
+                            or meta.get("framed_journey_ref")
+                        )
+                        if fallback_id:
+                            entry["logged_journey_id"] = str(fallback_id)
+                            entry["logged_journey_id_source"] = "feed_fallback"
         except Exception:
             # best-effort only
             pass
+
+        # In provenance mode, treat "matched" as a stronger contract:
+        # if we say it's matched, we must also provide a journey identifier
+        # so clients (and the frontend) can treat it as mapped.
+        if bus_provenance:
+            try:
+                if (match_reason == 'matched' or matched_jid is not None) and not entry.get('logged_journey_id'):
+                    # We couldn't build a stable id for this match; downgrade.
+                    match_reason = 'unmatched'
+                    if reject_reasons is None:
+                        reject_reasons = []
+                    if 'matched_but_missing_logged_journey_id' not in reject_reasons:
+                        reject_reasons.append('matched_but_missing_logged_journey_id')
+                    # Add extra context so we can debug why the merged timetable
+                    # lacks a journey_id for this matched_jid.
+                    if matched_jid is None:
+                        if 'missing_matched_jid' not in reject_reasons:
+                            reject_reasons.append('missing_matched_jid')
+                    else:
+                        if 'missing_merged_journey_id' not in reject_reasons:
+                            reject_reasons.append('missing_merged_journey_id')
+                        if _jm_debug and not entry.get('journey_id_debug'):
+                            entry['journey_id_debug'] = _jm_debug
+            except Exception:
+                # Don't break the endpoint for provenance bookkeeping.
+                pass
         # Expose diagnostic fields only when provenance mode is enabled
         if bus_provenance:
             entry['match_reason'] = match_reason or ('matched' if matched_jid is not None else 'unmatched')
             entry['reject_reasons'] = reject_reasons or []
+            try:
+                if meta and isinstance(meta, dict) and meta.get('_match_contract_debug'):
+                    entry['_match_contract_debug'] = meta.get('_match_contract_debug')
+            except Exception:
+                pass
         # If the feed provided an OriginAimedDepartureTime (seconds since
         # midnight) surface it to clients so they can filter vehicles by
         # their scheduled start time without recomputing/parsing XML.
@@ -3932,6 +4330,154 @@ async def bus_live_operator(
 
         out.append(entry)
     return out
+
+
+@app.get("/debug/live_match_contract")
+async def debug_live_match_contract(
+    operator: str = 'SCCU',
+    lat: float = 54.0466,
+    lon: float = -2.8007,
+    latTol: float = 0.25,
+    lonTol: float = 0.25,
+    sample: int = 25,
+    limit: int = 50,
+):
+    """Return only live vehicles that violated the live-match contract.
+
+    This is a lightweight way to inspect cases where a match appears truthy
+    but doesn't produce a journey id (e.g. invalid_match_missing_jid).
+
+    Intended for local debugging with BUS_LIVE_PROVENANCE=1.
+    """
+    # This endpoint must be fast. So we fetch raw live vehicles and run the
+    # matcher on only a small sample, returning just the contract violations.
+    from fastapi.responses import JSONResponse
+
+    try:
+        smp = max(0, int(sample))
+    except Exception:
+        smp = 25
+    try:
+        lim = max(0, int(limit))
+    except Exception:
+        lim = 50
+
+    urls = None
+    if operator and str(operator).lower() != 'all':
+        urls = [f"https://transport.scc.lancs.ac.uk/bus/live/{operator}"]
+
+    try:
+        raw = get_bus_live(lat, lon, urls=urls, lat_tol=latTol, lon_tol=lonTol)
+    except Exception as exc:
+        try:
+            import traceback
+            return JSONResponse(
+                status_code=500,
+                content={'error': str(exc), 'traceback': traceback.format_exc()},
+            )
+        except Exception:
+            return JSONResponse(status_code=500, content={'error': str(exc)})
+
+    bus_provenance = str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes')
+    violations = []
+
+    for idx, item in enumerate(raw[:smp] if smp else raw):
+        # Mirror the /bus/live unpacking logic for tuple + optional meta-dict
+        meta = {}
+        base = item
+        try:
+            if isinstance(item[-1], dict):
+                meta = item[-1]
+                base = item[:-1]
+        except Exception:
+            base = item
+
+        try:
+            if len(base) == 7:
+                line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep = base
+            else:
+                line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep, _bearing = base
+        except Exception:
+            continue
+
+        # Only investigate vehicles where we need to compute a delay
+        if delay_s is not None:
+            continue
+
+        op_for_match = meta.get('operator_ref') if meta and isinstance(meta, dict) and meta.get('operator_ref') else _operator
+        try:
+            if op_for_match is not None:
+                op_for_match = str(op_for_match).strip()
+        except Exception:
+            pass
+
+        try:
+            matched = _compute_delay_from_timetable(
+                line_ref,
+                dest,
+                lat_v,
+                lon_v,
+                return_jid=True,
+                origin_dep_secs=origin_dep,
+                origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
+                operator_ref=op_for_match,
+                strict_tol=600,
+                feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+            )
+        except Exception as exc:
+            try:
+                import traceback
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        'error': f'matcher_exception: {exc}',
+                        'traceback': traceback.format_exc(),
+                        'operator': operator,
+                        'idx': idx,
+                        'line': line_ref,
+                        'dest': dest,
+                        'vehicle_ref': meta.get('vehicle_ref') if isinstance(meta, dict) else None,
+                    },
+                )
+            except Exception:
+                return JSONResponse(status_code=500, content={'error': f'matcher_exception: {exc}'})
+
+        # Contract: if matched is truthy, it must be (delay, jid) with jid not None.
+        if matched:
+            try:
+                computed, jid = matched
+            except Exception:
+                computed, jid = None, None
+            if jid is None and computed is not None:
+                violations.append({
+                    'idx': idx,
+                    'vehicle_ref': meta.get('vehicle_ref') if isinstance(meta, dict) else None,
+                    'line': line_ref,
+                    'dest': dest,
+                    'operator_ref': op_for_match,
+                    'origin_dep_secs': origin_dep,
+                    'origin_atco': meta.get('origin_atco') if isinstance(meta, dict) else None,
+                    'destination_atco': meta.get('destination_atco') if isinstance(meta, dict) else None,
+                    'raw_match_return': repr(matched),
+                    'raw_match_type': str(type(matched)),
+                    'bus_provenance': bus_provenance,
+                })
+
+        if lim and len(violations) >= lim:
+            break
+
+    return {
+        'operator': operator,
+        'lat': lat,
+        'lon': lon,
+        'latTol': latTol,
+        'lonTol': lonTol,
+        'sample': smp,
+        'limit': lim,
+        'raw_total': len(raw),
+        'violations': violations,
+    }
 
 # ── Upcoming timetabled departures from a bus stop ──────────────────
 

@@ -4,12 +4,38 @@ and aggregate per-vehicle reject_reasons (when BUS_LIVE_PROVENANCE=1).
 
 Usage: run backend with BUS_LIVE_PROVENANCE=1 and then run this script.
 """
+import argparse
 import json
 import urllib.request
 import sys
 from collections import Counter
 
-URL = "http://localhost:5050/bus/live/all?lat=54.05&lon=-2.8&latTol=2.0&lonTol=2.0"
+DEFAULT_URL = "http://localhost:5050/bus/live/all?lat=54.05&lon=-2.8&latTol=2.0&lonTol=2.0"
+LANCASTER_URL = "http://localhost:5050/bus/live/all?lat=54.0466&lon=-2.8007&latTol=0.25&lonTol=0.25"
+
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description=(
+            "Fetch /bus/live/all and print match_reason counts, logged_journey_id totals, "
+            "and aggregate reject_reasons (when BUS_LIVE_PROVENANCE=1)."
+        )
+    )
+    p.add_argument(
+        "--url",
+        default=None,
+        help="Override the full URL to fetch (defaults to a UK-ish bounding box).",
+    )
+    p.add_argument(
+        "--lancaster",
+        action="store_true",
+        help="Use a Lancaster-focused bounding box (lat/lon ~ Lancaster city center).",
+    )
+    return p.parse_args()
+
+
+args = _parse_args()
+URL = args.url or (LANCASTER_URL if args.lancaster else DEFAULT_URL)
 
 try:
     with urllib.request.urlopen(URL, timeout=60) as resp:
