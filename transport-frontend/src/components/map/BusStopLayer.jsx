@@ -11,14 +11,15 @@ const CLASS_COLORS = {
   hub: '#E91E63',
   interchange: '#FF9800',
   local: '#1976d2',
-  request_stop: '#9E9E9E',
+  // Requested stops should stand out as brown (user request).
+  request_stop: '#795548',
 };
 
 const CLASS_LABELS = {
   hub: 'Hub',
   interchange: 'Interchange',
   local: 'Local Stop',
-  request_stop: 'Request Stop',
+  request_stop: 'Requested stop',
 };
 
 const getMarkerSize = (zoom) => {
@@ -97,7 +98,16 @@ function buildPopupHtml(stop) {
     for (const line of stop.lines) {
       const safe = line.replace(/'/g, "\\'").replace(/"/g, '&quot;');
       const safeLine = line.replace(/"/g, '&quot;');
-      html += '<button onclick="window.__busRouteToggle(\'' + safe + '\')" '
+      const safeAtco = (stop.atco_code || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      const lat = Number.isFinite(stop.lat) ? stop.lat : null;
+      const lon = Number.isFinite(stop.lon) ? stop.lon : null;
+      // Pass stop context so ambiguous lines (e.g. "1") resolve locally via /routes/line_at_stop.
+      // Use the dispatch helper so clicks work even if the map hasn't mounted yet.
+      html += '<button onclick="window.__dispatchBusRouteToggle(\'' + safe + '\', '
+        + (stop.atco_code ? ('\'' + safeAtco + '\'') : 'null') + ', '
+        + (lat === null ? 'null' : String(lat)) + ', '
+        + (lon === null ? 'null' : String(lon))
+        + ')" '
         + 'data-testid="route-chip-' + line + '" '
         + 'data-line="' + safeLine + '" '
         + 'style="display:inline-block;padding:4px 10px;border-radius:8px;'
@@ -284,8 +294,11 @@ export default function BusStopLayer({
   isRouteActiveRef.current = isRouteActive;
 
   React.useEffect(() => {
-    window.__busRouteToggle = async (line) => {
-      if (toggleRef.current) await toggleRef.current(line);
+    // Called by inline popup HTML.
+    // Signature supports passing stop context so ambiguous lines (e.g. "1")
+    // can be resolved locally.
+    window.__busRouteToggle = async (line, atcoCode = null, lat = null, lon = null) => {
+      if (toggleRef.current) await toggleRef.current(line, { atcoCode, lat, lon });
       // After the async toggle resolves, sync every visible chip for this line.
       if (isRouteActiveRef.current) {
         const active = isRouteActiveRef.current(line);
@@ -298,22 +311,29 @@ export default function BusStopLayer({
     // (and thus __busRouteToggle) hasn't been registered yet. Clickers
     // should call `window.__dispatchBusRouteToggle(line)`; if the map
     // isn't ready we queue requests in `window.__busRouteToggleQueue`.
-    window.__dispatchBusRouteToggle = (line) => {
-      if (window.__busRouteToggle) return window.__busRouteToggle(line);
+    window.__dispatchBusRouteToggle = (line, atcoCode = null, lat = null, lon = null) => {
+      if (window.__busRouteToggle) return window.__busRouteToggle(line, atcoCode, lat, lon);
       window.__busRouteToggleQueue = window.__busRouteToggleQueue || [];
-      window.__busRouteToggleQueue.push(line);
+      window.__busRouteToggleQueue.push([line, atcoCode, lat, lon]);
     };
 
     // If any toggles were queued before the map mounted, drain them now.
     try {
       if (Array.isArray(window.__busRouteToggleQueue) && window.__busRouteToggleQueue.length > 0) {
         (async () => {
-          for (const l of window.__busRouteToggleQueue.slice()) {
+          for (const item of window.__busRouteToggleQueue.slice()) {
             try {
               // await each toggle to avoid overwhelming any rate limits
               // inside the route layer logic.
               // eslint-disable-next-line no-await-in-loop
-              await window.__busRouteToggle(l);
+              if (Array.isArray(item)) {
+                // eslint-disable-next-line no-await-in-loop
+                await window.__busRouteToggle(item[0], item[1], item[2], item[3]);
+              } else {
+                // backward-compat: queued as a single line string
+                // eslint-disable-next-line no-await-in-loop
+                await window.__busRouteToggle(item);
+              }
             } catch (e) {
               // ignore individual failures
             }

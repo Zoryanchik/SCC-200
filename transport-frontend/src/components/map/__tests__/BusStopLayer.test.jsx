@@ -503,7 +503,7 @@ describe('BusStopLayer — window.__busRouteToggle chip highlight', () => {
       await window.__busRouteToggle('1');
     });
 
-    expect(onToggleRoute).toHaveBeenCalledWith('1');
+    expect(onToggleRoute).toHaveBeenCalledWith('1', { atcoCode: null, lat: null, lon: null });
     expect(btn.textContent).toContain('✓');
     expect(btn.style.background).toMatch(/rgb\(21,\s*101,\s*192\)|#1565C0/);
   });

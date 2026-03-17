@@ -2997,6 +2997,7 @@ async def routes_for_line(
     from fastapi.responses import JSONResponse
 
     # Normalise the line name for cache lookup (case-insensitive)
+    # Note: BODS line identifiers are often coded (e.g. "PC0002407:417:1A").
     line_key = line.strip().upper()
 
     # Configurable thresholds (allow tuning via environment variables)
@@ -3052,13 +3053,28 @@ async def routes_for_line(
     matching_routes: list[int] = []
 
     def _route_matches_line(r_int: int) -> bool:
-        """Return True if route_int's metadata line suffix matches line_key."""
+        """Return True if route_int's metadata indicates it belongs to this line.
+
+        Historically this endpoint matched only the final ":suffix" (e.g. "...:1").
+        That causes collisions (many cities have a "1") and makes coded ids like
+        "PC0002407:417:1" impossible to request directly.
+
+        Rules:
+        - If the request includes ":" treat it as a full coded line id and require
+          exact case-insensitive match.
+        - Otherwise treat it as a human line shorthand and match on the final suffix.
+        """
         try:
             if r_int < 0 or r_int >= len(merged.route_metadata):
                 return False
             meta = merged.route_metadata[r_int] or {}
             raw_line = (meta.get("line_name") or "").strip()
-            rline = raw_line.split(":")[-1].strip().upper()
+            if not raw_line:
+                return False
+            raw_norm = raw_line.upper()
+            if ":" in line_key:
+                return raw_norm == line_key
+            rline = raw_norm.split(":")[-1].strip()
             return rline == line_key
         except Exception:
             return False
@@ -3115,28 +3131,39 @@ async def routes_for_line(
         except Exception:
             pass
 
-    # Fallback: full scan by metadata suffix match.
-    if not matching_routes:
-        matching_routes = [r for r in range(len(merged.route_metadata)) if _route_matches_line(r)]
-
-    # ── Build variants from *journey-level* stop sequences ───────
-    # Using route_stops directly can produce interleaved inbound/outbound
-    # lists (e.g. 98 stops zigzagging across the map).  Instead, for each
-    # matching route we pick the representative journey with the most stops
-    # — a single trip A→B whose stops are in correct geographic order.
+    # Fallback: full scan by metadata match.
     #
-    # Build route_idx → list[journey_idx] mapping.
-    route_journeys: dict[int, list[int]] = {r: [] for r in matching_routes}
-    for j_idx, r_idx in enumerate(merged.journey_to_route):
-        if r_idx in route_journeys:
-            route_journeys[r_idx].append(j_idx)
+    # IMPORTANT: For short, human line keys like "1" this fallback is dangerously
+    # ambiguous across the whole dataset (many towns have a "1"). If the caller
+    # didn't provide a geographic hint (lat/lon) we must not guess, otherwise the
+    # frontend can show a totally different city's line.
+    if not matching_routes:
+        if ":" in line_key or (lat is not None and lon is not None):
+            matching_routes = [r for r in range(len(merged.route_metadata)) if _route_matches_line(r)]
+        else:
+            # No safe way to disambiguate.
+            matching_routes = []
 
-    def _journey_stops(j_idx: int) -> list[dict]:
-        """Extract ordered stop dicts from a single journey."""
+    # ── Build variants from route_stops (not journey_times) ───────────────
+    # We now prefer route_stops because journey_times filtering depends on a
+    # particular date/bucket journey selection, and can accidentally omit
+    # routes that definitely have stop-to-stop section tracks in the DB.
+    #
+    # NOTE: route_stops may contain inbound+outbound interleaving for some
+    # services. We'll still apply the mean/max-gap heuristics below; and the
+    # frontend has additional sanity checks. If we need to split directions,
+    # we can add it later.
+    import math
+
+    def _route_stops_variant(r_int: int) -> list[dict]:
+        """Build ordered stop dicts from merged.route_stops[r_int]."""
         stops = []
-        for entry in merged.journey_times[j_idx]:
-            s_int = entry[0]
-            atco_code = merged.get_atco_code(s_int)
+        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+        for s_int in route_stops or []:
+            try:
+                atco_code = merged.get_atco_code(s_int)
+            except Exception:
+                atco_code = None
             if not atco_code:
                 continue
             coords = coord_map.get(atco_code)
@@ -3146,13 +3173,11 @@ async def routes_for_line(
             name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
             stops.append({
                 "name": name or atco_code,
-                "lat": lat,
-                "lon": lon,
-                "atco_code": atco_code,
+                "lat": float(lat),
+                "lon": float(lon),
+                "atco_code": str(atco_code),
             })
         return stops
-
-    import math
 
     def _mean_gap(stops: list[dict]) -> float:
         """Mean consecutive distance in metres (cheap Euclidean approx)."""
@@ -3168,40 +3193,16 @@ async def routes_for_line(
 
     variants = []
     for r_idx in matching_routes:
-        j_list = route_journeys.get(r_idx) or []
-        if not j_list:
+        s = _route_stops_variant(r_idx)
+        if len(s) < min_stops:
             continue
-
-        # Pick the best representative journey.  We want:
-        #  - enough stops to trace the route (>= 10)
-        #  - tight stop spacing (low mean gap) — avoids circular/merged
-        #    journeys whose stops zigzag across the map.
-        # Strategy: build stops for a few candidate journeys, pick the
-        # one with the lowest mean consecutive gap.
-        # To keep it fast, sample up to 8 candidates per route.
-        candidates = sorted(
-            j_list, key=lambda j: len(merged.journey_times[j]), reverse=True
-        )[:8]
-
-        best_stops = None
-        best_gap = float("inf")
-        for j in candidates:
-            s = _journey_stops(j)
-            if len(s) < min_stops:
-                continue
-            gap = _mean_gap(s)
-            if gap < best_gap:
-                best_gap = gap
-                best_stops = s
-
-        if best_stops and len(best_stops) >= 2:
-            meta = merged.route_metadata[r_idx] or {}
-            route_id = meta.get("route_id", f"route_{r_idx}")
-            variants.append({
-                "route_int": int(r_idx),
-                "route_id": route_id,
-                "stops": best_stops,
-            })
+        meta = merged.route_metadata[r_idx] or {}
+        route_id = meta.get("route_id", f"route_{r_idx}")
+        variants.append({
+            "route_int": int(r_idx),
+            "route_id": route_id,
+            "stops": s,
+        })
 
     # De-duplicate: keep only the most-distinct variants (by ATCO signature).
     seen_sigs: set[tuple] = set()
@@ -3385,28 +3386,39 @@ async def routes_for_stop(atco: str):
         for rid in merged.stop_to_routes[s]:
             matching_route_idxs.add(rid)
 
-    # Helper to build journey stops (reuse code from routes_for_line)
-    def _journey_stops(j_idx: int) -> list[dict]:
+    # Prefer route_stops so the result set is entirely constrained by stop_to_routes.
+    # This avoids any journey_times-based fallback accidentally pulling in a different
+    # city's same-numbered line.
+    atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+    coord_map: Dict[str, tuple] = {}
+    if atco_loader:
+        try:
+            coord_map = atco_loader.get_all_stop_coords()
+        except Exception:
+            coord_map = {}
+
+    def _route_stops_variant(r_int: int) -> list[dict]:
+        """Build ordered stop dicts from merged.route_stops[r_int]."""
         stops = []
-        # try to use atco loader coords via base cache
-        atco = _base_cache.get("atco_loader") if _base_cache else None
-        coord_map = {}
-        if atco:
+        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+        for s_int in route_stops or []:
             try:
-                coord_map = atco.get_all_stop_coords()
+                code = merged.get_atco_code(s_int)
             except Exception:
-                coord_map = {}
-        for entry in merged.journey_times[j_idx]:
-            s_int = entry[0]
-            atco_code = merged.get_atco_code(s_int)
-            if not atco_code:
+                code = None
+            if not code:
                 continue
-            coords = coord_map.get(atco_code)
+            coords = coord_map.get(code)
             if not coords:
                 continue
             lat, lon = coords
             name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
-            stops.append({"name": name or atco_code, "lat": lat, "lon": lon, "atco_code": atco_code})
+            stops.append({
+                "name": name or code,
+                "lat": float(lat),
+                "lon": float(lon),
+                "atco_code": str(code),
+            })
         return stops
 
     import math
@@ -3423,25 +3435,16 @@ async def routes_for_stop(atco: str):
 
     variants = []
     for r_idx in sorted(matching_route_idxs):
-        # find journeys belonging to this route
-        j_list = [j for j, rid in enumerate(merged.journey_to_route) if rid == r_idx]
-        if not j_list:
+        s = _route_stops_variant(r_idx)
+        if len(s) < min_stops:
             continue
-        candidates = sorted(j_list, key=lambda j: len(merged.journey_times[j]), reverse=True)[:8]
-        best_stops = None
-        best_gap = float('inf')
-        for j in candidates:
-            s = _journey_stops(j)
-            if len(s) < min_stops:
-                continue
-            gap = _mean_gap(s)
-            if gap < best_gap:
-                best_gap = gap
-                best_stops = s
-        if best_stops and len(best_stops) >= 2:
-            meta = merged.route_metadata[r_idx] or {}
-            route_id = meta.get("route_id", f"route_{r_idx}")
-            variants.append({"route_id": route_id, "stops": best_stops})
+        meta = merged.route_metadata[r_idx] or {}
+        route_id = meta.get("route_id", f"route_{r_idx}")
+        variants.append({
+            "route_int": int(r_idx),
+            "route_id": route_id,
+            "stops": s,
+        })
 
     # Deduplicate, sort, filter (same as routes_for_line)
     seen_sigs = set()
@@ -3470,12 +3473,313 @@ async def routes_for_stop(atco: str):
         if filtered:
             unique = filtered
 
-    # If no variants found via merged journeys, return empty list.
-    # This endpoint is intentionally in-memory only.
+    # If no variants found via stop_to_routes, return empty list.
     if not unique:
         return {"atco": atco_code, "routes": []}
 
+    # Attach fragment-only geometry, mirroring /routes/line/{line}.
+    for v in unique:
+        try:
+            r_int = v.get('route_int')
+            if not isinstance(r_int, int):
+                continue
+
+            stitched = None
+            try:
+                if hasattr(merged, 'get_route_link_tracks'):
+                    link_map = merged.get_route_link_tracks(r_int)
+                else:
+                    links = getattr(merged, 'route_link_tracks', None)
+                    link_map = links[r_int] if (links and r_int < len(links)) else None
+
+                if link_map and isinstance(link_map, dict):
+                    stops = v.get('stops') or []
+                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+                    if len(atcos) >= 2:
+                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+                        atco_to_stop = {}
+                        for s_int in route_stops or []:
+                            try:
+                                c = merged.get_atco_code(s_int)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop[str(c)] = s_int
+
+                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
+                        stop_ints = [x for x in stop_ints if x is not None]
+                        if len(stop_ints) >= 2:
+                            stitched_pts = []
+                            ok = True
+                            for a, b in zip(stop_ints, stop_ints[1:]):
+                                seg = link_map.get((a, b))
+                                if not seg:
+                                    rev = link_map.get((b, a))
+                                    if rev:
+                                        seg = list(reversed(rev))
+                                if not seg:
+                                    ok = False
+                                    break
+                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
+                                    stitched_pts.extend(seg[1:])
+                                else:
+                                    stitched_pts.extend(seg)
+                            if ok and len(stitched_pts) >= 2:
+                                stitched = stitched_pts
+            except Exception:
+                stitched = None
+
+            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
+                coords = []
+                for pt in stitched:
+                    try:
+                        lat_pt, lon_pt = pt
+                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
+                            coords.append([float(lat_pt), float(lon_pt)])
+                    except Exception:
+                        continue
+                if len(coords) >= 2:
+                    v['geometry'] = coords
+                    v['geometry_source'] = 'route_link_tracks'
+            else:
+                try:
+                    v.pop('geometry', None)
+                    v.pop('geometry_source', None)
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
     return {"atco": atco_code, "routes": unique}
+
+
+@app.get("/routes/line_at_stop/{atco}/{line}")
+async def routes_for_line_at_stop(
+    atco: str,
+    line: str,
+):
+    """Return route variants for a line *restricted to routes serving a stop*.
+
+    This endpoint is designed to eliminate ambiguity for short line names like
+    "1" by only considering route_ints from merged.stop_to_routes for the given
+    ATCO stop.
+
+    Response mirrors `/routes/line/{line}`:
+
+        {"line": "1", "variants": [ {"route_id": "...", "stops": [...], "geometry": [...] }, ... ]}
+    """
+    from fastapi.responses import JSONResponse
+
+    atco_code = atco.strip()
+    line_key = line.strip().upper()
+
+    # thresholds (same as routes_for_line)
+    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '6'))
+    max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
+    mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
+
+    try:
+        merged, _router, _walking = get_router_for_date(datetime.now().strftime("%Y-%m-%d"))
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Identify stop_int(s) for this ATCO code
+    matching_stop_ints: list[int] = []
+    for s_int in range(len(merged.stop_to_routes)):
+        try:
+            code = merged.get_atco_code(s_int)
+        except Exception:
+            code = None
+        if code == atco_code:
+            matching_stop_ints.append(s_int)
+
+    if not matching_stop_ints:
+        return {"line": line, "variants": []}
+
+    # Candidate route_ints are strictly those serving this stop
+    candidate_routes: set[int] = set()
+    for s_int in matching_stop_ints:
+        try:
+            for r_int in merged.stop_to_routes[s_int]:
+                candidate_routes.add(int(r_int))
+        except Exception:
+            continue
+
+    def _route_matches_line(r_int: int) -> bool:
+        try:
+            if r_int < 0 or r_int >= len(merged.route_metadata):
+                return False
+            meta = merged.route_metadata[r_int] or {}
+            raw_line = (meta.get("line_name") or "").strip()
+            if not raw_line:
+                return False
+            raw_norm = raw_line.upper()
+            if ":" in line_key:
+                return raw_norm == line_key
+            return raw_norm.split(":")[-1].strip() == line_key
+        except Exception:
+            return False
+
+    matching_routes = sorted([r for r in candidate_routes if _route_matches_line(r)])
+    if not matching_routes:
+        return {"line": line, "variants": []}
+
+    # NaPTAN coordinate lookup
+    atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+    coord_map: Dict[str, tuple] = {}
+    if atco_loader:
+        try:
+            coord_map = atco_loader.get_all_stop_coords()
+        except Exception:
+            coord_map = {}
+
+    def _route_stops_variant(r_int: int) -> list[dict]:
+        stops: list[dict] = []
+        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+        for s_int in route_stops or []:
+            try:
+                code = merged.get_atco_code(s_int)
+            except Exception:
+                code = None
+            if not code:
+                continue
+            coords = coord_map.get(code)
+            if not coords:
+                continue
+            lat0, lon0 = coords
+            name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
+            stops.append({
+                "name": name or code,
+                "lat": float(lat0),
+                "lon": float(lon0),
+                "atco_code": str(code),
+            })
+        return stops
+
+    import math
+    def _mean_gap(stops: list[dict]) -> float:
+        if len(stops) < 2:
+            return 0.0
+        total = 0.0
+        cos_lat = math.cos(math.radians(stops[0]["lat"]))
+        for i in range(len(stops) - 1):
+            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+            total += math.sqrt(dlat * dlat + dlon * dlon)
+        return total / (len(stops) - 1)
+
+    variants: list[dict] = []
+    for r_int in matching_routes:
+        stops = _route_stops_variant(r_int)
+        if len(stops) < min_stops:
+            continue
+        meta = merged.route_metadata[r_int] or {}
+        route_id = meta.get("route_id", f"route_{r_int}")
+        variants.append({
+            "route_int": int(r_int),
+            "route_id": route_id,
+            "stops": stops,
+        })
+
+    # Deduplicate and keep a few most distinct variants
+    seen_sigs: set[tuple] = set()
+    unique: list[dict] = []
+    for v in variants:
+        sig = tuple(s["atco_code"] for s in v.get("stops") or [])
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(v)
+    unique.sort(key=lambda v: len(v.get("stops") or []), reverse=True)
+    unique = unique[:3]
+
+    # Apply the same mean/max gap heuristics as /routes/line
+    if unique:
+        def _max_gap(stops: list[dict]) -> float:
+            cos_lat = math.cos(math.radians(stops[0]["lat"]))
+            mx = 0.0
+            for i in range(len(stops) - 1):
+                dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+                dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+                mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
+            return mx
+
+        mean_gaps = [_mean_gap(v["stops"]) for v in unique]
+        best = min(mean_gaps)
+        filtered = [v for v, mg in zip(unique, mean_gaps) if mg <= best * mean_gap_mult and _max_gap(v["stops"]) < max_gap_m]
+        if filtered:
+            unique = filtered
+
+    # Attach fragment-only geometry (route_link_tracks), same as /routes/line.
+    for v in unique:
+        try:
+            r_int = v.get('route_int')
+            if not isinstance(r_int, int):
+                continue
+            stitched = None
+
+            try:
+                if hasattr(merged, 'get_route_link_tracks'):
+                    link_map = merged.get_route_link_tracks(r_int)
+                else:
+                    links = getattr(merged, 'route_link_tracks', None)
+                    link_map = links[r_int] if (links and r_int < len(links)) else None
+
+                if link_map and isinstance(link_map, dict):
+                    stops = v.get('stops') or []
+                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+                    if len(atcos) >= 2:
+                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+                        atco_to_stop = {}
+                        for s_int in route_stops or []:
+                            try:
+                                c = merged.get_atco_code(s_int)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop[str(c)] = s_int
+
+                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
+                        stop_ints = [x for x in stop_ints if x is not None]
+                        if len(stop_ints) >= 2:
+                            stitched_pts = []
+                            ok = True
+                            for a, b in zip(stop_ints, stop_ints[1:]):
+                                seg = link_map.get((a, b))
+                                if not seg:
+                                    rev = link_map.get((b, a))
+                                    if rev:
+                                        seg = list(reversed(rev))
+                                if not seg:
+                                    ok = False
+                                    break
+                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
+                                    stitched_pts.extend(seg[1:])
+                                else:
+                                    stitched_pts.extend(seg)
+                            if ok and len(stitched_pts) >= 2:
+                                stitched = stitched_pts
+            except Exception:
+                stitched = None
+
+            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
+                coords = []
+                for pt in stitched:
+                    try:
+                        lat_pt, lon_pt = pt
+                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
+                            coords.append([float(lat_pt), float(lon_pt)])
+                    except Exception:
+                        continue
+                if len(coords) >= 2:
+                    v['geometry'] = coords
+                    v['geometry_source'] = 'route_link_tracks'
+            else:
+                v.pop('geometry', None)
+                v.pop('geometry_source', None)
+        except Exception:
+            continue
+
+    return {"line": line, "variants": unique}
 
 
 # — Static files & frontend ————————————————————————————————

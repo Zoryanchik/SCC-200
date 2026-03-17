@@ -36,7 +36,7 @@ Updated: 2026-03-13
 - [x] Implement `/rail/departures/{station}` endpoint
 - [ ] Implement timetable filtering by time and service
 - [ ] Implement station selection via map interaction (tap stop → select as origin/destination)
-- [ ] Implement display of estimated arrival times at stations
+- [x] Implement display of estimated arrival times at stations
 - [x] Implement pricing display for routes and ticket types (frontend)
 - [x] Implement `/pricing` endpoint (distance-based stub)
 - [ ] Implement frequently / recently used routes feature
@@ -75,7 +75,7 @@ Updated: 2026-03-13
 - [x] Fix duplicate React key errors (useBusStops dedup, unique keys in BusStopLayer/RouteLineLayer)
 - [x] Add mock route data fallback in `routeLineApi.js` — when backend is unreachable, return hardcoded Lancaster-area route so the feature is testable without a live server
 - [x] Highlight selected bus stop marker when popup is open (enlarge/glow/color change)
-- [ ] Road-following route lines via OSRM/transport API (`bus/times/{stopCode}`) — replace straight stop-to-stop with road geometry
+- [x] Road-following route lines via OSRM/transport API (`bus/times/{stopCode}`) — replace straight stop-to-stop with road geometry
 - [x] Verify button highlight color toggle works (dark blue + ✓ on click)
 - [ ] Update/write frontend tests for BusStopLayer, RouteLineLayer, useRouteLine, routeLineApi
 - [ ] Update/write backend tests for `/routes/line/{line}` endpoint

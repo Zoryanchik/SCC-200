@@ -76,10 +76,40 @@ export const MOCK_ROUTES = {
  * @param {string} line  – the line name, e.g. "100" or "1A"
  * @returns {Promise<{ line: string, variants: Array<{ route_id: string, stops: Array }> }>}
  */
-export async function fetchRouteLine(line) {
-  const res = await fetch(`${API_BASE}/routes/line/${encodeURIComponent(line)}`);
+export async function fetchRouteLine(line, opts = {}) {
+  let url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
+  try {
+    const lat = opts && opts.lat != null ? Number(opts.lat) : null;
+    const lon = opts && opts.lon != null ? Number(opts.lon) : null;
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      const qs = new URLSearchParams({ lat: String(lat), lon: String(lon) });
+      url += `?${qs.toString()}`;
+    }
+  } catch (e) {
+    // ignore
+  }
+  const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch route line "${line}": ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Fetch route variants for a line restricted to routes that serve a stop.
+ * Throws on any network or HTTP error.
+ *
+ * @param {string} atcoCode
+ * @param {string} line
+ * @returns {Promise<{ line: string, variants: Array }>} 
+ */
+export async function fetchRouteLineAtStop(atcoCode, line) {
+  const atcoKey = String(atcoCode || '').trim();
+  if (!atcoKey) throw new Error('Missing atcoCode');
+  const url = `${API_BASE}/routes/line_at_stop/${encodeURIComponent(atcoKey)}/${encodeURIComponent(line)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch route line "${line}" at stop "${atcoKey}": ${res.status}`);
   }
   return res.json();
 }
@@ -95,7 +125,7 @@ export async function fetchRouteLine(line) {
  * @param {string} line  – the line name, e.g. "100" or "1A"
  * @returns {Promise<{ line: string, variants: Array }>}
  */
-export async function fetchRouteLineWithFallback(line) {
+export async function fetchRouteLineWithFallback(line, opts = {}) {
   // Try the real backend but don't block the UI forever — use a 5s
   // timeout. Only after the timeout or an explicit network failure do
   // we fall back to the mock data. This avoids instant fallback that
@@ -104,7 +134,18 @@ export async function fetchRouteLineWithFallback(line) {
   const timeoutMs = 5000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${API_BASE}/routes/line/${encodeURIComponent(line)}`, { signal: controller.signal });
+    let url = `${API_BASE}/routes/line/${encodeURIComponent(line)}`;
+    try {
+      const lat = opts && opts.lat != null ? Number(opts.lat) : null;
+      const lon = opts && opts.lon != null ? Number(opts.lon) : null;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        const qs = new URLSearchParams({ lat: String(lat), lon: String(lon) });
+        url += `?${qs.toString()}`;
+      }
+    } catch (e) {
+      // ignore
+    }
+    const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
@@ -113,6 +154,19 @@ export async function fetchRouteLineWithFallback(line) {
     const msg = err && err.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err && err.message) ? err.message : String(err);
     // eslint-disable-next-line no-console
     console.warn(`Route line API unavailable for "${line}" (${msg}), using mock data`);
+
+    // For ambiguous short lines ("1", "2", ...), mock fallback can be misleading
+    // once the backend requires geo context. Only apply this stricter behavior
+    // for *network-ish* failures (including timeouts). For HTTP errors we keep
+    // the historical behavior of falling back to mock routes so tests/dev mode
+    // stay predictable.
+    const isHttpError = err && typeof err.message === 'string' && err.message.startsWith('HTTP ');
+    const isAmbiguous = typeof line === 'string' && !line.includes(':') && /^\d{1,3}[A-Z]?$/.test(line.trim());
+    const hasGeo = !!(opts && Number.isFinite(Number(opts.lat)) && Number.isFinite(Number(opts.lon)));
+    if (!isHttpError && isAmbiguous && !hasGeo) {
+      return { line, variants: [] };
+    }
+
     return MOCK_ROUTES[line] ?? { line, variants: [] };
   }
 }

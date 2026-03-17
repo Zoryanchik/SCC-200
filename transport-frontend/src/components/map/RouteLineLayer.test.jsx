@@ -8,7 +8,12 @@ import { act, render } from '@testing-library/react';
 // Mock react-leaflet components
 vi.mock('react-leaflet', () => ({
   Polyline: ({ positions, pathOptions, children }) => (
-    <div data-testid="polyline" data-positions={JSON.stringify(positions)} data-color={pathOptions?.color}>
+    <div
+      data-testid="polyline"
+      data-positions={JSON.stringify(positions)}
+      data-color={pathOptions?.color}
+      data-dash-array={pathOptions?.dashArray}
+    >
       {children}
     </div>
   ),
@@ -70,6 +75,19 @@ describe('RouteLineLayer', () => {
 
     const polylines = getAllByTestId('polyline');
     expect(polylines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders a dashed polyline when route is marked dashed', () => {
+    const routes = new Map([
+      ['100', { data: MOCK_ROUTE_WITH_GEOMETRY, style: { dashed: true } }],
+    ]);
+    const { getAllByTestId } = render(<RouteLineLayer activeRoutes={routes} />);
+    const polylines = getAllByTestId('polyline');
+    // Underlay + top line.
+    expect(polylines.length).toBeGreaterThanOrEqual(2);
+    for (const p of polylines) {
+      expect(p.getAttribute('data-dash-array')).toBe('8 6');
+    }
   });
 
   it('renders circle markers for stops', () => {

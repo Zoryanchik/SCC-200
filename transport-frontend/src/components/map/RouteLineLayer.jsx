@@ -43,7 +43,7 @@ const VARIANT_COLORS = [
  * @param {{ routeData: object, lineColor?: string, onRouteClick?: function }} props
  *   routeData — the { line, variants } object from the API / cache
  */
-function SingleRouteLine({ routeData, onRouteClick }) {
+function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
   if (!routeData || !routeData.variants || routeData.variants.length === 0) {
     return null;
   }
@@ -195,7 +195,8 @@ function SingleRouteLine({ routeData, onRouteClick }) {
         
         if (positions.length < 2) return null;
 
-        const color = VARIANT_COLORS[idx % VARIANT_COLORS.length];
+  const color = VARIANT_COLORS[idx % VARIANT_COLORS.length];
+  const dashArray = dashed || idx > 0 ? '8 6' : undefined;
 
         return (
           <React.Fragment key={`${routeData.line}-v${idx}`}>
@@ -220,7 +221,7 @@ function SingleRouteLine({ routeData, onRouteClick }) {
                 color: '#00ffff',
                 weight: 6,
                 opacity: 0.9,
-                dashArray: idx > 0 ? '8 6' : undefined,
+                dashArray,
               }}
             >
               <HoverTooltip sticky delayMs={500}>
@@ -249,7 +250,7 @@ function SingleRouteLine({ routeData, onRouteClick }) {
                 color,
                 weight: 4,
                 opacity: 0.8,
-                dashArray: idx > 0 ? '8 6' : undefined, // dash secondary variants
+                dashArray, // dash secondary variants (and optionally primary)
               }}
             >
               <HoverTooltip sticky delayMs={500}>
@@ -299,13 +300,18 @@ export default function RouteLineLayer({ activeRoutes, onRouteClick }) {
 
   return (
     <>
-      {entries.map(([line, routeData]) => (
+      {entries.map(([line, value]) => {
+        const routeData = value && value.data ? value.data : value;
+        const dashed = Boolean(value && value.style && value.style.dashed);
+        return (
         <SingleRouteLine 
           key={line} 
           routeData={routeData} 
+          dashed={dashed}
           onRouteClick={onRouteClick} 
         />
-      ))}
+        );
+      })}
     </>
   );
 }

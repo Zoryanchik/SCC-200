@@ -1573,9 +1573,21 @@ function HoverWinnerController({
 			}
 		} catch (e) {}
 		// Fetch each line if not already cached
+		// Include current map center as a geo hint so short line names like "1"
+		// resolve to the local city network rather than an arbitrary global match.
+		let centerLat = null;
+		let centerLon = null;
+		try {
+			const c = mapRef && mapRef.current ? mapRef.current.getCenter() : null;
+			if (c && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) {
+				centerLat = Number(c.lat);
+				centerLon = Number(c.lng);
+			}
+		} catch (e) {}
+
 		for (const line of lines) {
 			if (routeDataCache[line]) continue;
-			fetchRouteLineWithFallback(line).then((data) => {
+			fetchRouteLineWithFallback(line, { lat: centerLat, lon: centerLon }).then((data) => {
 				if (!mounted) return;
 				setRouteDataCache((prev) => ({ ...prev, [line]: data }));
 			}).catch(() => {

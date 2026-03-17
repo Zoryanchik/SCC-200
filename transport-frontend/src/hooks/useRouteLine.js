@@ -8,7 +8,7 @@
  *   isActive     : (line: string) => boolean
  */
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { fetchRouteLineWithFallback } from '../services/routeLineApi';
+import { fetchRouteLineAtStop, fetchRouteLineWithFallback } from '../services/routeLineApi';
 
 export function useRouteLine() {
   // Map<string, routeData> — only contains entries for active lines.
@@ -16,7 +16,8 @@ export function useRouteLine() {
   // recreate the Map on every render (which was the cause of the
   // rapid-refresh bug last time).
   const cacheRef = useRef(new Map());   // line → routeData (persists even after toggle off)
-  const activeRef = useRef(new Map());  // line → routeData (only currently active)
+  // line → { data: routeData, style?: { dashed?: boolean } }
+  const activeRef = useRef(new Map());  // only currently active
 
   // Bump this to force a re-render after mutating activeRef
   const [tick, setTick] = useState(0);
@@ -27,7 +28,7 @@ export function useRouteLine() {
    * isn't cached yet, fetch it from the backend first.
    */
   const toggleRoute = useCallback(
-    async (line) => {
+    async (line, opts = {}) => {
       if (activeRef.current.has(line)) {
         // Turn OFF — just remove from the active map
         activeRef.current.delete(line);
@@ -39,7 +40,11 @@ export function useRouteLine() {
       let data = cacheRef.current.get(line);
       if (!data) {
         try {
-          data = await fetchRouteLineWithFallback(line);
+          if (opts && opts.atcoCode) {
+            data = await fetchRouteLineAtStop(opts.atcoCode, line);
+          } else {
+            data = await fetchRouteLineWithFallback(line, opts);
+          }
           cacheRef.current.set(line, data);
         } catch (err) {
           console.error(`[useRouteLine] Failed to fetch line "${line}":`, err);
@@ -47,7 +52,8 @@ export function useRouteLine() {
         }
       }
 
-      activeRef.current.set(line, data);
+      const dashed = Boolean(opts && opts.atcoCode);
+      activeRef.current.set(line, { data, style: { dashed } });
       bump();
     },
     [bump],

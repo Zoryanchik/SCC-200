@@ -173,7 +173,9 @@ describe('fetchRouteLineWithFallback', () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
     const result = await fetchRouteLineWithFallback('1');
-    expect(result).toEqual(MOCK_ROUTES['1']);
+    // For ambiguous short lines we avoid mock fallback unless a geo context
+    // is provided (otherwise "1" could point to the wrong city).
+    expect(result).toEqual({ line: '1', variants: [] });
   });
 
   it('returns MOCK_ROUTES entry when the backend returns HTTP error', async () => {
@@ -188,6 +190,13 @@ describe('fetchRouteLineWithFallback', () => {
 
     const result = await fetchRouteLineWithFallback('999');
     expect(result).toEqual({ line: '999', variants: [] });
+  });
+
+  it('allows mock fallback for ambiguous lines when geo context exists', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+    const result = await fetchRouteLineWithFallback('1', { lat: 54.046, lon: -2.8 });
+    expect(result).toEqual(MOCK_ROUTES['1']);
   });
 
   it('preserves the correct line name in the empty-variants fallback', async () => {
@@ -214,8 +223,13 @@ describe('fetchRouteLineWithFallback', () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('down'));
 
     for (const line of Object.keys(MOCK_ROUTES)) {
+      const isAmbiguous = typeof line === 'string' && !line.includes(':') && /^\d{1,3}[A-Z]?$/.test(line.trim());
       const result = await fetchRouteLineWithFallback(line);
-      expect(result).toEqual(MOCK_ROUTES[line]);
+      if (isAmbiguous) {
+        expect(result).toEqual({ line, variants: [] });
+      } else {
+        expect(result).toEqual(MOCK_ROUTES[line]);
+      }
     }
   });
 });
