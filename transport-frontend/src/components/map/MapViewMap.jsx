@@ -855,7 +855,7 @@ const MapController = ({ onReady, onMoveEnd, selectedVehicleTrack, onClearSelect
 		} catch (e) {
 			// ignore if map not ready
 		}
-		onReady(map);
+		if (onReady) onReady(map);
 		// Fire initial center on mount so the hook receives coordinates immediately
 		if (onMoveEnd) {
 			const center = map.getCenter();
@@ -1154,6 +1154,130 @@ export default function MapViewMap({
 	onOpenPopupSignature = null,
 }) {
 
+	// ── Hover-intent (0.7s) for bus icons ───────────────────────────────────
+	// We only kick off any hover-card request once the cursor has remained on
+	// the SAME bus marker for >= 700ms. This prevents expensive calls when the
+	// user is just moving across a cluster.
+	//
+	// Contract:
+	// - `hoveredMarkerId` tracks what the cursor is currently over.
+	// - `activeHoverId` is the marker that "won" the 0.7s dwell and is allowed to
+	//   trigger requests / show richer UI.
+	const debugHoverIntent = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('HOVER_INTENT_DEBUG') === '1');
+	const [hoveredMarkerId, setHoveredMarkerId] = React.useState(null);
+	const hoveredMarkerIdRef = React.useRef(null);
+	const hoveredMarkerSigRef = React.useRef(null);
+	const hoverTimerRef = React.useRef(null);
+	const [activeHoverId, setActiveHoverId] = React.useState(null);
+	const activeHoverReqTokenRef = React.useRef(0);
+	const activeHoverIdRef = React.useRef(null);
+
+	React.useEffect(() => {
+		hoveredMarkerIdRef.current = hoveredMarkerId;
+	}, [hoveredMarkerId]);
+
+	React.useEffect(() => {
+		activeHoverIdRef.current = activeHoverId;
+	}, [activeHoverId]);
+
+	// Debugging aid: verify that the SOURCE OF TRUTH state actually clears when the UI
+	// looks “sticky”. Enable by setting localStorage.HOVER_INTENT_DEBUG = '1'.
+	React.useEffect(() => {
+		try {
+			if (!debugHoverIntent) return;
+			console.debug('[hoverIntent] state', { hoveredMarkerId, activeHoverId });
+		} catch (e) {
+			// ignore
+		}
+	}, [debugHoverIntent, hoveredMarkerId, activeHoverId]);
+
+	React.useEffect(() => {
+		return () => {
+			try {
+				if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+			} catch (e) {
+				// ignore
+			}
+		};
+	}, []);
+
+	const beginHoverIntent = React.useCallback((marker) => {
+		try {
+			if (!marker || marker.type !== 'bus') return;
+			// Ignore unmatched/grey buses (no hover-card requests).
+			if (!isBusMappedLocal(marker)) return;
+			// If we already have an active hover on a different marker, clear it now.
+			// This prevents “sticky” hover cards when sliding across dense clusters
+			// where mouseout sometimes doesn’t fire for the old marker.
+			setActiveHoverId((prev) => (prev && prev !== marker.id ? null : prev));
+			try {
+				if (debugHoverIntent) console.debug('[hoverIntent] begin', { id: marker.id, prevActive: activeHoverIdRef.current });
+			} catch (e) {
+				// ignore
+			}
+			const sig = makeMarkerSignature(marker);
+			setHoveredMarkerId(marker.id);
+			hoveredMarkerSigRef.current = sig;
+			// Cancel any prior intent timer.
+			if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+			const tokenAtStart = ++activeHoverReqTokenRef.current;
+			hoverTimerRef.current = setTimeout(() => {
+				// Only activate if we're still over the same logical vehicle.
+				if (activeHoverReqTokenRef.current !== tokenAtStart) return;
+				if (hoveredMarkerIdRef.current !== marker.id) return;
+				if (hoveredMarkerSigRef.current !== sig) return;
+				try {
+					if (debugHoverIntent) console.debug('[hoverIntent] activate', { id: marker.id });
+				} catch (e) {
+					// ignore
+				}
+				setActiveHoverId(marker.id);
+			}, 700);
+		} catch (e) {
+			// ignore
+		}
+	}, []);
+
+	// Defensive cleanup: if we’re no longer hovering anything, ensure any
+	// active hover is cleared. This catches edge cases where we miss a
+	// marker mouseout event due to overlapping DOM/SVG layers.
+	React.useEffect(() => {
+		if (!hoveredMarkerId) {
+			try {
+				if (debugHoverIntent && activeHoverIdRef.current) console.debug('[hoverIntent] hovered cleared -> clear active', { prevActive: activeHoverIdRef.current });
+			} catch (e) {
+				// ignore
+			}
+			setActiveHoverId(null);
+		}
+	}, [hoveredMarkerId]);
+
+	const cancelHoverIntent = React.useCallback((marker) => {
+		try {
+			if (!marker || marker.type !== 'bus') return;
+			try {
+				if (debugHoverIntent) console.debug('[hoverIntent] cancel', { id: marker.id, prevActive: activeHoverIdRef.current, prevHovered: hoveredMarkerIdRef.current });
+			} catch (e) {
+				// ignore
+			}
+			setHoveredMarkerId((prev) => (prev === marker.id ? null : prev));
+			hoveredMarkerSigRef.current = null;
+			try {
+				if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+			} catch (e) {
+				// ignore
+			}
+			// Invalidate any pending timer callback.
+			try { activeHoverReqTokenRef.current += 1; } catch (e) { /* ignore */ }
+			setActiveHoverId((prev) => (prev === marker.id ? null : prev));
+		} catch (e) {
+			// ignore
+		}
+	}, []);
+
+	// NOTE: map-level mousemove picking must live in a descendant of <MapContainer>.
+	// See <HoverWinnerController /> rendered inside the map.
+
 // Helper: create a compact signature for a marker that changes when the
 // logical vehicle changes. Prefer backend-provided identifiers (journey id,
 // vehicle ref) and fall back to route number + quantized position.
@@ -1165,6 +1289,173 @@ const makeMarkerSignature = (m) => {
 		return String(m && m.id);
 	}
 };
+
+// Convert Leaflet layer points to pixel space and pick a single nearest bus marker
+// within a small radius. This is used to avoid relying on marker mouseout events,
+// which can be missed when sliding across dense overlapping icons.
+const DEFAULT_HOVER_PICK_RADIUS_PX = 16;
+// Hysteresis helps when markers are close: once a marker is picked, we keep it
+// until the cursor moves a little further away, reducing flapping and “sticky”
+// cases where we never truly leave the previous marker’s radius.
+const DEFAULT_HOVER_PICK_ENTER_RADIUS_PX = DEFAULT_HOVER_PICK_RADIUS_PX;
+const DEFAULT_HOVER_PICK_LEAVE_RADIUS_PX = 22;
+
+const _markerMouseD2 = ({ map, latlng, marker }) => {
+	try {
+		if (!map || typeof map.latLngToLayerPoint !== 'function') return null;
+		if (!latlng || !marker) return null;
+		const pos = Array.isArray(marker.position) ? marker.position : null;
+		if (!pos || pos.length < 2) return null;
+		const mousePt = map.latLngToLayerPoint(latlng);
+		if (!mousePt) return null;
+		const pt = map.latLngToLayerPoint({ lat: pos[0], lng: pos[1] });
+		if (!pt) return null;
+		const dx = pt.x - mousePt.x;
+		const dy = pt.y - mousePt.y;
+		return dx * dx + dy * dy;
+	} catch (e) {
+		return null;
+	}
+};
+const pickNearestBusMarker = ({ markers, map, latlng, radiusPx = DEFAULT_HOVER_PICK_RADIUS_PX }) => {
+	try {
+		if (!map || typeof map.latLngToLayerPoint !== 'function') return null;
+		if (!latlng) return null;
+		if (!Array.isArray(markers) || markers.length === 0) return null;
+		const mousePt = map.latLngToLayerPoint(latlng);
+		if (!mousePt) return null;
+
+		let best = null;
+		let bestD2 = radiusPx * radiusPx;
+		for (const m of markers) {
+			if (!m || m.type !== 'bus') continue;
+			if (!isBusMappedLocal(m)) continue;
+			const pos = Array.isArray(m.position) ? m.position : null;
+			if (!pos || pos.length < 2) continue;
+			const pt = map.latLngToLayerPoint({ lat: pos[0], lng: pos[1] });
+			if (!pt) continue;
+			const dx = pt.x - mousePt.x;
+			const dy = pt.y - mousePt.y;
+			const d2 = dx * dx + dy * dy;
+			if (d2 <= bestD2) {
+				bestD2 = d2;
+				best = m;
+			}
+		}
+		return best;
+	} catch (e) {
+		return null;
+	}
+};
+
+// Internal: hooks-based component that must be rendered under <MapContainer>.
+// It implements the single-winner hover picking on map mousemove.
+function HoverWinnerController({
+	filteredMarkers,
+	setHoveredMarkerId,
+	hoveredMarkerSigRef,
+	hoverTimerRef,
+	activeHoverReqTokenRef,
+	setActiveHoverId,
+	enterRadiusPx = DEFAULT_HOVER_PICK_ENTER_RADIUS_PX,
+	leaveRadiusPx = DEFAULT_HOVER_PICK_LEAVE_RADIUS_PX,
+}) {
+	const map = useMap();
+	const winnerIdRef = React.useRef(null);
+	const candidateIdRef = React.useRef(null);
+	const candidateSigRef = React.useRef(null);
+
+	const clearTimer = React.useCallback(() => {
+		try {
+			if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+		} catch (e) {
+			// ignore
+		}
+	}, [hoverTimerRef]);
+
+	const clearAll = React.useCallback(() => {
+		try {
+			winnerIdRef.current = null;
+			candidateIdRef.current = null;
+			candidateSigRef.current = null;
+			setHoveredMarkerId(null);
+			hoveredMarkerSigRef.current = null;
+			clearTimer();
+			try { activeHoverReqTokenRef.current += 1; } catch (e2) {}
+			setActiveHoverId(null);
+		} catch (e) {
+			// ignore
+		}
+	}, [setHoveredMarkerId, hoveredMarkerSigRef, clearTimer, activeHoverReqTokenRef, setActiveHoverId]);
+
+	useMapEvents({
+		mousemove: (e) => {
+			try {
+				const latlng = e && e.latlng ? e.latlng : null;
+				const markers = Array.isArray(filteredMarkers) ? filteredMarkers : [];
+				const prevWinnerId = winnerIdRef.current;
+				const prevWinner = prevWinnerId ? markers.find((m) => m && m.id === prevWinnerId) : null;
+
+				// If we have a winner and we're still within “leave”, keep it.
+				if (prevWinner) {
+					const prevD2 = _markerMouseD2({ map, latlng, marker: prevWinner });
+					if (prevD2 != null && prevD2 <= leaveRadiusPx * leaveRadiusPx) {
+						return;
+					}
+				}
+
+				// We left the winner radius — immediate hide.
+				if (prevWinnerId) {
+					winnerIdRef.current = null;
+					setActiveHoverId(null);
+				}
+
+				// Pick a new candidate within the tighter enter radius.
+				const picked = pickNearestBusMarker({ markers, map, latlng, radiusPx: enterRadiusPx });
+				if (!picked) {
+					// Nothing under cursor — clear everything.
+					clearAll();
+					return;
+				}
+
+				const nextId = picked.id;
+				const nextSig = makeMarkerSignature(picked);
+				const prevCandidateId = candidateIdRef.current;
+				const prevCandidateSig = candidateSigRef.current;
+				if (prevCandidateId === nextId && prevCandidateSig === nextSig) {
+					// Candidate unchanged; keep waiting for timer.
+					return;
+				}
+
+				// New candidate: arm 0.7s timer.
+				candidateIdRef.current = nextId;
+				candidateSigRef.current = nextSig;
+				setHoveredMarkerId(nextId);
+				hoveredMarkerSigRef.current = nextSig;
+				clearTimer();
+				const tokenAtStart = ++activeHoverReqTokenRef.current;
+				hoverTimerRef.current = setTimeout(() => {
+					try {
+						if (activeHoverReqTokenRef.current !== tokenAtStart) return;
+						if (candidateIdRef.current !== nextId) return;
+						if (candidateSigRef.current !== nextSig) return;
+						winnerIdRef.current = nextId;
+						setActiveHoverId(nextId);
+					} catch (e3) {
+						// ignore
+					}
+				}, 700);
+			} catch (e2) {
+				// ignore
+			}
+		},
+		mouseout: () => {
+			clearAll();
+		},
+	});
+
+	return null;
+}
 	const countdownTotal = Math.max(1, Math.round(busRefreshInterval / 1000));
 	const ringValue = Math.round((busCountdown / countdownTotal) * 100);
 
@@ -1204,6 +1495,15 @@ const makeMarkerSignature = (m) => {
 		// We no longer use the click popup UI for vehicles; hover tooltips are sufficient.
 		// Keep this as a no-op to avoid relying on parent popup state.
 	}, [onClosePopup]);
+
+	// Clearing overlays should also clear any active hover-card selection.
+	React.useEffect(() => {
+		// When the user clears overlays (background click, etc.) the hovered marker
+		// might still be under cursor; keep it simple and reset the active hover.
+		// (Pointer move will re-arm the dwell timer if needed.)
+		if (!selectedVehicleTrack) return;
+		// no-op: kept for future extension
+	}, [selectedVehicleTrack]);
 
 	// Note: selectedVehicleTrack is independent of route overlays.
 	// Don't clear it just because activeRoutes is empty — in normal operation
@@ -1429,6 +1729,16 @@ const makeMarkerSignature = (m) => {
 						style={{ height: "100%", width: "100%" }}
 						className="leaflet-container-custom"
 					>
+						<HoverWinnerController
+							filteredMarkers={filteredMarkers}
+							setHoveredMarkerId={setHoveredMarkerId}
+							hoveredMarkerSigRef={hoveredMarkerSigRef}
+							hoverTimerRef={hoverTimerRef}
+							activeHoverReqTokenRef={activeHoverReqTokenRef}
+							setActiveHoverId={setActiveHoverId}
+							enterRadiusPx={DEFAULT_HOVER_PICK_ENTER_RADIUS_PX}
+							leaveRadiusPx={DEFAULT_HOVER_PICK_LEAVE_RADIUS_PX}
+						/>
 					{(function(){
 						try {
 							const n = selectedVehicleTrack && Array.isArray(selectedVehicleTrack.coords) ? selectedVehicleTrack.coords.length : 0;
@@ -1567,6 +1877,7 @@ const makeMarkerSignature = (m) => {
 											<Marker
 							key={marker.id}
 							position={marker.position}
+												riseOnHover={false}
 							icon={marker.type === 'bus'
 								? createCustomIcon('bus', busIconColor(marker.delayMinutes, isBusMappedLocal(marker)), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON}
@@ -2036,7 +2347,7 @@ const makeMarkerSignature = (m) => {
 						>
 							{/* Show popup when openPopupId matches (successful fetch) or when loadingPopupId matches (in-progress) */}
 							{(openPopupId === marker.id || loadingPopupId === marker.id) && (
-								<AdaptivePopup marker={marker} onClose={onClosePopup}>
+								<AdaptivePopup marker={marker} onClose={onClosePopup} autoPan={false}>
 									<Box sx={{ minWidth: '200px', pb: 1 }}>
 										<Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
 											{marker.name}
@@ -2198,19 +2509,55 @@ const makeMarkerSignature = (m) => {
 									</Box>
 								</AdaptivePopup>
 							)}
-												<Tooltip direction="top" offset={[0, -15]} className="custom-vehicle-tooltip">
-													<div dangerouslySetInnerHTML={{ __html: tooltipText }} />
-												</Tooltip>
+													{/**
+													 * Leaflet tooltips can occasionally get "stuck" on screen if their internal
+													 * open/close lifecycle gets out of sync with React renders (common with dense,
+													 * overlapping markers).
+													 *
+													 * To make this robust:
+													 * - Gate tooltip visibility on `activeHoverId` (1s dwell winner).
+													 * - Key the Tooltip so a winner change forces a full Leaflet unmount/remount.
+													 * - Disable interactivity so it can't "capture" the pointer and prevent
+													 *   synthetic leave events.
+													 */}
+													{activeHoverId === marker.id && (
+														<Tooltip
+															key={`veh-tt-${String(activeHoverId)}`}
+															direction="top"
+															offset={[0, -15]}
+															className="custom-vehicle-tooltip"
+															interactive={false}
+															opacity={1}
+														>
+															<div dangerouslySetInnerHTML={{ __html: tooltipText }} />
+														</Tooltip>
+													)}
 												</Marker>
 										);
 									} catch (err) {
-										return (
-											<Marker
+											return (
+												<Marker
 							key={marker.id}
 							position={marker.position}
+													zIndexOffset={(() => {
+														// Deterministic stacking to reduce "two markers hovered" in dense areas.
+														// Higher zIndexOffset wins. Buses first, then trains, then stable by id.
+														try {
+															const base = marker.type === 'bus' ? 2000 : 1000;
+															const idStr = String(marker.id ?? '');
+															let h = 0;
+															for (let i = 0; i < idStr.length; i++) h = ((h << 5) - h) + idStr.charCodeAt(i);
+															return base + (h % 300);
+														} catch (e) {
+															return marker.type === 'bus' ? 2000 : 1000;
+														}
+													})()}
+												riseOnHover={false}
 							icon={marker.type === 'bus'
 							? createCustomIcon('bus', busIconColor(marker.delayMinutes, isBusMappedLocal(marker)), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
 								: TRAIN_ICON} eventHandlers={{
+											// Hover intent is driven at map-level by <HoverWinnerController />.
+											// Marker mouseover/mouseout are unreliable in dense overlapping icons.
 													click: async (e) => {
 									// Prevent the click from bubbling to the map which
 									// would trigger MapClickClearHandler (clearing routes)

@@ -152,8 +152,14 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
     route_tracks polyline, return None.
     """
     try:
+        # For live vehicles we intentionally avoid returning full route_tracks
+        # polylines (these can be jumbled/branched and create "teleport" lines).
+        # Instead we prefer stitching stop-to-stop fragment tracks from
+        # route_link_tracks using origin/destination stop context when present.
+        # If we can't confidently build a fragment-based geometry, return None.
+
         # Fast path: if the live matcher provided a merged route index,
-        # pull coords directly from merged.route_tracks.
+        # attempt to stitch fragment geometry from merged.route_link_tracks.
         try:
             ri = entry.get('route_int')
             if ri is not None:
@@ -191,12 +197,75 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
                     merged = None
 
                 if merged is not None:
-                    tracks = getattr(merged, 'route_tracks', None) or []
-                    if 0 <= ri < len(tracks):
-                        coords = _normalize_latlon_coords(tracks[ri])
-                        if len(coords) >= 2:
-                            _put_cached_bus_track(entry, coords)
-                            return coords
+                    # Prefer route_link_tracks stitching when we have stop context.
+                    from_atco = entry.get('origin_atco') or entry.get('from_stop_id') or entry.get('from_atco')
+                    to_atco = entry.get('destination_atco') or entry.get('to_stop_id') or entry.get('to_atco')
+
+                    # Access fragment map
+                    link_map = None
+                    try:
+                        if hasattr(merged, 'get_route_link_tracks'):
+                            link_map = merged.get_route_link_tracks(ri)
+                        else:
+                            links = getattr(merged, 'route_link_tracks', None)
+                            link_map = links[ri] if (links and 0 <= ri < len(links)) else None
+                    except Exception:
+                        link_map = None
+
+                    if link_map and from_atco and to_atco:
+                        try:
+                            route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+                        except Exception:
+                            route_stops = []
+
+                        # Build ATCO -> stop_int mapping restricted to this route
+                        atco_to_stop = {}
+                        for s_int in route_stops or []:
+                            try:
+                                c = merged.get_atco_code(s_int)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop[str(c).strip()] = s_int
+
+                        fs = atco_to_stop.get(str(from_atco).strip())
+                        ts = atco_to_stop.get(str(to_atco).strip())
+
+                        if fs is not None and ts is not None and fs != ts:
+                            # Stitch consecutive pairs between fs and ts along route order.
+                            try:
+                                i = route_stops.index(fs)
+                                j = route_stops.index(ts)
+                            except Exception:
+                                i = None
+                                j = None
+                            if i is not None and j is not None:
+                                step = 1 if j > i else -1
+                                stitched_pts = []
+                                ok = True
+                                k = i
+                                while k != j:
+                                    a = route_stops[k]
+                                    b = route_stops[k + step]
+                                    seg2 = link_map.get((a, b))
+                                    if not seg2:
+                                        rev2 = link_map.get((b, a))
+                                        if rev2:
+                                            seg2 = list(reversed(rev2))
+                                    if not seg2:
+                                        ok = False
+                                        break
+                                    if stitched_pts and seg2 and stitched_pts[-1] == seg2[0]:
+                                        stitched_pts.extend(seg2[1:])
+                                    else:
+                                        stitched_pts.extend(seg2)
+                                    k += step
+
+                                if ok:
+                                    coords = _normalize_latlon_coords(stitched_pts)
+                                    if len(coords) >= 2:
+                                        _put_cached_bus_track(entry, coords)
+                                        return coords
         except Exception:
             pass
         # If we already computed/cached it recently, reuse.
@@ -205,16 +274,9 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
             return cached
 
 
-        # We need either a canonical route_id/route_int to ask for route_tracks.
-        # The current frontend route-label step provides these, but /bus/live
-        # doesn't. So for now we only compute when we have a logged_journey_id
-        # that the frontend can use to fetch label cheaply later.
-        #
-        # (Follow-up: we can add a lightweight label lookup by line and jid.)
-        route_id = entry.get('route_id')
-        route_int = entry.get('route_int')
-        if route_id is None and route_int is None:
-            return None
+        # No fragment geometry available (missing stop context or fragments).
+        # For live tracks we do NOT fall back to full-route polylines.
+        return None
 
         lat_v = entry.get('lat')
         lon_v = entry.get('lon')
@@ -222,30 +284,10 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
             return None
 
         eps = 0.0001
-        data = route_leg_geometry(
-            from_lat=float(lat_v),
-            from_lon=float(lon_v),
-            to_lat=float(lat_v) + eps,
-            to_lon=float(lon_v) + eps,
-            mode='driving',
-            route_id=str(route_id) if route_id is not None else None,
-            route_int=int(route_int) if route_int is not None else None,
-            from_stop_id=entry.get('origin_atco'),
-            to_stop_id=entry.get('destination_atco'),
-        )
+        # (legacy path removed)
         if not isinstance(data, dict):
             return None
-        if data.get('source') == 'linear':
-            return None
-
-        coords = _normalize_latlon_coords(data.get('coords'))
-        if len(coords) < 2:
-            return None
-        if data.get('source') not in ('route_tracks', 'osrm'):
-            # Only accept well-defined sources.
-            return None
-        _put_cached_bus_track(entry, coords)
-        return coords
+        # (legacy path removed)
     except Exception:
         return None
 
@@ -3004,77 +3046,78 @@ async def routes_for_line(
         except Exception:
             pass
 
-    # ── Collect route indices whose line_name matches ──────────────
-    # line_name may be prefixed like "PC0002407:425:100" — match the
-    # part after the last colon, which is what the frontend shows.
+    # ── Collect candidate route_ints for this line ─────────────────────────
+    # Keep everything indexed by mergeddata route_int to avoid mismatching a
+    # journey-derived stop order with a different route_id's stored geometry.
     matching_routes: list[int] = []
-    match_source: str = "metadata"
 
-    # When a reference point is supplied, prefer the stop-local hint first.
-    # This avoids wrong-city line-name collisions (e.g. multiple "1" lines).
+    def _route_matches_line(r_int: int) -> bool:
+        """Return True if route_int's metadata line suffix matches line_key."""
+        try:
+            if r_int < 0 or r_int >= len(merged.route_metadata):
+                return False
+            meta = merged.route_metadata[r_int] or {}
+            raw_line = (meta.get("line_name") or "").strip()
+            rline = raw_line.split(":")[-1].strip().upper()
+            return rline == line_key
+        except Exception:
+            return False
+
+    # Prefer geo-hinted stop_to_routes resolution when lat/lon provided.
     if lat is not None and lon is not None:
         try:
-            # Prefer the cached geo-enriched stops list (same data as /stops/geo).
-            # Keep the bbox fairly tight to avoid picking up wrong-city lines.
             dlat = 0.04
             dlon = 0.06
             south, west, north, east = float(lat) - dlat, float(lon) - dlon, float(lat) + dlat, float(lon) + dlon
 
             stops_geo_list = _stops_geo_cache
             if stops_geo_list is None:
-                # Lazily build the cache if needed.
                 try:
                     _ = await stops_geo()  # populates _stops_geo_cache
                     stops_geo_list = _stops_geo_cache
                 except Exception:
                     stops_geo_list = None
 
+            # Map ATCO -> merged stop_int(s)
+            atco_to_stopints: dict[str, list[int]] = {}
+            for s_int in range(len(merged.stop_to_routes)):
+                code = merged.get_atco_code(s_int)
+                if code:
+                    atco_to_stopints.setdefault(str(code).strip(), []).append(s_int)
+
+            near_stop_ints: list[int] = []
             if stops_geo_list:
-                near_atcos = []
                 for s in stops_geo_list:
                     try:
                         slat, slon = float(s.get('lat')), float(s.get('lon'))
                         if not (south <= slat <= north and west <= slon <= east):
                             continue
                         lines = s.get('lines') or []
-                        if line_key in [str(x).strip().upper() for x in lines]:
-                            atco_code = s.get('atco_code') or s.get('id')
-                            if atco_code:
-                                near_atcos.append(str(atco_code).strip())
+                        if line_key not in [str(x).strip().upper() for x in lines]:
+                            continue
+                        atco_code = s.get('atco_code') or s.get('id')
+                        if not atco_code:
+                            continue
+                        for s_int in atco_to_stopints.get(str(atco_code).strip(), []):
+                            near_stop_ints.append(s_int)
                     except Exception:
                         continue
 
-                if near_atcos:
-                    # Map ATCO -> stop_int(s)
-                    atco_to_stopints = {}
-                    for s_int in range(len(merged.stop_to_routes)):
-                        code = merged.get_atco_code(s_int)
-                        if code:
-                            atco_to_stopints.setdefault(code, []).append(s_int)
-                    # Collect matching routes that pass through any nearby stop
-                    mr = set()
-                    for ac in near_atcos:
-                        for s_int in atco_to_stopints.get(ac, []):
-                            for rid in merged.stop_to_routes[s_int]:
-                                mr.add(rid)
-                    if mr:
-                        matching_routes = sorted(mr)
-                        match_source = "nearby_stops"
+            cand = set()
+            for s_int in near_stop_ints:
+                try:
+                    for r_int in merged.stop_to_routes[s_int]:
+                        cand.add(int(r_int))
+                except Exception:
+                    continue
+            if cand:
+                matching_routes = sorted([r for r in cand if _route_matches_line(r)])
         except Exception:
-            # Don't block if the stop-based hint fails.
             pass
 
-    # If stop-local hint didn't find anything, fall back to route_metadata suffix match.
+    # Fallback: full scan by metadata suffix match.
     if not matching_routes:
-        for r_idx, meta in enumerate(merged.route_metadata):
-            if meta is None:
-                continue
-            raw_line = (meta.get("line_name") or "").strip()
-            rline = raw_line.split(":")[-1].upper()
-            if rline == line_key:
-                matching_routes.append(r_idx)
-
-    # (stop-local hint previously lived here; it now runs first when lat/lon are provided)
+        matching_routes = [r for r in range(len(merged.route_metadata)) if _route_matches_line(r)]
 
     # ── Build variants from *journey-level* stop sequences ───────
     # Using route_stops directly can produce interleaved inbound/outbound
@@ -3125,7 +3168,7 @@ async def routes_for_line(
 
     variants = []
     for r_idx in matching_routes:
-        j_list = route_journeys[r_idx]
+        j_list = route_journeys.get(r_idx) or []
         if not j_list:
             continue
 
@@ -3154,7 +3197,11 @@ async def routes_for_line(
         if best_stops and len(best_stops) >= 2:
             meta = merged.route_metadata[r_idx] or {}
             route_id = meta.get("route_id", f"route_{r_idx}")
-            variants.append({"route_id": route_id, "stops": best_stops})
+            variants.append({
+                "route_int": int(r_idx),
+                "route_id": route_id,
+                "stops": best_stops,
+            })
 
     # De-duplicate: keep only the most-distinct variants (by ATCO signature).
     seen_sigs: set[tuple] = set()
@@ -3200,74 +3247,86 @@ async def routes_for_line(
             unique = unique[:3]
 
     result = {"line": line, "variants": unique}
-    # Attach stored route tracks (if present) as a 'geometry' field so
-    # frontend consumers (RouteLineLayer) can draw road-following polylines
-    # immediately instead of straight stop-to-stop lines. Use the existing
-    # helper _fetch_route_tracks which returns [[lat, lon], ...].
-    try:
-        osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
-        for v in result.get('variants', []):
-            rid = v.get('route_id')
-            if not rid:
+    # Attach route geometry.
+    # Prefer stitching stop-to-stop fragment tracks (route_link_tracks) along the
+    # representative stop order. This mirrors the routing geometry behaviour and
+    # avoids "teleport" segments when full route_tracks polylines are jumbled.
+    for v in result.get('variants', []) or []:
+        try:
+            r_int = v.get('route_int')
+            if not isinstance(r_int, int):
                 continue
-            try:
-                # 1) prefer stored route tracks
-                t_var_start = time.time()
-                tracks = _fetch_route_tracks(rid)
-                if tracks and isinstance(tracks, list) and len(tracks) >= 2:
-                    v['geometry'] = tracks
-                    v['geometry_source'] = 'track'
-                    continue
 
-                # 2) if no stored tracks, attempt OSRM reconstruction from the
-                #    variant's stop sequence (if present). This yields a road-
-                #    following geometry that the frontend can render immediately.
-                stops = v.get('stops') or []
-                coords_lonlat = []
-                for s in stops:
-                    lat = s.get('lat')
-                    lon = s.get('lon')
-                    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                        coords_lonlat.append(f"{lon},{lat}")
-                # dedupe while preserving order
-                seen = set()
-                dedup = []
-                for s in coords_lonlat:
-                    if s not in seen:
-                        seen.add(s)
-                        dedup.append(s)
-                if len(dedup) >= 2:
-                    try:
-                        coords_from_osrm = _query_osrm_for_coords(osrm_base, dedup)
-                        t_var_end = time.time()
-                        try:
-                            logger.info(f"routes_for_line: osrm query for rid={rid} took {int((t_var_end-t_var_start)*1000)}ms")
-                        except Exception:
-                            pass
-                        if coords_from_osrm and len(coords_from_osrm) >= 2:
-                            v['geometry'] = coords_from_osrm
-                            v['geometry_source'] = 'osrm'
-                    except Exception:
-                        # ignore per-variant OSRM failures
-                        pass
-                # Final fallback: if no road-following geometry found, expose
-                # the plain stop coordinates so the frontend can at least draw
-                # a stop-to-stop polyline. This guarantees a visual even when
-                # stored tracks and OSRM reconstruction are unavailable.
-                if 'geometry' not in v and stops:
-                    try:
-                        v['geometry'] = [[s['lat'], s['lon']] for s in stops if isinstance(s.get('lat'), (int, float)) and isinstance(s.get('lon'), (int, float))]
-                        if v['geometry'] and len(v['geometry']) >= 2:
-                            v['geometry_source'] = 'stops'
-                    except Exception:
-                        # ignore and leave geometry absent
-                        pass
+            # 1) try fragment stitching using route_link_tracks
+            stitched = None
+            try:
+                if hasattr(merged, 'get_route_link_tracks'):
+                    link_map = merged.get_route_link_tracks(r_int)
+                else:
+                    links = getattr(merged, 'route_link_tracks', None)
+                    link_map = links[r_int] if (links and r_int < len(links)) else None
+
+                if link_map and isinstance(link_map, dict):
+                    stops = v.get('stops') or []
+                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+                    if len(atcos) >= 2:
+                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+                        atco_to_stop = {}
+                        for s_int in route_stops or []:
+                            try:
+                                c = merged.get_atco_code(s_int)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop[str(c)] = s_int
+
+                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
+                        stop_ints = [x for x in stop_ints if x is not None]
+                        if len(stop_ints) >= 2:
+                            stitched_pts = []
+                            ok = True
+                            for a, b in zip(stop_ints, stop_ints[1:]):
+                                seg = link_map.get((a, b))
+                                if not seg:
+                                    rev = link_map.get((b, a))
+                                    if rev:
+                                        seg = list(reversed(rev))
+                                if not seg:
+                                    ok = False
+                                    break
+                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
+                                    stitched_pts.extend(seg[1:])
+                                else:
+                                    stitched_pts.extend(seg)
+                            if ok and len(stitched_pts) >= 2:
+                                stitched = stitched_pts
             except Exception:
-                # ignore per-variant failures — don't break the whole response
-                continue
-    except Exception:
-        # defensive: if anything goes wrong attaching geometries, ignore
-        pass
+                stitched = None
+
+            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
+                coords = []
+                for pt in stitched:
+                    try:
+                        lat_pt, lon_pt = pt
+                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
+                            coords.append([float(lat_pt), float(lon_pt)])
+                    except Exception:
+                        continue
+                if len(coords) >= 2:
+                    v['geometry'] = coords
+                    v['geometry_source'] = 'route_link_tracks'
+            else:
+                # Never fall back to the full route_tracks polyline for line overlays.
+                # Full polylines can be jumbled (merged inbound/outbound/branches)
+                # and produce obvious "teleport" artefacts. If fragment stitching
+                # fails, omit geometry so the frontend can fall back to stop-to-stop.
+                try:
+                    v.pop('geometry', None)
+                    v.pop('geometry_source', None)
+                except Exception:
+                    pass
+        except Exception:
+            continue
     # Only cache positive results. Caching empty variant lists can cause
     # stale-empty responses when the router/atco caches are built later
     # (for example shortly after server start). Allow empty results to be

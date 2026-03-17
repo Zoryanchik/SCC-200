@@ -48,6 +48,62 @@ function SingleRouteLine({ routeData, onRouteClick }) {
     return null;
   }
 
+  // If a variant geometry contains a huge discontinuity (often caused by
+  // mismatched or jumbled upstream polylines), rendering it produces the
+  // obvious "teleport" / Z-shaped line that covers the map. Detect and
+  // suppress those geometries so we at least draw a sane stop-to-stop line.
+  const isGeometrySane = (geom, stopPositions) => {
+    if (!Array.isArray(geom) || geom.length < 2) return false;
+
+    // Use a permissive threshold: derive a typical spacing from the stops
+    // (median of consecutive stop gaps in rough metres) then allow large
+    // multipliers. Also guard with an absolute cap.
+    const toMeters = (a, b) => {
+      if (!a || !b) return Infinity;
+      const lat0 = a[0];
+      const lon0 = a[1];
+      const lat1 = b[0];
+      const lon1 = b[1];
+      const cos = Math.cos(((lat0 + lat1) / 2) * Math.PI / 180);
+      const dlat = (lat1 - lat0) * 111_320;
+      const dlon = (lon1 - lon0) * 111_320 * cos;
+      return Math.sqrt(dlat * dlat + dlon * dlon);
+    };
+
+    const stopGaps = [];
+    if (Array.isArray(stopPositions) && stopPositions.length >= 2) {
+      for (let i = 0; i < stopPositions.length - 1; i++) {
+        const d = toMeters(stopPositions[i], stopPositions[i + 1]);
+        if (Number.isFinite(d) && d > 0) stopGaps.push(d);
+      }
+    }
+    stopGaps.sort((a, b) => a - b);
+    const medianStopGap = stopGaps.length ? stopGaps[Math.floor(stopGaps.length / 2)] : 400; // ~= urban spacing
+
+    const ABS_MAX_GAP_M = 15_000; // if we jump >15km, it's definitely wrong
+    const REL_MAX_GAP_M = Math.max(3_000, medianStopGap * 10);
+    const threshold = Math.min(ABS_MAX_GAP_M, REL_MAX_GAP_M);
+
+    let maxGap = 0;
+    for (let i = 0; i < geom.length - 1; i++) {
+      const d = toMeters(geom[i], geom[i + 1]);
+      if (d > maxGap) maxGap = d;
+      if (d > threshold) return false;
+    }
+
+    // Additional sanity: avoid bizarre geometries that never come near the stops.
+    // (This is soft: only reject if it's way off.)
+    if (Array.isArray(stopPositions) && stopPositions.length) {
+      const firstStop = stopPositions[0];
+      const lastStop = stopPositions[stopPositions.length - 1];
+      if (toMeters(geom[0], firstStop) > 8_000 && toMeters(geom[geom.length - 1], lastStop) > 8_000) {
+        return false;
+      }
+    }
+
+    return maxGap > 0;
+  };
+
   return (
     <>
       {routeData.variants.map((variant, idx) => {
@@ -131,7 +187,8 @@ function SingleRouteLine({ routeData, onRouteClick }) {
           return pts;
         };
 
-        const positions = variant.geometry
+        const hasSaneGeom = Boolean(variant.geometry && isGeometrySane(variant.geometry, stopPositions));
+        const positions = hasSaneGeom
           ? chaikinSmooth(insertStopsIntoGeometry(variant.geometry, stopPositions), 1)
           : stopPositions;
         
