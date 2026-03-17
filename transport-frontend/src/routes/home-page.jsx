@@ -562,14 +562,15 @@ export default function HomePage() {
   const [openPopupSignature, setOpenPopupSignature] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [mapBbox, setMapBbox] = useState(null);
   const [geoError, setGeoError] = useState(null);
   const [userLocation, setUserLocation] = useState(null);
   const [locationStatus, setLocationStatus] = useState('idle');
   const [locationError, setLocationError] = useState(null);
   const [autoLocated, setAutoLocated] = useState(false);
   
-  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 800, mapCenter);
-  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 800, mapCenter);
+  const { results: fromStopResults, loading: fromLoading } = useStopSearch(fromLocation, 800, mapCenter, mapBbox);
+  const { results: toStopResults, loading: toLoading } = useStopSearch(toLocation, 800, mapCenter, mapBbox);
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
   const { data: liveAlertUpdate, isConnected: alertsConnected } = useLiveUpdates("alerts");
@@ -853,8 +854,22 @@ export default function HomePage() {
   const [labelDetail, setLabelDetail] = useState({ open: false, label: '', content: null });
 
   /** Called by MapViewMap whenever the user finishes panning / zooming. */
-  const handleMoveEnd = useCallback(({ lat, lon }) => {
+  const handleMoveEnd = useCallback(({ lat, lon, bounds }) => {
     setMapCenter({ lat, lon });
+    try {
+      if (bounds && typeof bounds === 'object') {
+        // supports either {south, west, north, east} or a Leaflet LatLngBounds-like object
+        const south = typeof bounds.south === 'number' ? bounds.south : (typeof bounds.getSouth === 'function' ? bounds.getSouth() : null);
+        const west = typeof bounds.west === 'number' ? bounds.west : (typeof bounds.getWest === 'function' ? bounds.getWest() : null);
+        const north = typeof bounds.north === 'number' ? bounds.north : (typeof bounds.getNorth === 'function' ? bounds.getNorth() : null);
+        const east = typeof bounds.east === 'number' ? bounds.east : (typeof bounds.getEast === 'function' ? bounds.getEast() : null);
+        if ([south, west, north, east].every((v) => typeof v === 'number')) {
+          setMapBbox({ south, west, north, east });
+        }
+      }
+    } catch (_e) {
+      // ignore bbox tracking errors
+    }
   }, []);
 
   const handleUseMyLocation = useCallback(() => {

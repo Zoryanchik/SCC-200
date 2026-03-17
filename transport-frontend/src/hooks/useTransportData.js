@@ -249,7 +249,7 @@ export const useBusArrivals = (stopCode, refreshInterval = 180000) => {
 /**
  * Hook for searching stops
  */
-export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
+export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapBbox = null) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -264,7 +264,9 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
       try {
         setLoading(true);
         const result = await withRetry(
-          () => searchStops(query),
+          () => searchStops(query, (mapCenter && typeof mapCenter.lat === 'number' && typeof mapCenter.lon === 'number')
+			? { lat: mapCenter.lat, lon: mapCenter.lon }
+			: undefined),
           { retries: 1, baseDelay: 400 }
         );
         // Normalize coordinate fields (support lat/lon or latitude/longitude)
@@ -296,11 +298,36 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
           filteredResult = normalized;
         }
 
-        // If a map centre is provided, prioritise suggestions by proximity
-        // to the current map centre so the prompt favors what's nearby.
-        if (mapCenter && Array.isArray(filteredResult) && filteredResult.length > 0) {
+        // If a map bbox is provided, strongly prefer any stop results that
+        // fall inside the current viewport. This makes autocompletes feel
+        // "map-first" (e.g. typing "common" should surface the stop that's
+        // visible on the map above similarly-named stops elsewhere).
+        // Secondary ordering still prefers proximity to map center.
+        if ((mapCenter || mapBbox) && Array.isArray(filteredResult) && filteredResult.length > 0) {
           try {
             const { lat: cLat, lon: cLon } = mapCenter;
+            const bbox = mapBbox;
+
+			// Prefer upstream/raw stop sources above merged/derived suggestions.
+			// Rationale: merged results can be convenient fallbacks, but when both
+			// exist we want the authoritative upstream stop to win.
+			const sourcePriority = (r) => {
+				const src = String(r?.source || r?.origin || r?.provider || '').toLowerCase();
+				const isMerged = (
+					src.includes('merged') ||
+					src.includes('merge') ||
+					src.includes('derived') ||
+					src.includes('computed')
+				);
+				// 0 = upstream/default, 1 = merged/derived
+				return isMerged ? 1 : 0;
+			};
+            const withinBbox = (la, lo) => {
+              if (!bbox || typeof la !== 'number' || typeof lo !== 'number') return false;
+              const { south, west, north, east } = bbox;
+              if (![south, west, north, east].every((v) => typeof v === 'number')) return false;
+              return la >= south && la <= north && lo >= west && lo <= east;
+            };
             const haversine = (la, lo) => {
               if (typeof la !== 'number' || typeof lo !== 'number') return Number.POSITIVE_INFINITY;
               const toRad = (v) => (v * Math.PI) / 180;
@@ -312,6 +339,14 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
               return d;
             };
             const sorted = [...filteredResult].sort((a, b) => {
+              // BBox first — stops within the viewport should rank above others.
+              const ina = withinBbox(a?.lat, a?.lon) ? 0 : 1;
+              const inb = withinBbox(b?.lat, b?.lon) ? 0 : 1;
+              if (ina !== inb) return ina - inb;
+			  // Source next — upstream stops before merged/derived.
+			  const sa = sourcePriority(a);
+			  const sb = sourcePriority(b);
+			  if (sa !== sb) return sa - sb;
               // Distance first.
               const da = haversine(a?.lat, a?.lon);
               const db = haversine(b?.lat, b?.lon);
@@ -339,7 +374,7 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
     }, debounceDelay);
 
     return () => clearTimeout(timeoutId);
-  }, [query, debounceDelay, mapCenter]);
+  }, [query, debounceDelay, mapCenter, mapBbox]);
 
   return { results, loading, error };
 };

@@ -42,7 +42,7 @@ describe('useTransportData hooks', () => {
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false)
-      expect(api.searchStops).toHaveBeenCalledWith('Lan')
+	  expect(api.searchStops).toHaveBeenCalledWith('Lan', undefined)
       expect(result.current.results.length).toBeGreaterThan(0)
     })
   })

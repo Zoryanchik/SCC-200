@@ -125,7 +125,7 @@ const handleMoveEnd = useCallback(({ lat, lon }) => {
 // Search bar state
 const [searchQuery, setSearchQuery] = useState('');
 const [searchValue, setSearchValue] = useState(null);
-const { results: searchResults, loading: searchLoading } = useStopSearch(searchQuery, 800, mapCenter);
+const { results: searchResults, loading: searchLoading } = useStopSearch(searchQuery, 800, mapCenter, null);
 
 const handleSearchSelect = useCallback((option) => {
   if (!option || !mapInstance) return;

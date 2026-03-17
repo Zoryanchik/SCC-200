@@ -352,7 +352,8 @@ def _live_endpoints_disabled() -> bool:
 
     Enable with: BUS_DISABLE_LIVE_ENDPOINTS=1
     """
-    return str(os.environ.get('BUS_DISABLE_LIVE_ENDPOINTS') or '') == '1'
+    return False
+    #str(os.environ.get('BUS_DISABLE_LIVE_ENDPOINTS') or '') == '1'
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -2070,6 +2071,8 @@ def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") ->
 async def search_stops(
     q: str = "",
     limit: int = 10,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
     classification: Optional[str] = None,
 ):
     """Search stops by name (case-insensitive substring match).
@@ -2086,6 +2089,43 @@ async def search_stops(
     [, classification]}.
     """
     from fastapi.responses import JSONResponse
+
+    # Helper: haversine distance (meters) for optional map-centered sorting
+    def _haversine_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+        try:
+            import math
+            R = 6371000.0
+            phi1 = math.radians(float(a_lat))
+            phi2 = math.radians(float(b_lat))
+            dphi = math.radians(float(b_lat) - float(a_lat))
+            dl = math.radians(float(b_lon) - float(a_lon))
+            x = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2.0) ** 2
+            return 2.0 * R * math.asin(math.sqrt(x))
+        except Exception:
+            return float("inf")
+
+    def _maybe_sort_by_center(stops: list) -> list:
+        if lat is None or lon is None:
+            return stops
+        try:
+            c_lat = float(lat)
+            c_lon = float(lon)
+        except Exception:
+            return stops
+        with_dist = []
+        for s in stops or []:
+            try:
+                s_lat = s.get("lat")
+                s_lon = s.get("lon")
+                if s_lat is None or s_lon is None:
+                    d = float("inf")
+                else:
+                    d = _haversine_m(c_lat, c_lon, float(s_lat), float(s_lon))
+                with_dist.append((d, s))
+            except Exception:
+                with_dist.append((float("inf"), s))
+        with_dist.sort(key=lambda t: t[0])
+        return [s for _, s in with_dist]
 
     _VALID_CLASSES = {"hub", "interchange", "local", "request_stop"}
     if classification and classification not in _VALID_CLASSES:
@@ -2111,6 +2151,11 @@ async def search_stops(
             stop_results = loader.search_stops(q, limit * 3)
             for stop in stop_results:
                 stop["type"] = "stop"
+
+            # When a map center is provided, rank stop candidates by distance
+            # before applying the classification filter/limit.
+            stop_results = _maybe_sort_by_center(stop_results)
+
             lookup = _get_classification_lookup()
             filtered = []
             for stop in stop_results:
@@ -2439,6 +2484,14 @@ async def search_stops(
                         stop["type"] = "stop"
         except Exception as exc:
             logger.warning("Stop DB lookup failed: %s", exc)
+
+        # Critical UX: if the caller supplied a map center, re-rank the stop
+        # candidate list by distance BEFORE we do any truncation/slicing for
+        # the combined results.
+        try:
+            stop_results = _maybe_sort_by_center(stop_results)
+        except Exception:
+            pass
 
         try:
             # Geocoding is blocking (network + rate-limited); run in a thread

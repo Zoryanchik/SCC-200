@@ -69,4 +69,41 @@ describe('useStopSearch', () => {
       expect(loc.atco_code).toBeNull()
     })
   })
+
+
+  test('boosts in-viewport results when bbox provided', async () => {
+    api.searchStops.mockResolvedValueOnce([
+      { id: 1, name: 'Common Garden Street', atco_code: 'C1', lat: 54.050, lon: -2.800, type: 'stop' },
+      { id: 2, name: 'Common Road (Out of view)', atco_code: 'C2', lat: 54.150, lon: -2.900, type: 'stop' },
+    ])
+
+    const mapCenter = { lat: 54.055, lon: -2.805 }
+    const mapBbox = { south: 54.00, west: -2.85, north: 54.10, east: -2.75 }
+    const { result } = renderHook(() => useStopSearch('Common', 10, mapCenter, mapBbox))
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+      expect(result.current.results).toHaveLength(2)
+    })
+
+    expect(result.current.results[0].name).toBe('Common Garden Street')
+  })
+
+  test('ranks upstream stop before merged when both in viewport', async () => {
+    api.searchStops.mockResolvedValueOnce([
+      { id: 1, name: 'Common Garden Street', atco_code: 'UP1', lat: 54.050, lon: -2.800, type: 'stop', source: 'naptan' },
+      { id: 2, name: 'Common Garden Street', atco_code: 'M1', lat: 54.051, lon: -2.801, type: 'stop', source: 'merged' },
+    ])
+
+    const mapCenter = { lat: 54.055, lon: -2.805 }
+    const mapBbox = { south: 54.00, west: -2.85, north: 54.10, east: -2.75 }
+    const { result } = renderHook(() => useStopSearch('Common', 10, mapCenter, mapBbox))
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+      expect(result.current.results).toHaveLength(2)
+    })
+
+    expect(result.current.results[0].atco_code).toBe('UP1')
+  })
 })

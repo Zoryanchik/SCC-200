@@ -245,6 +245,71 @@ class TestSearchStopsEndpoint:
             assert item["type"] == "location"
 
 
+    def test_search_ranks_stop_results_by_distance_before_truncation(self, client: TestClient):
+        """When lat/lon are provided, stop candidates should be sorted by distance
+        to that center BEFORE STOP_FIRST truncation.
+
+        This prevents a nearby stop from being pushed out of the returned list
+        just because its text relevance score is lower.
+        """
+        # Provide an atco_loader that returns 6 stop rows; STOP_FIRST defaults to 5.
+        # We want the near stop to be included in the truncated list when
+        # distance ranking is applied.
+
+        class _FakeConn:
+            def __init__(self, rows):
+                self._rows = rows
+                self.autocommit = True
+
+            def cursor(self):
+                return self
+
+            def execute(self, *args, **kwargs):
+                return None
+
+            def fetchall(self):
+                return self._rows
+
+            def close(self):
+                return None
+
+        class _FakeAtcoLoader:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def _connect(self):
+                return _FakeConn(self._rows)
+
+        # Rows are (atco_code, name, town, lat, lon). The last row is the nearest.
+        far_rows = [
+            ("F1", "Common Street", "Town", 54.200, -2.900),
+            ("F2", "Common Street", "Town", 54.210, -2.910),
+            ("F3", "Common Street", "Town", 54.220, -2.920),
+            ("F4", "Common Street", "Town", 54.230, -2.930),
+            ("F5", "Common Street", "Town", 54.240, -2.940),
+            ("NEAR", "Common Garden Street", "Town", 54.050, -2.800),
+        ]
+
+        api_module._base_cache = {
+            "loader": MagicMock(),
+            "atco_loader": _FakeAtcoLoader(far_rows),
+        }
+
+        with patch("api.geocode_locations", return_value=[]):
+            resp = client.get(
+                "/search/stops",
+                params={"q": "common", "limit": 5, "lat": 54.05, "lon": -2.80},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # Should include stop results even when geocoding returns none.
+        assert isinstance(data, list)
+        # STOP_FIRST truncation to 5 should still keep the nearest stop.
+        atcos = [d.get("atco_code") for d in data if d.get("type") == "stop"]
+        assert "NEAR" in atcos
+
+
 # ── Fuzzy correction unit tests ──────────────────────────────────────────────
 
 

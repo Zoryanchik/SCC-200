@@ -189,12 +189,16 @@ export const fetchBusArrivals = async (stopCode) => {
  * @param {string} query - Search query
  * @returns {Promise<Array>} Array of matching stops
  */
-export const searchStops = async (query) => {
+export const searchStops = async (query, { lat, lon } = {}) => {
   try {
-    const response = await fetch(
-  // Default autocomplete limit. Kept small for consistent test expectations.
-  `${API_BASE_URL}/search/stops?q=${encodeURIComponent(query)}&limit=5`
-    );
+    const params = new URLSearchParams({
+      q: String(query ?? ''),
+      // Default autocomplete limit. Kept small for consistent test expectations.
+      limit: '5',
+    });
+    if (typeof lat === 'number' && Number.isFinite(lat)) params.set('lat', String(lat));
+    if (typeof lon === 'number' && Number.isFinite(lon)) params.set('lon', String(lon));
+    const response = await fetch(`${API_BASE_URL}/search/stops?${params.toString()}`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
