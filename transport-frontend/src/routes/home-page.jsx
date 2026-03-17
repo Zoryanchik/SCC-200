@@ -357,7 +357,10 @@ const fetchGeometryForLegs = async (legs) => {
   // ask the backend for 'bus' so it can prefer stored route_tracks and
   // subsegment by stops.
   const isBusLikeLeg = !isWalk && (rawMode === 'bus' || rawMode === 'transit' || !!leg?.line_name);
-  const osrmMode = isWalk ? 'walking' : 'driving';
+  // IMPORTANT: For transit legs, ask the backend for mode=bus so it can
+  // prefer timetable route_tracks + stop-to-stop fragments. Using `driving`
+  // can fall back to OSRM road-following geometry, which may look wrong.
+  const requestMode = isWalk ? 'walking' : (isBusLikeLeg ? 'bus' : 'driving');
       // If the leg carries an explicit route_id (or metadata with route_id)
       // include it so the backend can return stored track subsegments when
       // OSRM is unavailable. If no route_id but a line name is available,
@@ -389,7 +392,7 @@ const fetchGeometryForLegs = async (legs) => {
       // journey leg. Instead, we rely on /route/leg-geometry (with route_id and
       // stop ids) which is tied to the journey's canonical route_id.
 
-      let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(osrmMode)}`;
+  let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(requestMode)}`;
       // Prefer route_int for in-memory track lookup, fall back to route_id for older backends.
       if (routeInt != null && routeInt !== '') {
         url += `&route_int=${encodeURIComponent(routeInt)}`;
@@ -1271,6 +1274,57 @@ export default function HomePage() {
         const geos = geosIn.map((g) => ({ ...(g || {}) }));
         const legs = Array.isArray(journey.legs) ? journey.legs : [];
 
+        // If the backend provided an explicit leg_idx for each geometry segment,
+        // use it to align geometries to legs deterministically.
+        //
+        // This avoids the “index drift” bug where a valid bus fragment is
+        // accidentally attached to the wrong leg’s endpoints.
+        const hasLegIdx = geos.some((g) => Number.isInteger(g?.leg_idx));
+        if (hasLegIdx) {
+          const byLegIdx = new Map();
+          geos.forEach((g) => {
+            if (Number.isInteger(g?.leg_idx) && !byLegIdx.has(g.leg_idx)) {
+              byLegIdx.set(g.leg_idx, g);
+            }
+          });
+          const out = [];
+          for (let i = 0; i < legs.length; i++) {
+            const leg = legs[i];
+            const g = byLegIdx.get(i);
+            if (!g) continue;
+
+            // Attach endpoints from leg if missing.
+            const fs = leg?.from_stop;
+            const ts = leg?.to_stop;
+            if (fs && ts && typeof fs.lat === 'number' && typeof fs.lon === 'number' && typeof ts.lat === 'number' && typeof ts.lon === 'number') {
+              const from = [fs.lat, fs.lon];
+              const to = [ts.lat, ts.lon];
+              if (!g._from) g._from = from;
+              if (!g._to) g._to = to;
+            }
+
+            // Ensure geometry.mode is set for styling.
+            if (!g.mode && leg?.mode) g.mode = String(leg.mode).toLowerCase();
+            out.push(g);
+          }
+
+          // Defensive: include any geometry segments that reference a leg_idx
+          // outside the legs[] range.
+          geos.forEach((g) => {
+            if (Number.isInteger(g?.leg_idx) && (g.leg_idx < 0 || g.leg_idx >= legs.length)) {
+              out.push(g);
+            }
+          });
+
+          // Sort by leg_idx so map drawing stays in travel order.
+          out.sort((a, b) => {
+            const ai = Number.isInteger(a?.leg_idx) ? a.leg_idx : 1e9;
+            const bi = Number.isInteger(b?.leg_idx) ? b.leg_idx : 1e9;
+            return ai - bi;
+          });
+          return out;
+        }
+
         // If backend didn't include geometry for walking legs, synthesize a simple
         // 2-point segment so walking is still visible and styled correctly.
         // We preserve the original travel order based on legs.
@@ -1332,8 +1386,11 @@ export default function HomePage() {
             // If endpoints missing, just skip synthesizing and fall through.
           }
 
-          // Otherwise, use the next geometry segment (when present).
-          if (g) {
+          // For a walking leg, only consume a walking geometry segment.
+          // For a non-walking leg, only consume a non-walking geometry segment.
+          // If we consume the wrong kind, segments get misaligned (e.g. a bus
+          // fragment gets anchored to the start/hop-off stops of a different leg).
+          if (g && ((isWalkLeg && gIsWalk) || (!isWalkLeg && !gIsWalk))) {
             const ep = endpointPairFromLeg(leg);
             if (ep) {
               if (!g._from) g._from = ep.from;
@@ -1345,6 +1402,10 @@ export default function HomePage() {
             }
             out.push(g);
             geoIdx += 1;
+          } else if (!isWalkLeg) {
+            // If we're missing a transit segment (or the next geometry is walking),
+            // skip consumption here; the map will fall back to embedded per-leg
+            // geometry or straight endpoint lines.
           }
         }
 
@@ -1431,6 +1492,61 @@ export default function HomePage() {
       });
 
       const options = Array.from(optionsMap.values());
+
+      // Debug: print a per-leg geometry alignment report so we can see exactly
+      // which polylines the map will draw for each option.
+      try {
+        const debug = (import.meta?.env?.VITE_DEBUG_JOURNEY_ROUTE === '1');
+        if (debug) {
+          const summarizeOpt = (opt) => {
+            const srcs = opt?.sources ? Object.values(opt.sources) : [];
+            const primarySrc = srcs && srcs.length > 0 ? srcs[0] : null;
+            const journey = primarySrc ? (primarySrc.route ? primarySrc.route : primarySrc) : (opt?.route || opt);
+            const legs = Array.isArray(journey?.legs) ? journey.legs : [];
+            const geos = Array.isArray(opt?.routeGeometries)
+              ? opt.routeGeometries
+              : (Array.isArray(journey?.routeGeometries) ? journey.routeGeometries : []);
+
+            const byLegIdx = new Map();
+            geos.forEach((g) => {
+              if (Number.isInteger(g?.leg_idx) && !byLegIdx.has(g.leg_idx)) byLegIdx.set(g.leg_idx, g);
+            });
+
+            const rows = legs.map((leg, i) => {
+              const fs = leg?.from_stop || {};
+              const ts = leg?.to_stop || {};
+              const g = byLegIdx.get(i);
+              const coordsLen = Array.isArray(g?.coords) ? g.coords.length : null;
+              return {
+                i,
+                legMode: leg?.mode,
+                from: fs?.name,
+                to: ts?.name,
+                legGeoSource: leg?.geometry_source,
+                geoMode: g?.mode,
+                geoCoords: coordsLen,
+                geoFromId: g?.from_stop_id,
+                geoToId: g?.to_stop_id,
+                geoSource: g?.source,
+              };
+            });
+
+            // eslint-disable-next-line no-console
+            console.debug('[journeyRoute] geometry alignment', {
+              optLabel: opt?.label,
+              optLabels: opt?.labels,
+              legs: legs.length,
+              geos: geos.length,
+              hasLegIdx: geos.some((g) => Number.isInteger(g?.leg_idx)),
+              rows,
+            });
+          };
+
+          options.forEach((opt) => summarizeOpt(opt));
+        }
+      } catch (_e) {
+        // ignore
+      }
 
   // Add special labels:
   // - "E·DEP": mark options with the earliest initial departure

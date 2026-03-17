@@ -59,7 +59,7 @@ def main():
     candidates = []  # (j_id, dep_time)
     # iterate routes serving infolab
     for route in merged.stop_to_routes[infolab_id]:
-        stop_deps = merged.route_stop_departures[route].get(infolab_id, [])
+        stop_deps = merged.get_route_stop_departures(route).get(infolab_id, [])
         for dep_time, j_id in stop_deps:
             # restrict to a 10-minute window around target_board_seconds
             if abs(dep_time - target_board_seconds) <= 600:

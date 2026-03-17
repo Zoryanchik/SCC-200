@@ -117,7 +117,7 @@ def main():
             print('    (no routes serve this stop)')
             continue
         for route in routes:
-            stop_deps = merged.route_stop_departures[route].get(sid, [])
+            stop_deps = merged.get_route_stop_departures(route).get(sid, [])
             for dep_time, j in stop_deps:
                 # show a one-hour window around the planned start
                 if dep_time >= start_seconds - 600 and dep_time <= start_seconds + 3600:

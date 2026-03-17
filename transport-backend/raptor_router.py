@@ -502,10 +502,7 @@ class RaptorRouter:
         Returns the journey-int used, or None if no usable journey was
         found.
         """
-        rsd = network.route_stop_departures
-        if route >= len(rsd):
-            return None
-        stop_deps = rsd[route].get(stop)
+        stop_deps = network.get_route_stop_departures(route).get(stop)
         if not stop_deps:
             return None
 

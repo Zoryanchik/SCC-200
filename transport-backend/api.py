@@ -1466,8 +1466,15 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                         # If we have stop context, prefer stitching from fragment index.
                         if merged is not None and from_stop_id and to_stop_id:
                             try:
-                                links = getattr(merged, 'route_link_tracks', None)
-                                if links and 0 <= ri < len(links):
+                                # Prefer a lazy accessor when available; otherwise
+                                # fall back to the raw attribute.
+                                if hasattr(merged, 'get_route_link_tracks'):
+                                    link_map = merged.get_route_link_tracks(ri)
+                                else:
+                                    links = getattr(merged, 'route_link_tracks', None)
+                                    link_map = links[ri] if (links and 0 <= ri < len(links)) else None
+
+                                if link_map:
                                     fs = None
                                     ts = None
                                     route_stops = []
@@ -1494,7 +1501,6 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                         ts = None
 
                                     if fs is not None and ts is not None:
-                                        link_map = links[ri]
                                         # route_stops already resolved above.
 
                                         frag = None
@@ -6874,6 +6880,12 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     geometries = []
     geo_idx = 0
 
+    # Incrementing index of the leg we’re currently building for the
+    # ordered stop sequence. This lets us label `routeGeometries` entries
+    # deterministically so the frontend can align geometry segments to legs
+    # without relying on list position or heuristic matching.
+    leg_idx = 0
+
     start_point = meta.get("start_point", ())
     start_walk = meta.get("start_walk_seconds", 0)
     end_walk = meta.get("end_walk_seconds", 0)
@@ -6955,8 +6967,14 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "coords": wc,
             "color": "#888888",
             "mode": "walking",
+            "leg_idx": leg_idx,
+            "from_stop_id": None,
+            "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
+            "from_stop_name": "Start",
+            "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
         })
         geo_idx += 1
+        leg_idx += 1
 
     # -- Transit / walking legs between stops --
     for i in range(1, len(ordered)):
@@ -7137,10 +7155,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 if trace:
                     try:
                         print('[journey_geom] leg', {
+                            'leg_idx': leg_idx,
                             'transport': transport,
                             'line_name': (leg.get('line_name') if isinstance(leg, dict) else None),
                             'route_id': route_id,
                             'route_int': route_int,
+                            'from_stop_int': prev_int,
+                            'to_stop_int': curr_int,
                             'from_atco': prev_atco,
                             'to_atco': curr_atco,
                             'from_name': (from_loc.get('name') if isinstance(from_loc, dict) else None),
@@ -7164,8 +7185,26 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                             # and avoid the "jumbled full route polyline" problem.
                             frag = None
                             try:
-                                links = getattr(merged, 'route_link_tracks', None)
-                                if links and route_int < len(links):
+                                # Prefer a lazy accessor when available; otherwise
+                                # fall back to the raw attribute.
+                                if hasattr(merged, 'get_route_link_tracks'):
+                                    link_map = merged.get_route_link_tracks(route_int)
+                                else:
+                                    links = getattr(merged, 'route_link_tracks', None)
+                                    link_map = links[route_int] if (links and route_int < len(links)) else None
+
+                                if trace:
+                                    try:
+                                        print('[journey_geom] link_map_status', {
+                                            'route_int': route_int,
+                                            'has_get_route_link_tracks': bool(hasattr(merged, 'get_route_link_tracks')),
+                                            'link_map_is_none': (link_map is None),
+                                            'link_map_len': (len(link_map) if link_map else 0),
+                                        })
+                                    except Exception:
+                                        pass
+
+                                if link_map:
                                     # We only have ATCO strings here; resolve to stop_int.
                                     # NOTE: merged.stop_metadata is a list of stop display names,
                                     # not an ATCO->stop_int mapping, so we map within route_stops.
@@ -7176,6 +7215,16 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                         route_stops = merged.route_stops[route_int] if route_int < len(merged.route_stops) else []
                                     except Exception:
                                         route_stops = []
+                                    if trace:
+                                        try:
+                                            print('[journey_geom] route_stops_status', {
+                                                'route_int': route_int,
+                                                'route_stops_len': (len(route_stops) if route_stops else 0),
+                                                'have_prev_atco': bool(prev_atco),
+                                                'have_curr_atco': bool(curr_atco),
+                                            })
+                                        except Exception:
+                                            pass
                                     try:
                                         if route_stops and (prev_atco or curr_atco):
                                             atco_to_stop = {}
@@ -7193,10 +7242,23 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                     except Exception:
                                         fs = None
                                         ts = None
-                                    if fs is not None and ts is not None:
-                                        link_map = links[route_int]
 
+                                    if trace:
+                                        try:
+                                            print('[journey_geom] fragment_endpoint_resolution', {
+                                                'route_int': route_int,
+                                                'prev_atco': prev_atco,
+                                                'curr_atco': curr_atco,
+                                                'fs': fs,
+                                                'ts': ts,
+                                                'fs_in_route_stops': (fs in route_stops) if (route_stops and fs is not None) else False,
+                                                'ts_in_route_stops': (ts in route_stops) if (route_stops and ts is not None) else False,
+                                            })
+                                        except Exception:
+                                            pass
+                                    if fs is not None and ts is not None:
                                         frag = None
+                                        frag_strategy = None
 
                                         # Primary: stitch adjacent fragments along route stop sequence.
                                         # This handles cases where section tracks are keyed by
@@ -7229,6 +7291,22 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                                 k += step
                                             if ok and len(stitched) >= 2:
                                                 frag = stitched
+                                                frag_strategy = 'stitched_adjacent_pairs'
+
+                                        if trace:
+                                            try:
+                                                print('[journey_geom] route_int_fragment_ctx', {
+                                                    'route_int': route_int,
+                                                    'from_stop_int': fs,
+                                                    'to_stop_int': ts,
+                                                    'route_stops_len': (len(route_stops) if route_stops else 0),
+                                                    'route_stops_i': (route_stops.index(fs) if (route_stops and fs in route_stops) else None),
+                                                    'route_stops_j': (route_stops.index(ts) if (route_stops and ts in route_stops) else None),
+                                                    'link_map_len': (len(link_map) if link_map else 0),
+                                                    'strategy': frag_strategy,
+                                                })
+                                            except Exception:
+                                                pass
 
                                         # Secondary: exact stop-pair fragment (either direction)
                                         if not frag:
@@ -7238,6 +7316,29 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                                 rev = link_map.get((ts, fs))
                                                 if rev:
                                                     frag = list(reversed(rev))
+                                                    frag_strategy = 'exact_pair_reversed'
+                                            else:
+                                                frag_strategy = 'exact_pair'
+
+                                        if trace and (not frag):
+                                            try:
+                                                # sample a few available keys for debugging
+                                                some_keys = []
+                                                try:
+                                                    for _k in link_map.keys():
+                                                        some_keys.append(_k)
+                                                        if len(some_keys) >= 5:
+                                                            break
+                                                except Exception:
+                                                    some_keys = []
+                                                print('[journey_geom] fragment_pair_missing', {
+                                                    'route_int': route_int,
+                                                    'fs': fs,
+                                                    'ts': ts,
+                                                    'sample_keys': some_keys,
+                                                })
+                                            except Exception:
+                                                pass
 
                                         # Tertiary: 1-hop near endpoints.
                                         if not frag and route_stops:
@@ -7254,6 +7355,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                                                     seg2 = list(reversed(rev2))
                                                             if seg2 and len(seg2) >= 2:
                                                                 frag = seg2
+                                                                frag_strategy = 'near_endpoint_from'
                                                                 break
                                                 except Exception:
                                                     pass
@@ -7270,6 +7372,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                                                     seg2 = list(reversed(rev2))
                                                             if seg2 and len(seg2) >= 2:
                                                                 frag = seg2
+                                                                frag_strategy = 'near_endpoint_to'
                                                                 break
                                                 except Exception:
                                                     pass
@@ -7284,6 +7387,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                         print('[journey_geom] route_int_fragment', {
                                             'route_int': route_int,
                                             'frag_len': len(frag),
+                                            'strategy': (locals().get('frag_strategy') if 'frag_strategy' in locals() else None),
                                         })
                                     except Exception:
                                         pass
@@ -7300,6 +7404,15 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                             if (not seg) and tracks_pts:
                                 tracks_ll = [[t[0], t[1]] for t in tracks_pts]
                                 seg = _subsegment_from_coords(tracks_ll, [prev_atco, curr_atco], local_coords)
+                                if trace:
+                                    try:
+                                        print('[journey_geom] subsegment_from_full_tracks', {
+                                            'route_int': route_int,
+                                            'full_tracks_len': (len(tracks_pts) if tracks_pts else 0),
+                                            'seg_len': (len(seg) if seg else 0),
+                                        })
+                                    except Exception:
+                                        pass
                         except Exception:
                             seg = []
                     if (not seg) and route_id:
@@ -7392,8 +7505,15 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "coords": coords,
             "color": color,
             "mode": transport,
+            "leg_idx": leg_idx,
+            "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
+            "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
+            "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
+            "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
+            "source": geom_source,
         })
         geo_idx += 1
+        leg_idx += 1
 
     # -- End walking leg --
     if (destination_point and len(destination_point) >= 2
@@ -7434,6 +7554,11 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "coords": wc,
             "color": "#888888",
             "mode": "walking",
+            "leg_idx": leg_idx,
+            "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
+            "to_stop_id": None,
+            "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
+            "to_stop_name": "Destination",
         })
 
     # Compute the total real-time delay for the route.

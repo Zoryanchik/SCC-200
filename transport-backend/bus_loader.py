@@ -69,61 +69,80 @@ class BusLoader:
             ('https://transport.scc.lancs.ac.uk/bus/times/SCMY', 'Stagecoach Merseyside & South Lancashire'),
         ]
 
-        datasets = []
-        for src in sources:
+        def _fetch_one_src(src: str):
             try:
                 resp = _ur.urlopen(src, context=ctx, timeout=10)
             except _ue.HTTPError as he:
                 # Treat HTTP errors (403/401 etc) as non-fatal for startup —
                 # warn and skip this source so initialization can continue.
                 print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
-                continue
+                return []
             except (_ue.URLError, TimeoutError) as ue:
                 print(f"  [bus] ⚠ Skipping source {src}: {ue}")
-                continue
+                return []
             try:
                 data = json.loads(resp.read())
             except Exception as e:
                 print(f"  [bus] ⚠ Failed to parse JSON from {src}: {e}")
-                continue
+                return []
+
             results = data.get('results', [])
             if not results:
-                continue
+                return []
             latest = max(results, key=lambda r: r.get('created', ''))
             url = latest.get('url', '')
-            if url:
-                datasets.append({
-                    'source_url': src,
-                    'download_url': url,
-                    'modified': latest.get('modified', ''),
-                })
+            if not url:
+                return []
+            return [{
+                'source_url': src,
+                'download_url': url,
+                'modified': latest.get('modified', ''),
+            }]
 
-        for src, desc in desc_sources:
+        def _fetch_one_desc_src(src: str, desc: str):
             try:
                 resp = _ur.urlopen(src, context=ctx, timeout=10)
             except _ue.HTTPError as he:
                 print(f"  [bus] ⚠ Skipping source {src}: HTTP error {he.code} {he.reason}")
-                continue
+                return []
             except (_ue.URLError, TimeoutError) as ue:
                 print(f"  [bus] ⚠ Skipping source {src}: {ue}")
-                continue
+                return []
             try:
                 data = json.loads(resp.read())
             except Exception as e:
                 print(f"  [bus] ⚠ Failed to parse JSON from {src}: {e}")
-                continue
+                return []
+
             results = data.get('results', [])
             matched = [r for r in results if r.get('description') == desc]
             if not matched:
-                continue
+                return []
             latest = max(matched, key=lambda r: r.get('created', ''))
             url = latest.get('url', '')
-            if url:
-                datasets.append({
-                    'source_url': src,
-                    'download_url': url,
-                    'modified': latest.get('modified', ''),
-                })
+            if not url:
+                return []
+            return [{
+                'source_url': src,
+                'download_url': url,
+                'modified': latest.get('modified', ''),
+            }]
+
+        max_workers = int(os.getenv('BUS_TIMETABLE_SOURCE_WORKERS', '6') or '6')
+
+        datasets = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = []
+            for src in sources:
+                futs.append(ex.submit(_fetch_one_src, src))
+            for src, desc in desc_sources:
+                futs.append(ex.submit(_fetch_one_desc_src, src, desc))
+            for fut in as_completed(futs):
+                try:
+                    datasets.extend(fut.result() or [])
+                except Exception as e:
+                    # Keep non-fatal: a single broken source shouldn't prevent startup.
+                    print(f"  [bus] ⚠ Skipping source (worker error): {e}")
 
         return datasets
 
@@ -1443,46 +1462,88 @@ class BusLoader:
             date_str: 'YYYY-MM-DD'
         """
         from datetime import date as _date
+        import os as _os
+        import time as _time
         query_date = _date.fromisoformat(date_str)
         dow_bit = 1 << query_date.weekday()       # Mon=0 → bit 1, Sun=6 → bit 64
+
+        timing_enabled = str(_os.environ.get('BUS_DAY_LOAD_TIMING') or '').lower() in ('1', 'true', 'yes')
+        _t0_total = _time.perf_counter() if timing_enabled else None
+
+        def _log(phase: str, t0: float | None):
+            if timing_enabled and t0 is not None:
+                print(f"[bus_dayload] {date_str} {phase}: {_time.perf_counter() - t0:.3f}s")
 
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
+        # ── Memoized static-ish reference tables ─────────────────────────
+        # These tables are large and (for typical deployments) change only
+        # when the timetable dataset is updated. When users jump between
+        # dates (e.g. +/- 1 week), repeatedly reloading them dominates IO.
+        #
+        # Cache them on the loader instance to speed up subsequent calls.
+        # Safe assumption: this BusLoader instance is long-lived within the
+        # server process. If the underlying DB is refreshed in-process,
+        # callers should create a new BusLoader.
+        cache = getattr(self, '_date_load_cache', None)
+        if cache is None:
+            cache = {}
+            setattr(self, '_date_load_cache', cache)
+
         # 1. Load serviced org working-day ranges
-        service_ranges = {}   # service_code -> [(start, end), ...]
-        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_serviced_org_working_days"):
-            service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
+        _t_ranges = _time.perf_counter() if timing_enabled else None
+        service_ranges = cache.get('service_ranges')
+        if service_ranges is None:
+            service_ranges = {}   # service_code -> [(start, end), ...]
+            for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_serviced_org_working_days"):
+                service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
+            cache['service_ranges'] = service_ranges
+        _log('phase_service_ranges', _t_ranges)
     # timing log removed
 
         # 1b. Load service operating periods (coarse outer boundary)
-        svc_periods = {}  # service_code -> (start_date | None, end_date | None)
-        for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
-            try:
-                sp_s = _date.fromisoformat(sd) if sd else None
-                sp_e = _date.fromisoformat(ed) if ed else None
-            except ValueError:
-                sp_s, sp_e = None, None
-            svc_periods[svc] = (sp_s, sp_e)
+        _t_periods = _time.perf_counter() if timing_enabled else None
+        svc_periods = cache.get('svc_periods')
+        if svc_periods is None:
+            svc_periods = {}  # service_code -> (start_date | None, end_date | None)
+            for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
+                try:
+                    sp_s = _date.fromisoformat(sd) if sd else None
+                    sp_e = _date.fromisoformat(ed) if ed else None
+                except ValueError:
+                    sp_s, sp_e = None, None
+                svc_periods[svc] = (sp_s, sp_e)
+            cache['svc_periods'] = svc_periods
+        _log('phase_svc_periods', _t_periods)
     # timing log removed
 
         # 1c. Hard ceiling for open-ended services: use the latest
         #     explicitly-defined end date anywhere in the DB.
-        row = cur.execute(
-            "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
-        ).fetchone()
-        max_end_str = row[0] if row and row[0] else None
-        hard_ceiling = _date.fromisoformat(max_end_str) if max_end_str else None
+        _t_ceiling = _time.perf_counter() if timing_enabled else None
+        hard_ceiling = cache.get('hard_ceiling')
+        if hard_ceiling is None:
+            row = cur.execute(
+                "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
+            ).fetchone()
+            max_end_str = row[0] if row and row[0] else None
+            hard_ceiling = _date.fromisoformat(max_end_str) if max_end_str else None
+            cache['hard_ceiling'] = hard_ceiling
+        _log('phase_hard_ceiling', _t_ceiling)
     # timing log removed
 
         # 2. Determine which journeys operate on this date
+        _t_op_fetch = _time.perf_counter() if timing_enabled else None
         valid_journeys = set()
         cur.execute(
             "SELECT journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working "
             "FROM bus_journey_operating_profile"
         )
         rows = cur.fetchall()
+        _log('phase_operating_profile_fetchall', _t_op_fetch)
     # timing log removed
+
+        _t_op_filter = _time.perf_counter() if timing_enabled else None
         for j_id, svc_code, dow_mask, op_start, op_end, org_ref, org_working in rows:
             # a) Date range check — journey-level, with service-period fallback
             try:
@@ -1526,6 +1587,8 @@ class BusLoader:
 
             valid_journeys.add(j_id)
 
+        _log('phase_operating_profile_filter_py', _t_op_filter)
+
 
         conn.close()
     # timing log removed
@@ -1535,29 +1598,36 @@ class BusLoader:
             return BusData(num_routes=0, num_journeys=0, num_stops=0)
 
         # 3. Build BusData filtering to valid_journeys only
+        _t_build0 = _time.perf_counter() if timing_enabled else None
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
         # Use temp table for valid journey IDs - much faster than IN(...) with thousands of values
+        _t_temp_j = _time.perf_counter() if timing_enabled else None
         cur.execute("CREATE TEMP TABLE _valid_journeys (journey_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_journeys (journey_id) FROM STDIN") as copy:
             for jid in valid_journeys:
                 copy.write_row((jid,))
+        _log('phase_temp_valid_journeys_copy', _t_temp_j)
     # timing log removed
 
         # Figure out which routes are still needed
+        _t_valid_routes = _time.perf_counter() if timing_enabled else None
         cur.execute(
             "SELECT DISTINCT route_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id"
         )
         valid_routes = {r[0] for r in cur.fetchall()}
+        _log('phase_valid_routes_distinct', _t_valid_routes)
     # timing log removed
 
         # Create temp table for valid routes too
+        _t_temp_r = _time.perf_counter() if timing_enabled else None
         cur.execute("CREATE TEMP TABLE _valid_routes (route_id TEXT PRIMARY KEY) ON COMMIT DROP")
         with cur.copy("COPY _valid_routes (route_id) FROM STDIN") as copy:
             for rid in valid_routes:
                 copy.write_row((rid,))
+        _log('phase_temp_valid_routes_copy', _t_temp_r)
     # timing log removed
 
         # Count for sizing
@@ -1571,6 +1641,7 @@ class BusLoader:
 
         # 3a. route_stops — only routes that have valid journeys (use JOIN)
         # Inline mapping to avoid repeated lookups inside BusData.add_route_stop
+        _t_route_stops = _time.perf_counter() if timing_enabled else None
         cur.execute(
             "SELECT rs.route_id, rs.atco_code FROM bus_route_stops rs "
             "JOIN _valid_routes vr ON rs.route_id = vr.route_id "
@@ -1603,10 +1674,12 @@ class BusLoader:
             bd.stop_to_routes[s_int].append(r_int)
         if current_route is not None:
             bd.route_stops[r_int] = stops_buf
+        _log('phase_route_stops', _t_route_stops)
     # timing log removed
 
         # 3b. journey_routes — only valid journeys (use JOIN)
         # Inline mapping to avoid repeated mapping calls in BusData.add_route_journeys
+        _t_journey_routes = _time.perf_counter() if timing_enabled else None
         cur.execute(
             "SELECT jr.route_id, jr.journey_id FROM bus_journey_routes jr "
             "JOIN _valid_journeys vj ON jr.journey_id = vj.journey_id "
@@ -1637,11 +1710,13 @@ class BusLoader:
             journeys_buf.append(j_int)
         if current_route is not None:
             bd.route_journeys[r_int] = journeys_buf
+        _log('phase_journey_routes', _t_journey_routes)
     # timing log removed
 
         # 3c. journey_times — only valid journeys (use JOIN)
         # Optimize: map ATCO codes to ints here and populate bd.journey_times
         # directly to avoid repeated mapping inside BusData.add_journey_times.
+        _t_journey_times = _time.perf_counter() if timing_enabled else None
         cur.execute(
             "SELECT jt.journey_id, jt.atco_code, jt.arrival_time FROM bus_journey_times jt "
             "JOIN _valid_journeys vj ON jt.journey_id = vj.journey_id "
@@ -1676,6 +1751,7 @@ class BusLoader:
             mapped_buf.append((s_int, arrival_time, arrival_time))
         if current_journey is not None:
             bd.journey_times[j_int] = mapped_buf
+        _log('phase_journey_times', _t_journey_times)
     # timing log removed
 
         # 3d. metadata (use JOIN)
@@ -1684,6 +1760,7 @@ class BusLoader:
         # same operator/service fields as the full DB loader.  Omitting
         # these caused merged in-memory entries to lack operator codes and
         # therefore fail strict operator matching.
+        _t_metadata = _time.perf_counter() if timing_enabled else None
         cur.execute(
             "SELECT jr.journey_id, jr.route_id, jr.line_name, jr.destination_display, "
             "op.service_code, op.operator_national_code "
@@ -1719,6 +1796,7 @@ class BusLoader:
                     "route_id":  route_id,
                     "line_name": line_name,
                 }
+        _log('phase_metadata', _t_metadata)
     # timing log removed
 
         # 3e. route tracks
@@ -1726,6 +1804,12 @@ class BusLoader:
         # IMPORTANT: date-filtered BusData must still include tracks for
         # the valid routes; otherwise journey geometry degenerates to
         # straight lines.
+
+        # Stop-to-stop fragment tracks (route_link_tracks) can be built during load
+        # (eager) but are expensive. Keep them optional; we now support a lazy
+        # on-demand build for a single route when requested.
+        build_link_fragments = str(_os.environ.get('BUS_BUILD_LINK_TRACKS') or '').lower() in ('1', 'true', 'yes')
+        _t_tracks = _time.perf_counter() if timing_enabled else None
         try:
             cur.execute(
                 "SELECT st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
@@ -1754,7 +1838,10 @@ class BusLoader:
                 track_buf.append(pt)
 
                 # Also maintain a stop-to-stop fragment index when possible.
-                if from_atco and to_atco:
+                # NOTE: this is expensive (many dict ops) and is not required
+                # for route-level geometry uses. Keep it behind a flag so day
+                # timetable loads during date-jumps stay fast.
+                if build_link_fragments and from_atco and to_atco:
                     try:
                         r_int = bd.map_routes.code_to_int.get(route_id)
                         if r_int is None:
@@ -1780,9 +1867,12 @@ class BusLoader:
             print("[bus_loader] WARNING: failed to load section tracks for date-filtered BusData")
             traceback.print_exc()
 
+        _log('phase_route_tracks', _t_tracks)
+
         conn.commit()  # commit to drop temp tables
     # timing log removed
         conn.close()
+        _log('phase_total', _t0_total)
         return bd
 
     # ── Stop name lookups (from stop_names table) ────────────────
@@ -1813,6 +1903,48 @@ class BusLoader:
         result = {row[0]: row[1] for row in cur.fetchall()}
         conn.close()
         return result
+
+    # ── Lazy per-route section track fetch ─────────────────────────
+
+    def get_route_link_tracks_for_route(self, route_id: str):
+        """Fetch stop-to-stop section track fragments for a single route.
+
+        This is used to build `MergedData.route_link_tracks` lazily for a
+        specific route_int when a request needs per-leg route_tracks.
+
+        Returns:
+            dict[(from_atco, to_atco)] -> list[(lat, lon)]
+        """
+        if not route_id:
+            return {}
+
+        conn = self._connect(self.db_path)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
+                "FROM bus_route_section_tracks st "
+                "WHERE st.route_id = %s "
+                "ORDER BY st.section_id, st.from_atco, st.to_atco, st.seq",
+                (route_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        out = {}
+        last_pt = {}
+        for from_atco, to_atco, _seq, lat, lon in rows:
+            if not from_atco or not to_atco:
+                continue
+            k = (from_atco, to_atco)
+            pt = (lat, lon)
+            prev = last_pt.get(k)
+            if prev is not None and prev == pt:
+                continue
+            out.setdefault(k, []).append(pt)
+            last_pt[k] = pt
+        return out
 
     def get_stop_count(self):
         """Return the number of unique stop names in the database."""

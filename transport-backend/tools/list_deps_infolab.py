@@ -34,7 +34,7 @@ def main():
         print('\nDepartures near', sname, 'id=', sid)
         routes = merged.stop_to_routes[sid]
         for route in routes:
-            stop_deps = merged.route_stop_departures[route].get(sid, [])
+            stop_deps = merged.get_route_stop_departures(route).get(sid, [])
             for dep_time, j in stop_deps:
                 if dep_time >= target_seconds - WINDOW and dep_time <= target_seconds + WINDOW:
                     jmeta = merged.journey_metadata[j] if j < len(merged.journey_metadata) else {}

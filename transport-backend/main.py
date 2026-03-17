@@ -26,6 +26,9 @@ from walking import Walking
 from time_utils import seconds_since_midnight, seconds_to_time
 import os
 from datetime import date as _date, timedelta as _timedelta
+import time as _time
+import threading as _threading
+from collections import OrderedDict
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 # Postgres-first: prefer environment DSNs, but provide a sensible
@@ -34,6 +37,94 @@ DEFAULT_PG = "postgresql://pguser:pgpass@127.0.0.1:5011/transport"
 BUS_DB_PATH   = os.environ.get("BUS_DB_DSN") or DEFAULT_PG
 TRAIN_DB_PATH = os.environ.get("TRAIN_DB_DSN") or DEFAULT_PG
 WALK_DB_PATH  = os.environ.get("WALK_DB_DSN") or DEFAULT_PG
+
+
+# ── Optional per-date timetable caches ─────────────────────────────────────
+#
+# UI use-case: users often jump around dates (e.g. +/- 1 week). Loading a new
+# date currently rebuilds BusData/TrainData from the DB on every miss. These
+# small in-memory LRU caches make subsequent jumps much faster.
+#
+# Tunables:
+#   DAY_TIMETABLE_CACHE_DATES: number of dates per mode to keep (default 8)
+#   DAY_LOAD_TIMING=1: print per-step timings inside build_for_date()
+
+def _get_cache_capacity() -> int:
+    try:
+        return max(0, int(os.environ.get('DAY_TIMETABLE_CACHE_DATES', '8')))
+    except Exception:
+        return 8
+
+
+_busdata_cache_lock = _threading.Lock()
+_busdata_cache: "OrderedDict[str, object]" = OrderedDict()  # date_str -> BusData
+
+_traindata_cache_lock = _threading.Lock()
+_traindata_cache: "OrderedDict[str, object]" = OrderedDict()  # date_str -> TrainData
+
+
+def _lru_get(cache: "OrderedDict[str, object]", key: str):
+    try:
+        val = cache.get(key)
+        if val is not None:
+            cache.move_to_end(key)
+        return val
+    except Exception:
+        return None
+
+
+def _lru_put(cache: "OrderedDict[str, object]", key: str, value):
+    cap = _get_cache_capacity()
+    if cap <= 0:
+        return
+    cache[key] = value
+    try:
+        cache.move_to_end(key)
+    except Exception:
+        pass
+    while len(cache) > cap:
+        try:
+            cache.popitem(last=False)
+        except Exception:
+            break
+
+
+def _load_busdata_cached(loader: BusLoader, date_str: str, *, timing: bool = False):
+    t0 = _time.perf_counter() if timing else None
+    with _busdata_cache_lock:
+        cached = _lru_get(_busdata_cache, date_str)
+    if cached is not None:
+        if timing:
+            dt = _time.perf_counter() - t0
+            print(f"    [dayload] bus {date_str}: cache hit ({dt:.3f}s)")
+        return cached
+
+    bd = loader.load_busdata_for_date(date_str)
+    with _busdata_cache_lock:
+        _lru_put(_busdata_cache, date_str, bd)
+    if timing:
+        dt = _time.perf_counter() - t0
+        print(f"    [dayload] bus {date_str}: built ({dt:.3f}s)")
+    return bd
+
+
+def _load_traindata_cached(train_loader: TrainLoader, date_str: str, *, timing: bool = False):
+    t0 = _time.perf_counter() if timing else None
+    with _traindata_cache_lock:
+        cached = _lru_get(_traindata_cache, date_str)
+    if cached is not None:
+        if timing:
+            dt = _time.perf_counter() - t0
+            print(f"    [dayload] train {date_str}: cache hit ({dt:.3f}s)")
+        return cached
+
+    td = train_loader.load_traindata_for_date(date_str)
+    with _traindata_cache_lock:
+        _lru_put(_traindata_cache, date_str, td)
+    if timing:
+        dt = _time.perf_counter() - t0
+        print(f"    [dayload] train {date_str}: built ({dt:.3f}s)")
+    return td
 
 
 def initialize_base():
@@ -307,6 +398,13 @@ def initialize_base():
             atco_loader=atco_loader,
             stop_name_fn=loader.get_stop_names_bulk,
         )
+        # Provide loader reference for lazy per-route route_link_tracks fetch.
+        # This keeps startup fast while allowing ATCO-keyed fragments to be
+        # built on-demand from the DB when a journey needs stop-to-stop geometry.
+        try:
+            merged.bus_loader = loader
+        except Exception:
+            pass
         router = RaptorRouter(merged)
 
         # Remap walking data
@@ -441,14 +539,17 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
 
     print(f"\n  Building network for {date_str} — {label}")
 
+    timing_enabled = str(os.environ.get('DAY_LOAD_TIMING') or '').lower() in ('1', 'true', 'yes')
+    _t_total0 = _time.perf_counter() if timing_enabled else None
+
     from concurrent.futures import ThreadPoolExecutor
     train_loader = TrainLoader(TRAIN_DB_PATH)
 
     with ThreadPoolExecutor(max_workers=4) as ex:
-        bus_a_f = ex.submit(loader.load_busdata_for_date, day_a_str)
-        train_a_f = ex.submit(train_loader.load_traindata_for_date, day_a_str)
-        bus_b_f = ex.submit(loader.load_busdata_for_date, day_b_str)
-        train_b_f = ex.submit(train_loader.load_traindata_for_date, day_b_str)
+        bus_a_f = ex.submit(_load_busdata_cached, loader, day_a_str, timing=timing_enabled)
+        train_a_f = ex.submit(_load_traindata_cached, train_loader, day_a_str, timing=timing_enabled)
+        bus_b_f = ex.submit(_load_busdata_cached, loader, day_b_str, timing=timing_enabled)
+        train_b_f = ex.submit(_load_traindata_cached, train_loader, day_b_str, timing=timing_enabled)
 
         bus_a = bus_a_f.result()
         train_a = train_a_f.result()
@@ -469,12 +570,19 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
     if mode != "bus":
         datasets.append((train_b, offset_b))
 
+    _t_merge0 = _time.perf_counter() if timing_enabled else None
     merged = MergedData(
         datasets,
         atco_loader=atco_loader,
         stop_name_fn=loader.get_stop_names_bulk,
     )
+    if timing_enabled and _t_merge0 is not None:
+        print(f"    [dayload] merge: {_time.perf_counter() - _t_merge0:.3f}s")
+
+    _t_router0 = _time.perf_counter() if timing_enabled else None
     router = RaptorRouter(merged)
+    if timing_enabled and _t_router0 is not None:
+        print(f"    [dayload] router_build: {_time.perf_counter() - _t_router0:.3f}s")
 
     # ── Remap walking data to MergedData stop integers ───────────
     # MergedData._group_mappers gives us (offset, count, mapper) per
@@ -517,11 +625,16 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
         for s_int in atco_to_merged_all.get(atco, []):
             stop_coords[s_int] = (lat, lon)
 
+    _t_walk0 = _time.perf_counter() if timing_enabled else None
     walking = Walking(inter_table, stop_coords)
+    if timing_enabled and _t_walk0 is not None:
+        print(f"    [dayload] walking_remap: {_time.perf_counter() - _t_walk0:.3f}s")
 
     print(f"  ✓ Network & Router ready for {date_str}")
     print(f"    Walking: {len(inter_table)} stops with transfers, "
           f"{len(stop_coords)} with coords")
+    if timing_enabled and _t_total0 is not None:
+        print(f"    [dayload] total: {_time.perf_counter() - _t_total0:.3f}s")
     return merged, router, walking
 
 

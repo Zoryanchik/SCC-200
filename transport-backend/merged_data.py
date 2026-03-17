@@ -17,6 +17,19 @@ each Data object's ``map_stops`` mapper.
 
 from modes import BUS, TRAIN
 
+import os
+import time
+import threading
+
+
+def _shift_journey_times_row(args):
+    """Worker for MERGE_PARALLEL_SHIFT.
+
+    Must be module-level so it can be pickled by multiprocessing.
+    """
+    jt_row, stop_offset, time_offset = args
+    return [(sid + stop_offset, atime + time_offset, dtime + time_offset) for (sid, atime, dtime) in jt_row]
+
 
 class MergedData:
     """Merge one or more Data objects into a flat, searchable structure.
@@ -37,6 +50,16 @@ class MergedData:
     """
 
     def __init__(self, datasets, atco_loader=None, stop_name_fn=None, build_flatten=True):
+        timing = os.getenv('MERGE_BUILD_TIMING', '0') == '1'
+        t0_all = time.perf_counter() if timing else None
+
+        def _ts():
+            return time.perf_counter()
+
+        def _log(label, dt):
+            # Keep it simple (stdout) so it works both in scripts and server logs.
+            print(f"[merge_timing] {label}: {dt:.3f}s")
+
         # Keep a reference for callers that need coord/name lookups later
         self.atco = atco_loader
 
@@ -80,6 +103,13 @@ class MergedData:
         stop_mode_local = self._stop_mode
         group_mappers_local = self._group_mappers
 
+        # Optional: parallelize the most allocation-heavy step (journey time shifting)
+        # using a process pool. This is guarded because it can increase memory use
+        # (data pickling) and is only beneficial for very large datasets.
+        parallel_shift = os.getenv('MERGE_PARALLEL_SHIFT', '0') == '1'
+
+        t0_phase = _ts() if timing else None
+
         for data, time_offset in datasets:
             if data is None:
                 data = _Empty()
@@ -93,30 +123,49 @@ class MergedData:
             n_journeys = len(data.journey_times)
             n_stops = len(data.stop_to_routes)
 
-            # --- route_stops: remap stop ids ---
+            # --- route_stops: remap stop ids (avoid intermediate list objects where possible) ---
             for route in data.route_stops:
-                route_stops_local.append([sid + stop_offset for sid in route])
+                out = list(route)
+                # in-place offset
+                for i in range(len(out)):
+                    out[i] += stop_offset
+                route_stops_local.append(out)
 
             # --- route_journeys: remap journey ids ---
             for rj in data.route_journeys:
-                route_journeys_local.append([jid + journey_offset for jid in rj])
+                out = list(rj)
+                for i in range(len(out)):
+                    out[i] += journey_offset
+                route_journeys_local.append(out)
 
             # --- journey_times: remap stop ids + shift times ---
-            for jt in data.journey_times:
-                journey_times_local.append([
-                    (sid + stop_offset, atime + time_offset, dtime + time_offset)
-                    for sid, atime, dtime in jt
-                ])
+            # This can dominate runtime due to tuple allocations.
+            if not parallel_shift:
+                for jt in data.journey_times:
+                    out = [None] * len(jt)
+                    for i, (sid, atime, dtime) in enumerate(jt):
+                        out[i] = (sid + stop_offset, atime + time_offset, dtime + time_offset)
+                    journey_times_local.append(out)
+            else:
+                # Parallel path: shift each journey in workers.
+                # Note: this pickles each journey list; enable only when beneficial.
+                from concurrent.futures import ProcessPoolExecutor
+
+                with ProcessPoolExecutor(max_workers=os.cpu_count() or 2) as ex:
+                    it = ((jt_row, stop_offset, time_offset) for jt_row in data.journey_times)
+                    for out in ex.map(_shift_journey_times_row, it, chunksize=256):
+                        journey_times_local.append(out)
 
             # --- stop_to_routes: remap route ids ---
             for routes_for_stop in data.stop_to_routes:
-                stop_to_routes_local.append([rid + route_offset for rid in routes_for_stop])
+                out = list(routes_for_stop)
+                for i in range(len(out)):
+                    out[i] += route_offset
+                stop_to_routes_local.append(out)
 
             # --- journey_to_route: remap route ids ---
             for r in data.journey_to_route:
-                journey_to_route_local.append(
-                    (r + route_offset) if (r is not None and r >= 0) else -1
-                )
+                journey_to_route_local.append((r + route_offset) if (r is not None and r >= 0) else -1)
 
             # --- metadata (copy as-is) ---
             route_metadata_local.extend(
@@ -161,7 +210,11 @@ class MergedData:
             journey_offset += n_journeys
             stop_offset += n_stops
 
+        if timing:
+            _log('phase_merge_remap_and_shift', _ts() - t0_phase)
+
         # --- build stop_metadata via ATCO codes ----------------------
+        t0_phase = _ts() if timing else None
         total_stops = len(self.stop_to_routes)
         codes_by_index = {}
         for g_offset, g_count, mapper in self._group_mappers:
@@ -195,11 +248,16 @@ class MergedData:
             name = name_map.get(code) if code else None
             self.stop_metadata.append(name or code or "")
 
+        if timing:
+            _log('phase_stop_metadata', _ts() - t0_phase)
+
         # --- build flattened route->journey mapping for faster iteration ---
         # Many downstream algorithms iterate all journey ids for a route.
         # Creating a flat array with per-route offsets avoids nested list
         # overhead and can be faster in hot loops. This step is optional
         # for benchmarking (controlled by *build_flatten*).
+        t0_phase = _ts() if timing else None
+
         if build_flatten:
             flat = []
             offsets = [0]
@@ -214,7 +272,11 @@ class MergedData:
             self._flat_route_journeys = []
             self._route_journey_offsets = [0]
 
+        if timing:
+            _log('phase_flatten_route_journeys', _ts() - t0_phase)
+
         # --- precompute journey_stop_index ----------------------------
+        t0_phase = _ts() if timing else None
         self.journey_stop_index = []
         jsi_append = self.journey_stop_index.append
         for jt in journey_times_local:
@@ -227,31 +289,105 @@ class MergedData:
                     idx_set(sid, pos)
             jsi_append(idx)
 
-        # --- precompute route_stop_departures -------------------------
-        # --- precompute route_stop_departures -------------------------
-        from collections import defaultdict
-        self.route_stop_departures = []
-        rsd_append = self.route_stop_departures.append
-        jsi_local = self.journey_stop_index
-        jt_local = journey_times_local
-        for _r_idx, journey_ids in enumerate(route_journeys_local):
-            stop_map = defaultdict(list)
-            for j_id in journey_ids:
-                if j_id >= len(jt_local):
-                    continue
-                jt = jt_local[j_id]
-                jsi = jsi_local[j_id]
-                for sid, pos in jsi.items():
-                    dep_time = jt[pos][2]
-                    stop_map[sid].append((dep_time, j_id))
-            # sort departure lists
-            for s, lst in stop_map.items():
-                lst.sort()
-            rsd_append(dict(stop_map))
+        if timing:
+            _log('phase_journey_stop_index', _ts() - t0_phase)
+
+        # --- route_stop_departures (lazy by default) -------------------
+        # This used to be fully precomputed during merge, but profiling
+        # shows it dominates merge time. Make it lazy by default and
+        # build per-route on first use.
+        self._route_stop_departures_cache = [None] * len(route_journeys_local)
+        self._route_stop_departures_lock = threading.Lock()
+
+        eager_rsd = os.getenv('EAGER_ROUTE_STOP_DEPARTURES', '0') == '1'
+        if eager_rsd:
+            t0_phase = _ts() if timing else None
+            for rid in range(len(route_journeys_local)):
+                self._route_stop_departures_cache[rid] = self._build_route_stop_departures(rid)
+            if timing:
+                _log('phase_route_stop_departures', _ts() - t0_phase)
+        elif timing:
+            _log('phase_route_stop_departures', 0.0)
+
+        if timing:
+            _log('total', _ts() - t0_all)
 
         # In-memory store for logged journeys (populated by router)
         # Keyed by a generated id (string) -> dict with journey details
         self.logged_journeys = {}
+
+        # --- route_link_tracks (lazy per-route builder) ----------------
+        # Building per-link fragments for every route during day load is
+        # expensive. Many requests never need fragments (they display the
+        # full route polyline), so keep link fragments lazy and build them
+        # only when geometry slicing needs them.
+        #
+        # Contract:
+        # - `get_route_link_tracks(route_int)` returns a dict mapping
+        #   (from_stop_int, to_stop_int) -> list[(lat, lon)].
+        # - If fragments already exist (loaded eagerly), it returns them.
+        # - If not, it derives fragments from `route_tracks[route_int]` by
+        #   splitting on stop coordinates from `route_stops[route_int]`.
+        self._route_link_tracks_lock = threading.Lock()
+
+    def _build_route_stop_departures(self, route_id_int: int):
+        """Build and return {stop_int: [(dep_time, journey_id), ...sorted...]} for a route."""
+        from collections import defaultdict
+
+        if route_id_int < 0 or route_id_int >= len(self.route_journeys):
+            return {}
+
+        journey_ids = self.route_journeys[route_id_int]
+        stop_map = defaultdict(list)
+        jt_local = self.journey_times
+        jsi_local = self.journey_stop_index
+        jt_len = len(jt_local)
+
+        for j_id in journey_ids:
+            if j_id < 0 or j_id >= jt_len:
+                continue
+            jt = jt_local[j_id]
+            jsi = jsi_local[j_id]
+            jsi_get = jsi.get
+            for sid in jsi:
+                pos = jsi_get(sid)
+                dep_time = jt[pos][2]
+                stop_map[sid].append((dep_time, j_id))
+
+        for lst in stop_map.values():
+            lst.sort()
+
+        return dict(stop_map)
+
+    def get_route_stop_departures(self, route_id_int: int):
+        """Lazy accessor for route_stop_departures for a given route."""
+        if route_id_int < 0 or route_id_int >= len(self._route_stop_departures_cache):
+            return {}
+        cached = self._route_stop_departures_cache[route_id_int]
+        if cached is not None:
+            return cached
+
+        # Double-checked locking: route builds are independent and safe.
+        with self._route_stop_departures_lock:
+            cached2 = self._route_stop_departures_cache[route_id_int]
+            if cached2 is not None:
+                return cached2
+            built = self._build_route_stop_departures(route_id_int)
+            self._route_stop_departures_cache[route_id_int] = built
+            return built
+
+    @property
+    def route_stop_departures(self):
+        """Backwards-compatible view.
+
+        Note: iterating this property forces a full build of all routes.
+        Prefer `get_route_stop_departures(route_id)` in hot code.
+        """
+        # Materialize all routes on demand.
+        for rid in range(len(self._route_stop_departures_cache)):
+            if self._route_stop_departures_cache[rid] is None:
+                self._route_stop_departures_cache[rid] = self._build_route_stop_departures(rid)
+        return self._route_stop_departures_cache
 
     # ── Helpers ───────────────────────────────────────────────────
 
@@ -281,6 +417,135 @@ class MergedData:
                 except Exception:
                     return None
         return None
+
+    # ── Route link track fragments ──────────────────────────────────
+
+    def _build_route_link_tracks_from_track(self, route_id_int: int):
+        """Derive per-link track fragments for a route from its full polyline.
+
+        This is a best-effort builder: if we can't split cleanly, it returns
+        an empty dict (callers should fall back to the full `route_tracks`).
+        """
+        try:
+            route_stops = self.route_stops[route_id_int]
+            if not route_stops or len(route_stops) < 2:
+                return {}
+
+            # Full track polyline: list[(lat, lon)]
+            track = self.route_tracks[route_id_int] if route_id_int < len(self.route_tracks) else None
+            if not track:
+                return {}
+
+            # Stop coordinates are stored on the route metadata if present.
+            # We try to locate them from route_tracks data itself (matching
+            # exact points) by scanning. This is intentionally conservative.
+            # If your dataset provides a faster / exact link fragment table,
+            # it will be used instead.
+            #
+            # Current bus loader builds fragments using stop point matches;
+            # we mimic that idea but keep it minimal.
+            #
+            # Strategy:
+            # - For each adjacent stop pair (fs, ts), find the first index in
+            #   `track` that equals stop i's coordinate and the last index that
+            #   equals stop i+1's coordinate; slice between them.
+            # - If we fail to find any stop coordinate matches, give up.
+
+            # Pull stop coordinates from route metadata if available.
+            meta = None
+            if route_id_int < len(self.route_metadata):
+                meta = self.route_metadata[route_id_int]
+
+            stop_points = None
+            if isinstance(meta, dict):
+                stop_points = meta.get('stop_points') or meta.get('stop_coords')
+
+            if not stop_points or len(stop_points) != len(route_stops):
+                return {}
+
+            # Normalize points into tuples so equality works.
+            stop_points = [tuple(p) for p in stop_points]
+            track_points = [tuple(p) for p in track]
+
+            # Build index list of stop positions in the polyline.
+            stop_idx = []
+            pos = 0
+            for sp in stop_points:
+                try:
+                    j = track_points.index(sp, pos)
+                except ValueError:
+                    return {}
+                stop_idx.append(j)
+                pos = j
+
+            out = {}
+            for i in range(len(route_stops) - 1):
+                fs = route_stops[i]
+                ts = route_stops[i + 1]
+                a = stop_idx[i]
+                b = stop_idx[i + 1]
+                if b <= a:
+                    continue
+                frag = track_points[a:b + 1]
+                if frag:
+                    out[(fs, ts)] = list(frag)
+            return out
+        except Exception:
+            return {}
+
+    def get_route_link_tracks(self, route_id_int: int):
+        """Lazy accessor for per-link route fragments for a given route."""
+        if route_id_int < 0 or route_id_int >= len(self.route_link_tracks):
+            return {}
+
+        cached = self.route_link_tracks[route_id_int]
+        if cached:
+            return cached
+
+        with self._route_link_tracks_lock:
+            cached2 = self.route_link_tracks[route_id_int]
+            if cached2:
+                return cached2
+
+            # Preferred lazy path (ATCO-driven): if a BusLoader is attached,
+            # fetch section tracks for this single route_id from the DB and
+            # map them onto (from_stop_int,to_stop_int) keys.
+            built = None
+            try:
+                loader = getattr(self, 'bus_loader', None)
+                meta = self.route_metadata[route_id_int] if route_id_int < len(self.route_metadata) else None
+                rid = meta.get('route_id') if isinstance(meta, dict) else None
+                if loader and rid:
+                    raw = loader.get_route_link_tracks_for_route(rid)
+                    if raw:
+                        # Build ATCO->stop_int map within this route.
+                        route_stops = self.route_stops[route_id_int] if route_id_int < len(self.route_stops) else []
+                        atco_to_stop = {}
+                        for s in route_stops:
+                            try:
+                                c = self.get_atco_code(s)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop.setdefault(c, s)
+
+                        out = {}
+                        for (fa, ta), pts in raw.items():
+                            fs = atco_to_stop.get(fa)
+                            ts = atco_to_stop.get(ta)
+                            if fs is None or ts is None:
+                                continue
+                            if pts and len(pts) >= 2:
+                                out[(fs, ts)] = list(pts)
+                        built = out
+            except Exception:
+                built = None
+
+            if built is None:
+                built = self._build_route_link_tracks_from_track(route_id_int)
+            # Store even empty dict so we don't repeatedly attempt.
+            self.route_link_tracks[route_id_int] = built
+            return built
 
 
 class _Empty:
