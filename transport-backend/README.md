@@ -74,6 +74,28 @@ cd transport-backend
 python3 __main__.py
 ```
 
+### Routing performance (disable background work)
+
+When benchmarking routing latency/throughput, you may want to disable background
+tasks that can consume CPU and add noise:
+
+- Live updates polling (WebSocket/STOMP broker)
+- Delay-map updater thread
+- Router prebuilds triggered after a delay-map refresh
+
+Set these environment variables when starting the backend:
+
+- `BUS_DISABLE_LIVE_POLLING=1` — do not start live WebSocket/STOMP polling
+- `BUS_DISABLE_DELAY_UPDATER=1` — do not start the delay-map updater thread
+- `BUS_DISABLE_ROUTER_PREBUILD=1` — do not spawn background router prebuilds after delay-map refresh
+
+If you want to hide **all** live data during benchmarks (so the frontend also stops
+showing live buses/trains), you can additionally disable live HTTP endpoints:
+
+- `BUS_DISABLE_LIVE_ENDPOINTS=1` — `/bus/live/*` returns `[]` and `/rail/departures/*` returns an empty payload (no upstream calls)
+
+Defaults are unchanged when these variables are not set.
+
 If you need custom DB locations, set `BUS_DB_DSN`, `TRAIN_DB_DSN`, and
 `WALK_DB_DSN` in your environment before starting the backend.
 ````

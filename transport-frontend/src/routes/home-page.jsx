@@ -286,10 +286,14 @@ const normalizeCoords = (raw) => {
 const fetchGeometryForLegs = async (legs) => {
   if (!Array.isArray(legs) || legs.length === 0) return [];
 
-  // Some routers return the canonical route_id on the overall route meta
-  // rather than on each individual transit leg. If the caller attached that
-  // value as legs._route_id (or similar), thread it through so we can request
-  // stored track subsegments.
+  // Some planners expose a plan-level identifier that should be threaded through
+  // so /route/leg-geometry can fetch stored track subsegments.
+  // New canonical key: route_int (dense in-memory route index).
+  const fallbackRouteInt = (
+    (legs && (legs.route_int ?? legs.routeInt ?? legs._route_int ?? legs._routeInt)) ??
+    null
+  );
+  // Back-compat only: route_id may still exist in older responses.
   const fallbackRouteId = (
     (legs && (legs.route_id || legs.routeId || legs._route_id || legs._routeId)) ||
     null
@@ -363,6 +367,13 @@ const fetchGeometryForLegs = async (legs) => {
   // Avoid falling back to other ids (journey ids / legacy ids) because
   // they can refer to a different variant and therefore draw a different
   // track.
+  const routeInt = (
+    (leg?.meta && (leg.meta.route_int ?? leg.meta.routeInt ?? leg.meta._route_int ?? leg.meta._routeInt)) ??
+    leg?.route_int ??
+    leg?.routeInt ??
+    fallbackRouteInt ??
+    null
+  );
   const routeId = (
     (leg?.meta && (leg.meta.route_id || leg.meta.canonical_route_id || leg.meta.routeId)) ||
     leg?.route_id ||
@@ -379,7 +390,10 @@ const fetchGeometryForLegs = async (legs) => {
       // stop ids) which is tied to the journey's canonical route_id.
 
       let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(osrmMode)}`;
-      if (routeId) {
+      // Prefer route_int for in-memory track lookup, fall back to route_id for older backends.
+      if (routeInt != null && routeInt !== '') {
+        url += `&route_int=${encodeURIComponent(routeInt)}`;
+      } else if (routeId) {
         url += `&route_id=${encodeURIComponent(routeId)}`;
       }
 
@@ -389,7 +403,7 @@ const fetchGeometryForLegs = async (legs) => {
         const isBusLeg = isBusLikeLeg;
         const fromStopId = fs?.id || fs?.atco_code || fs?.atco || fs?.atcoCode || null;
         const toStopId = ts?.id || ts?.atco_code || ts?.atco || ts?.atcoCode || null;
-        if (routeId && isBusLeg && fromStopId && toStopId) {
+        if ((routeInt != null || routeId) && isBusLeg && fromStopId && toStopId) {
           url += `&from_stop_id=${encodeURIComponent(fromStopId)}`;
           url += `&to_stop_id=${encodeURIComponent(toStopId)}`;
         }

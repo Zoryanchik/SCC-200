@@ -208,6 +208,38 @@ class TestBusDelayHandling:
         assert data[0]["delay_minutes"] == round(155 / 60, 1)
 
 
+class TestBusLiveNoDbContract:
+    """Regression: live matching must be in-memory only (no DB fallbacks)."""
+
+    def test_live_matching_does_not_touch_db_modules(self, client: TestClient, monkeypatch):
+        # Force the endpoint down the timetable-matching path.
+        api_module.get_bus_live.return_value = [
+            ("10", "City Centre", 53.48, -2.24, "SCCU", None, None, None, {"operator_ref": "SCCU"}),
+        ]
+
+        # If any code tries to use BusLoader / psycopg, fail the test.
+        def _boom(*args, **kwargs):
+            raise AssertionError("DB access attempted in live matching")
+
+        # bus_loader is one of the pre-mocked heavy modules; assert it isn't used.
+        if hasattr(sys.modules.get("bus_loader"), "BusLoader"):
+            monkeypatch.setattr(sys.modules["bus_loader"], "BusLoader", _boom, raising=False)
+
+        # Also guard direct psycopg.connect usage from api.py.
+        if hasattr(api_module, "psycopg"):
+            monkeypatch.setattr(api_module.psycopg, "connect", _boom, raising=False)
+
+        # Make _compute_delay_from_timetable deterministic and ensure it doesn't
+        # trigger any hidden DB fallbacks.
+        monkeypatch.setattr(api_module, "_compute_delay_from_timetable", lambda *a, **k: (0, 0))
+
+        resp = client.get("/bus/live/SCCU", params={"lat": 53.48, "lon": -2.24})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert data and data[0].get("status") == "On time"
+
+
 class TestBusLiveDelayParsing:
     """Unit-level tests for the delay parsing helpers in bus_live.py.
 

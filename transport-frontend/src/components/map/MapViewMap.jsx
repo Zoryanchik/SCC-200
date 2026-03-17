@@ -49,6 +49,10 @@ const createCustomIcon = (type, color, label = null, bearing = null) => {
 	const tipDist = r + arrowH;
 	const cx = tipDist + PAD;   // canvas center = circle center (24)
 	const S = cx * 2;           // total SVG canvas size (48) — equal on all sides
+	// Leaflet uses `iconSize` as the interactive hitbox for divIcons.
+	// Keep the hitbox ~equal to the visible circle badge (2r) rather than
+	// the padded SVG canvas (S), so hover/click triggers at the icon edge.
+	const hit = r * 2;
 
 	const rot = (bearing != null && !Number.isNaN(Number(bearing))) ? Number(bearing) : null;
 	const hasBearing = rot !== null;
@@ -119,7 +123,7 @@ const createCustomIcon = (type, color, label = null, bearing = null) => {
 	return L.divIcon({
 		html: svg,
 		className: 'custom-marker-icon',
-		iconSize: [S, S],
+		iconSize: [hit, hit],
 		iconAnchor: [cx, cx],
 		popupAnchor: [0, -(cx + 2)],
 	});
@@ -1485,9 +1489,10 @@ const makeMarkerSignature = (m) => {
 							key={marker.id}
 							position={marker.position}
 							icon={marker.type === 'bus'
-							? createCustomIcon('bus', busIconColor(marker.delayMinutes, isBusMappedLocal(marker)), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
-								: TRAIN_ICON} eventHandlers={{
-													click: async (e) => {
+								? createCustomIcon('bus', busIconColor(marker.delayMinutes, isBusMappedLocal(marker)), marker.routeNumber != null ? String(marker.routeNumber) : null, marker.bearing != null ? Number(marker.bearing) : null)
+								: TRAIN_ICON}
+							eventHandlers={{
+								click: async (e) => {
 									// Prevent the click from bubbling to the map which
 									// would trigger MapClickClearHandler (clearing routes)
 									// and potential UI state changes that can make the
@@ -1557,38 +1562,45 @@ const makeMarkerSignature = (m) => {
 														});
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
-																	// Best-effort: if backend provides canonical route_ids for this line,
-																	// try to fetch the in-memory route_tracks geometry and render it.
+																		// Best-effort: if backend provides canonical route_ints for this line,
+																		// try to fetch the in-memory route_tracks geometry and render it.
 																	try {
-																		const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
+																			const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
+																			const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 																		const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-																		try { console.debug('[map] label route_ids (cached)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-																		if (routeIds && routeIds.length && pos && pos.length === 2) {
+																			try { console.debug('[map] label route_ints/route_ids (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+																			if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
 																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
-																			// but rely on route_id to return route_tracks.
+																				// but rely on route_int/route_id to return route_tracks.
 																			const eps = 0.0001;
-																			for (const ridRaw of routeIds) {
-																				const rid = ridRaw != null ? String(ridRaw) : null;
-																				if (!rid) continue;
-																				try { console.debug('[map] trying route_id (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
-																				let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
-																				url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
-																				url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
-																				try { console.debug('[map] leg-geometry request (cached)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																					const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
+																					if (!candidates.length && routeIds && routeIds.length) {
+																						candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
+																					}
+																					for (const cand of candidates) {
+																						const raw = cand && cand.value != null ? cand.value : null;
+																						const val = raw != null ? String(raw) : null;
+																						if (!val) continue;
+																						try { console.debug('[map] trying leg-geometry candidate (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
+																					let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																					url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																					url += `&mode=driving`;
+																					url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																					try { console.debug('[map] leg-geometry request (cached)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																				// IMPORTANT: Don't use a short AbortController timeout here.
 																				// In practice, other selection interactions can abort pending
 																				// requests, and the extra controller/timeout increases the chance
 																				// we self-abort before the backend responds.
 																				const resp = await fetch(url);
-																				if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
-																					try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
+																						try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																					break;
 																				}
-																				if (!resp) {
-																					try { console.debug('[map] leg-geometry no response (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					if (!resp) {
+																						try { console.debug('[map] leg-geometry no response (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																					continue;
 																				}
-																				try { console.debug('[map] leg-geometry status (cached)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
+																					try { console.debug('[map] leg-geometry status (cached)', { line: String(line), kind: cand.kind, val, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
 																				if (!resp.ok) continue;
 																				let data = null;
 																				let norm = null;
@@ -1694,22 +1706,29 @@ const makeMarkerSignature = (m) => {
 															lon: pos && pos.length === 2 ? pos[1] : undefined,
 														});
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
-														// Best-effort: if backend provides canonical route_ids for this line,
-														// try to fetch the in-memory route_tracks geometry and render it.
+																					// Best-effort: if backend provides canonical route_ints for this line,
+																					// try to fetch the in-memory route_tracks geometry and render it.
 														try {
-															const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
+																						const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
+																						const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 															const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-														try { console.debug('[map] label route_ids (post-route)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-															if (routeIds && routeIds.length && pos && pos.length === 2) {
+																					try { console.debug('[map] label route_ints/route_ids (post-route)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+																					if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
 																const eps = 0.0001;
-																for (const ridRaw of routeIds) {
-																	const rid = ridRaw != null ? String(ridRaw) : null;
-																	if (!rid) continue;
-																	try { console.debug('[map] trying route_id (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
-																	let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
-																	url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
-																	url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
-																	try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																						const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
+																						if (!candidates.length && routeIds && routeIds.length) {
+																							candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
+																						}
+																						for (const cand of candidates) {
+																							const raw = cand && cand.value != null ? cand.value : null;
+																							const val = raw != null ? String(raw) : null;
+																							if (!val) continue;
+																							try { console.debug('[map] trying leg-geometry candidate (post-route)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
+																							let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																							url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																							url += `&mode=driving`;
+																							url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																							try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																	const controllerGeom = new AbortController();
 																	const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
 																	const resp = await fetch(url, { signal: controllerGeom.signal });
@@ -2083,7 +2102,7 @@ const makeMarkerSignature = (m) => {
 												<Tooltip direction="top" offset={[0, -15]} className="custom-vehicle-tooltip">
 													<div dangerouslySetInnerHTML={{ __html: tooltipText }} />
 												</Tooltip>
-											</Marker>
+												</Marker>
 										);
 									} catch (err) {
 										return (

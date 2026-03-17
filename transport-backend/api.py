@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
 import asyncio
+from contextlib import contextmanager
 from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
@@ -39,6 +40,18 @@ from urllib.error import URLError
 import atexit
 
 logger = logging.getLogger(__name__)
+
+
+def _live_endpoints_disabled() -> bool:
+    """Return True when live endpoints should be hard-disabled.
+
+    This is intended for routing/performance benchmarks where *no* live
+    network fetches (bus live feeds, rail departures, delay recompute)
+    should run and live endpoints should return empty results.
+
+    Enable with: BUS_DISABLE_LIVE_ENDPOINTS=1
+    """
+    return str(os.environ.get('BUS_DISABLE_LIVE_ENDPOINTS') or '') == '1'
 
 # Add the current directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -180,18 +193,24 @@ async def lifespan(app: FastAPI):
         return
     # Configure and start the WebSocket/STOMP live-updates broker
     try:
-        # Poll for live updates every 20s and use a 20s HTTP timeout for feed fetches
-        ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=20), poll_interval=20.0)
-        await ws_broker.start_polling()
+        if os.environ.get('BUS_DISABLE_LIVE_POLLING') == '1':
+            logger.info('BUS_DISABLE_LIVE_POLLING=1 set — not starting live polling')
+        else:
+            # Poll for live updates every 20s and use a 20s HTTP timeout for feed fetches
+            ws_broker.configure(bus_live_factory=lambda: BusLive(timeout=20), poll_interval=20.0)
+            await ws_broker.start_polling()
     except Exception as exc:  # pragma: no cover
         logger.warning("WebSocket broker startup failed: %s", exc)
     # Start background delay updater thread (today-only updates)
-    stop_event = threading.Event()
-    delay_thread = threading.Thread(target=_delay_updater_loop, args=(stop_event,), daemon=True)
-    delay_thread.start()
-    # Expose so shutdown can stop it
-    globals()['_delay_updater_stop_event'] = stop_event
-    globals()['_delay_updater_thread'] = delay_thread
+    if os.environ.get('BUS_DISABLE_DELAY_UPDATER') == '1':
+        logger.info('BUS_DISABLE_DELAY_UPDATER=1 set — not starting delay updater thread')
+    else:
+        stop_event = threading.Event()
+        delay_thread = threading.Thread(target=_delay_updater_loop, args=(stop_event,), daemon=True)
+        delay_thread.start()
+        # Expose so shutdown can stop it
+        globals()['_delay_updater_stop_event'] = stop_event
+        globals()['_delay_updater_thread'] = delay_thread
     yield  # — server is running
     # Shutdown: stop the live-updates poll loop
     try:
@@ -211,6 +230,34 @@ async def lifespan(app: FastAPI):
     
 
 app = FastAPI(title="Transport API", lifespan=lifespan)
+
+# --- Routing activity gate ---------------------------------------------------
+# You asked for the opposite of request throttling: when routing is running,
+# pause other CPU-heavy background work (live bus polling/STOMP, delay updates).
+#
+# We implement this as a process-wide counter that can be incremented from both
+# async and threaded code paths.
+_routing_active_lock = threading.Lock()
+_routing_active_count = 0
+
+
+def is_routing_active() -> bool:
+    """Return True when a routing computation is currently running."""
+    with _routing_active_lock:
+        return _routing_active_count > 0
+
+
+@contextmanager
+def routing_activity():
+    """Context manager marking routing as active for its duration."""
+    global _routing_active_count
+    with _routing_active_lock:
+        _routing_active_count += 1
+    try:
+        yield
+    finally:
+        with _routing_active_lock:
+            _routing_active_count = max(0, _routing_active_count - 1)
 
 
 def _suggest_similar_route_ids(route_id: str, limit: int = 10) -> list[str]:
@@ -295,58 +342,26 @@ def debug_route_tracks(route_id: str, sample: int = 5, suggest: int = 10):
         coords_sample = []
 
     # Optional: when a VJ-style route_id is provided, show candidate family keys
-    # (RS*/JPS*) that share the same base and whether they actually have tracks.
+    # (RS*/JPS*) derived from in-memory metadata only (no DB).
     candidates = []
     try:
         if isinstance(route_id, str) and ':VJ' in route_id:
             vj_base = route_id.split(':VJ', 1)[0]
-            # 1) Candidates from in-memory metadata (best-effort)
-            from_meta = []
+            family = []
+            seen = set()
             try:
                 cand_ids = _suggest_similar_route_ids(route_id, limit=80)
                 for rid2 in cand_ids:
-                    if isinstance(rid2, str) and (
-                        rid2.startswith(vj_base + ':RS') or rid2.startswith(vj_base + ':JPS')
-                    ):
-                        from_meta.append(rid2)
+                    if not isinstance(rid2, str) or rid2 in seen:
+                        continue
+                    if not (rid2.startswith(vj_base + ':RS') or rid2.startswith(vj_base + ':JPS')):
+                        continue
+                    seen.add(rid2)
+                    family.append(rid2)
+                    if len(family) >= 20:
+                        break
             except Exception:
-                from_meta = []
-
-            # 2) Candidates from DB (authoritative for what keys exist)
-            from_db = []
-            try:
-                like_rs = vj_base + ':RS%'
-                like_jps = vj_base + ':JPS%'
-                conn = _get_db_connection()
-                cur = conn.cursor()
-                # Prefer section tracks for RS discovery.
-                try:
-                    cur.execute(
-                        "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT 60",
-                        (like_rs,),
-                    )
-                    from_db.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            except Exception:
-                from_db = []
-
-            # De-dup (DB first because it's the source of truth)
-            family = []
-            seen = set()
-            for rid2 in (from_db + from_meta):
-                if not isinstance(rid2, str) or rid2 in seen:
-                    continue
-                if not (rid2.startswith(vj_base + ':RS') or rid2.startswith(vj_base + ':JPS')):
-                    continue
-                seen.add(rid2)
-                family.append(rid2)
-                if len(family) >= 20:
-                    break
+                family = []
 
             for rid2 in family:
                 t2 = []
@@ -647,37 +662,9 @@ def route_geometry(route_id: str):
 
 
 # --- Geometry assembly endpoint helpers -------------------------------
-def _get_db_connection():
-    from main import BUS_DB_PATH
-    return psycopg.connect(BUS_DB_PATH)
-
-
-def _fetch_logged_journey_from_db(ljid: str):
-    """Return the JSON object stored in bus_journeys for id=ljid, or None."""
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT journey FROM bus_journeys WHERE id = %s", (ljid,))
-        row = cur.fetchone()
-        conn.close()
-        if not row:
-            return None
-        return row[0]
-    except Exception:
-        return None
-
-
-def _fetch_journey_times_external(journey_id: str):
-    """Return ordered list of (atco_code, arrival_time) for an external journey_id from bus_journey_times."""
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT atco_code, arrival_time FROM bus_journey_times WHERE journey_id = %s ORDER BY arrival_time", (journey_id,))
-        rows = cur.fetchall()
-        conn.close()
-        return [(r[0], r[1]) for r in rows]
-    except Exception:
-        return []
+# NOTE: Live matching and geometry resolution are intentionally in-memory only.
+# DB helpers for fetching logged journeys / journey_times are removed to avoid
+# accidental fallback to database lookups.
 
 
 @app.get("/debug/match_explain")
@@ -1119,6 +1106,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                        to_lat: float, to_lon: float,
                        mode: str = "driving",
                        route_id: str | None = None,
+                       route_int: int | None = None,
                        from_stop_id: str | None = None,
                        to_stop_id: str | None = None):
     """Return geometry for a single journey leg.
@@ -1160,8 +1148,132 @@ def route_leg_geometry(from_lat: float, from_lon: float,
         if norm_mode == 'walk':
             norm_mode = 'walking'
 
-        if route_id and norm_mode != 'walking':
-            tracks = _fetch_route_tracks(route_id)
+        if norm_mode != 'walking':
+            tracks = []
+            frag_seg = []
+            # Prefer dense route_int lookup when provided.
+            if route_int is not None:
+                try:
+                    merged = None
+                    if globals().get('_base_cache'):
+                        prebuilt = _base_cache.get('prebuilt_cache')
+                        if prebuilt:
+                            for _k, v in prebuilt.items():
+                                try:
+                                    merged = v[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                    if merged is None:
+                        rcache = globals().get('_router_cache')
+                        rlock = globals().get('_router_cache_lock')
+                        if rcache is not None:
+                            if rlock:
+                                with rlock:
+                                    items = list(rcache.values())
+                            else:
+                                items = list(rcache.values())
+                            for val in items:
+                                try:
+                                    merged = val[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                    if merged is not None:
+                        ri = int(route_int)
+                        # If we have stop context, prefer stitching from fragment index.
+                        if merged is not None and from_stop_id and to_stop_id:
+                            try:
+                                links = getattr(merged, 'route_link_tracks', None)
+                                if links and 0 <= ri < len(links):
+                                    fs = None
+                                    ts = None
+                                    route_stops = []
+                                    try:
+                                        route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+                                    except Exception:
+                                        route_stops = []
+                                    try:
+                                        if route_stops and (from_stop_id or to_stop_id):
+                                            atco_to_stop = {}
+                                            for s in route_stops:
+                                                try:
+                                                    c = merged.get_atco_code(s)
+                                                except Exception:
+                                                    c = None
+                                                if c:
+                                                    atco_to_stop.setdefault(c, s)
+                                            if from_stop_id:
+                                                fs = atco_to_stop.get(from_stop_id)
+                                            if to_stop_id:
+                                                ts = atco_to_stop.get(to_stop_id)
+                                    except Exception:
+                                        fs = None
+                                        ts = None
+
+                                    if fs is not None and ts is not None:
+                                        link_map = links[ri]
+                                        # route_stops already resolved above.
+
+                                        frag = None
+                                        # Primary: chain along route stop order.
+                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
+                                            i = route_stops.index(fs)
+                                            j = route_stops.index(ts)
+                                            step = 1 if j > i else -1
+                                            stitched = []
+                                            ok = True
+                                            k = i
+                                            while k != j:
+                                                a = route_stops[k]
+                                                b = route_stops[k + step]
+                                                seg2 = link_map.get((a, b))
+                                                if not seg2:
+                                                    rev2 = link_map.get((b, a))
+                                                    if rev2:
+                                                        seg2 = list(reversed(rev2))
+                                                if not seg2:
+                                                    ok = False
+                                                    break
+                                                if stitched and stitched[-1] == seg2[0]:
+                                                    stitched.extend(seg2[1:])
+                                                else:
+                                                    stitched.extend(seg2)
+                                                k += step
+                                            if ok and len(stitched) >= 2:
+                                                frag = stitched
+
+                                        # Secondary: exact fragment (either direction)
+                                        if not frag:
+                                            frag = link_map.get((fs, ts))
+                                            if not frag:
+                                                rev = link_map.get((ts, fs))
+                                                if rev:
+                                                    frag = list(reversed(rev))
+
+                                        if frag and len(frag) >= 2:
+                                            frag_seg = [[t[0], t[1]] for t in frag]
+                                            if trace:
+                                                print('[route_leg_geometry] returning fragment-stitched subsegment', {
+                                                    'route_int': ri,
+                                                    'len': len(frag_seg),
+                                                })
+                                            return {"coords": frag_seg, "source": "route_tracks"}
+                            except Exception:
+                                frag_seg = []
+
+                        if 0 <= ri < len(getattr(merged, 'route_tracks', []) or []):
+                            pts = merged.route_tracks[ri]
+                            if pts:
+                                tracks = [[t[0], t[1]] for t in pts]
+                except Exception:
+                    tracks = []
+
+            # Back-compat: allow legacy route_id lookup (in-memory only).
+            if not tracks and route_id:
+                tracks = _fetch_route_tracks(route_id)
             if trace:
                 try:
                     tlen = len(tracks) if isinstance(tracks, list) else None
@@ -1201,7 +1313,10 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                     if to_stop_id not in stop_coords and isinstance(to_lat, (int, float)) and isinstance(to_lon, (int, float)):
                         stop_coords[to_stop_id] = (to_lat, to_lon)
 
-                    seg = _subsegment_from_tracks(route_id, [from_stop_id, to_stop_id], stop_coords)
+                    # IMPORTANT: slice from the already-resolved in-memory track.
+                    # This avoids any possibility of route_id→DB resolution
+                    # creeping back in via helper functions.
+                    seg = _subsegment_from_coords(tracks, [from_stop_id, to_stop_id], stop_coords)
                     if seg and len(seg) >= 2:
                         if trace:
                             print('[route_leg_geometry] returning route_tracks subsegment', {'len': len(seg)})
@@ -1249,8 +1364,7 @@ def _fetch_route_tracks(route_id: str):
 
     Prefer in-memory route_tracks from any loaded MergedData (prebuilt cache
     and router cache) so consumers use the timetable's in-memory copy that
-    the loader populated. Fall back to DB lookups only if no in-memory
-    candidate is found.
+    the loader populated.
     """
     # Some live/matching flows use a VJ-specific identifier (e.g. ...:VJ1234:45600)
     # while timetable `route_metadata[*].route_id` keys route_tracks by RS variant
@@ -1270,83 +1384,7 @@ def _fetch_route_tracks(route_id: str):
         vj_base = None
         jps_base = None
 
-    def _db_candidate_route_ids_for_vj_base(vj_base: str, limit: int = 200):
-        """Return candidate route_ids (RS/JPS families) from DB for a VJ base prefix.
-
-        This is needed because many datasets store route_tracks keyed by RS ids
-        only (no VJ/JPS keys), so a pure in-memory scan that only considers
-        JPS keys can miss the actual RS key with geometry.
-        """
-        if not vj_base:
-            return []
-        # Limit for safety; we only need a handful to find a non-empty track.
-        lim = max(1, min(int(limit or 200), 1000))
-        rs_like = vj_base + ':RS%'
-        jps_like = vj_base + ':JPS%'
-        out = []
-        try:
-            conn = _get_db_connection()
-            cur = conn.cursor()
-            # Prefer section tracks (canonical).
-            try:
-                cur.execute(
-                    "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT %s",
-                    (rs_like, lim),
-                )
-                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-            except Exception:
-                pass
-            try:
-                conn.close()
-            except Exception:
-                pass
-        except Exception:
-            return []
-
-        # De-dup while preserving order.
-        seen = set()
-        uniq = []
-        for rid in out:
-            if rid in seen:
-                continue
-            seen.add(rid)
-            uniq.append(rid)
-        return uniq
-
-    def _db_candidate_route_ids_for_jps_base(jps_base: str, limit: int = 200):
-        """Return candidate RS route_ids for a JPS base prefix."""
-        if not jps_base:
-            return []
-        lim = max(1, min(int(limit or 200), 1000))
-        rs_like = jps_base + ':RS%'
-        out = []
-        try:
-            conn = _get_db_connection()
-            cur = conn.cursor()
-            # Prefer section tracks (canonical).
-            try:
-                cur.execute(
-                    "SELECT DISTINCT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT %s",
-                    (rs_like, lim),
-                )
-                out.extend([r[0] for r in (cur.fetchall() or []) if r and r[0]])
-            except Exception:
-                pass
-            try:
-                conn.close()
-            except Exception:
-                pass
-        except Exception:
-            return []
-
-        seen = set()
-        uniq = []
-        for rid in out:
-            if rid in seen:
-                continue
-            seen.add(rid)
-            uniq.append(rid)
-        return uniq
+    # NOTE: This helper must not query DB for candidate resolution.
 
     def _matches_vj_family(rid2: str) -> bool:
         if not vj_base or not isinstance(rid2, str):
@@ -1359,21 +1397,6 @@ def _fetch_route_tracks(route_id: str):
 
     db_vj_candidates = []
     db_jps_candidates = []
-    # Precompute DB-backed RS/JPS candidates for VJ ids. This helps when the
-    # in-memory MergedData doesn't contain a route_metadata entry for the
-    # route_id family we need (common with RS-only tracks).
-    try:
-        if vj_base:
-            db_vj_candidates = _db_candidate_route_ids_for_vj_base(vj_base)
-    except Exception:
-        db_vj_candidates = []
-
-    # Precompute DB-backed RS candidates for JPS ids.
-    try:
-        if jps_base:
-            db_jps_candidates = _db_candidate_route_ids_for_jps_base(jps_base)
-    except Exception:
-        db_jps_candidates = []
 
     # 1) Try in-memory caches (prebuilt_cache in _base_cache, then _router_cache)
     try:
@@ -1413,119 +1436,20 @@ def _fetch_route_tracks(route_id: str):
                                     if i < len(merged.route_tracks) and merged.route_tracks[i]:
                                         r_int = i
                                         break
-                                if r_int is None:
-                                    r_int = candidate_ints[0]
                             except Exception:
-                                r_int = candidate_ints[0]
-                        if r_int is not None and r_int < len(merged.route_tracks):
-                            tracks = merged.route_tracks[r_int]
-                            if tracks:
-                                return [[t[0], t[1]] for t in tracks]
+                                r_int = None
 
-                        # If we still didn't find anything, try resolving via DB-backed
-                        # candidate ids (usually RS keys) and look those up in this merged.
-                        if r_int is None and db_vj_candidates:
+                        # Return track if found.
+                        if r_int is not None:
                             try:
-                                meta_list = getattr(merged, 'route_metadata', []) or []
-                                for cand in db_vj_candidates:
-                                    for i, meta in enumerate(meta_list):
-                                        if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
-                                            if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                                return [[t[0], t[1]] for t in merged.route_tracks[i]]
-                                            break
-                            except Exception:
-                                pass
-
-                        # If caller provided a JPS id, try resolving to RS ids that have tracks.
-                        if r_int is None and db_jps_candidates:
-                            try:
-                                meta_list = getattr(merged, 'route_metadata', []) or []
-                                for cand in db_jps_candidates:
-                                    for i, meta in enumerate(meta_list):
-                                        if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
-                                            if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                                return [[t[0], t[1]] for t in merged.route_tracks[i]]
-                                            break
+                                if r_int < len(merged.route_tracks):
+                                    tr = merged.route_tracks[r_int]
+                                    if tr:
+                                        return tr
                             except Exception:
                                 pass
             except Exception:
-                # best-effort only
                 pass
-
-        # Check any routers cached in _router_cache (may include other dates)
-        try:
-            # _router_cache and its lock may be defined later in the file;
-            # reference globals to avoid NameError during module import time.
-            rcache = globals().get('_router_cache')
-            rlock = globals().get('_router_cache_lock')
-            if rcache is not None:
-                # Iterate safely under lock when available
-                if rlock:
-                    with rlock:
-                        items = list(rcache.values())
-                else:
-                    items = list(rcache.values())
-                for val in items:
-                    try:
-                        merged = val[0]
-                    except Exception:
-                        continue
-                    if not merged:
-                        continue
-                    r_int = None
-                    candidate_ints = []
-                    try:
-                        for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
-                            if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
-                                r_int = i
-                                break
-                            if meta and isinstance(meta, dict) and vj_base:
-                                rid2 = meta.get('route_id')
-                                if _matches_vj_family(rid2):
-                                    candidate_ints.append(i)
-                    except Exception:
-                        r_int = None
-
-                    if r_int is None and candidate_ints:
-                        try:
-                            for i in candidate_ints:
-                                if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                    r_int = i
-                                    break
-                            if r_int is None:
-                                r_int = candidate_ints[0]
-                        except Exception:
-                            r_int = candidate_ints[0]
-                    if r_int is not None and r_int < len(merged.route_tracks):
-                        tracks = merged.route_tracks[r_int]
-                        if tracks:
-                            return [[t[0], t[1]] for t in tracks]
-
-                    if r_int is None and db_vj_candidates:
-                        try:
-                            meta_list = getattr(merged, 'route_metadata', []) or []
-                            for cand in db_vj_candidates:
-                                for i, meta in enumerate(meta_list):
-                                    if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
-                                        if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                            return [[t[0], t[1]] for t in merged.route_tracks[i]]
-                                        break
-                        except Exception:
-                            pass
-
-                    if r_int is None and db_jps_candidates:
-                        try:
-                            meta_list = getattr(merged, 'route_metadata', []) or []
-                            for cand in db_jps_candidates:
-                                for i, meta in enumerate(meta_list):
-                                    if meta and isinstance(meta, dict) and meta.get('route_id') == cand:
-                                        if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                            return [[t[0], t[1]] for t in merged.route_tracks[i]]
-                                        break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
     except Exception:
         # In-memory lookup failed — fall back to DB below
         pass
@@ -1594,30 +1518,7 @@ def _fetch_route_tracks(route_id: str):
 
 
 def _find_prefixed_route_candidate(route_id: str):
-    """Return a candidate route_id from the DB that includes a file-prefix
-    (i.e. matches '%::<route_id') or None if not found. This helps ensure
-    lookups include the originating file tag when present in the tables.
-    """
-    if not route_id:
-        return None
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        # Prefer a route_id present in section_tracks (more specific)
-        try:
-            pattern = f"%::{route_id}"
-            logger.debug("_find_prefixed_route_candidate: checking bus_route_section_tracks LIKE %s", pattern)
-            cur.execute("SELECT route_id FROM bus_route_section_tracks WHERE route_id LIKE %s LIMIT 1", (pattern,))
-            r = cur.fetchone()
-            if r and r[0]:
-                logger.debug("_find_prefixed_route_candidate: found section_tracks candidate %s for %s", r[0], route_id)
-                conn.close()
-                return r[0]
-        except Exception:
-            logger.exception("_find_prefixed_route_candidate: error querying bus_route_section_tracks LIKE %s", f"%::{route_id}")
-        conn.close()
-    except Exception:
-        logger.exception("_find_prefixed_route_candidate: error opening DB connection to resolve %s", route_id)
+    """Deprecated: DB-based prefix resolution removed (in-memory only)."""
     return None
 
 
@@ -1632,23 +1533,13 @@ def _haversine(lat1, lon1, lat2, lon2):
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 
-def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dict):
-    """Return a subsegment of route_tracks for route_id that spans the stops in stop_atcos.
+def _subsegment_from_coords(tracks: list, stop_atcos: list, walking_coords: dict):
+    """Slice a subsegment from already-resolved track coords.
 
-        Strategy (order-aware, loop-tolerant):
-            - Load full route track points (lat, lon).
-            - For each stop ATCO, find the *nearest* track index using walking_coords mapping.
-            - If multiple stops provided, choose the slice that follows the provided
-                stop order best (important for loops where a stop may be near the track
-                in multiple places).
-            - For the common 2-stop case, we pick start/end indices anchored to each
-                stop and preserve direction.
-    Returns list of [lat, lon] or [] if not possible.
+    This is the same algorithm as _subsegment_from_tracks, but avoids
+    any route_id resolution so callers can use dense route_int lookups.
     """
-    if not stop_atcos:
-        return []
-    tracks = _fetch_route_tracks(route_id)
-    if not tracks:
+    if not stop_atcos or not tracks:
         return []
     # Map each stop -> list of candidate indices on track.
     # We keep multiple candidates to handle loop routes where the track passes
@@ -3243,48 +3134,10 @@ async def routes_for_stop(atco: str):
         if filtered:
             unique = filtered
 
-    # Fallback: if no variants found via merged journeys, query DB directly
+    # If no variants found via merged journeys, return empty list.
+    # This endpoint is intentionally in-memory only.
     if not unique:
-        try:
-            import psycopg
-            from main import BUS_DB_PATH
-            conn = psycopg.connect(BUS_DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT DISTINCT route_id FROM bus_route_stops WHERE atco_code = %s",
-                (atco_code,)
-            )
-            rows = [r[0] for r in cur.fetchall()]
-            routes = []
-            if rows:
-                # For each route, fetch ordered stop list and resolve coords via stop_coords
-                for rid in rows:
-                    cur.execute(
-                        "SELECT atco_code, stop_order FROM bus_route_stops WHERE route_id = %s ORDER BY stop_order",
-                        (rid,)
-                    )
-                    stop_rows = cur.fetchall()
-                    # Resolve coords
-                    atcos = [r[0] for r in stop_rows]
-                    stops = []
-                    if atcos:
-                        # Query stop_coords for all atcos
-                        placeholders = ','.join(['%s'] * len(atcos))
-                        cur.execute(f"SELECT atco_code, lat, lon FROM stop_coords WHERE atco_code IN ({placeholders})", tuple(atcos))
-                        coord_map = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-                        for atc, so in stop_rows:
-                            coords = coord_map.get(atc)
-                            if coords:
-                                stops.append({"atco_code": atc, "lat": coords[0], "lon": coords[1], "stop_order": so})
-                            else:
-                                stops.append({"atco_code": atc, "stop_order": so})
-                    routes.append({"route_id": rid, "stops": stops})
-            cur.close()
-            conn.close()
-            return {"atco": atco_code, "routes": routes}
-        except Exception:
-            # If DB fallback fails, return empty list
-            return {"atco": atco_code, "routes": []}
+        return {"atco": atco_code, "routes": []}
 
     return {"atco": atco_code, "routes": unique}
 
@@ -4790,6 +4643,8 @@ _LIVE_DELAY_TTL = 30  # seconds
 
 def _fetch_all_live_buses() -> list:
     """Return all live bus records from all operators (cached)."""
+    if _live_endpoints_disabled():
+        return []
     import time as _time
     now = _time.time()
     if now - _live_delay_cache["ts"] < _LIVE_DELAY_TTL and _live_delay_cache["data"]:
@@ -4878,6 +4733,9 @@ async def bus_live_operator(
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
+
+    if _live_endpoints_disabled():
+        return []
 
     if lat is None or lon is None:
         return JSONResponse(
@@ -5255,6 +5113,20 @@ async def debug_live_match_contract(
     # matcher on only a small sample, returning just the contract violations.
     from fastapi.responses import JSONResponse
 
+    if _live_endpoints_disabled():
+        return {
+            'operator': operator,
+            'lat': lat,
+            'lon': lon,
+            'latTol': latTol,
+            'lonTol': lonTol,
+            'sample': max(0, int(sample)) if isinstance(sample, int) or str(sample).isdigit() else sample,
+            'limit': max(0, int(limit)) if isinstance(limit, int) or str(limit).isdigit() else limit,
+            'raw_total': 0,
+            'violations': [],
+            'disabled': True,
+        }
+
     try:
         smp = max(0, int(sample))
     except Exception:
@@ -5486,6 +5358,11 @@ _router_cache = {}
 _router_cache_lock = threading.Lock()
 # Track background builds in progress (cache_key set)
 _background_builds = set()
+
+# Single-flight synchronisation for router builds: when multiple concurrent
+# requests ask for the same cache_key and it isn't cached yet, only one build
+# will execute. Others will wait for the builder to populate the cache.
+_router_build_events: Dict[Any, threading.Event] = {}
 # Base init state: _base_cache holds the cached base data when
 # initialization succeeds, and _base_init_attempted indicates whether
 # we've already tried initialisation once. This prevents repeated,
@@ -5701,6 +5578,10 @@ def _recompute_journey_delay_map_once() -> None:
         _delay_map_ts = time.time()
         _delay_map_version += 1
 
+    if os.environ.get('BUS_DISABLE_ROUTER_PREBUILD') == '1':
+        # Useful for routing benchmarks: don't spawn extra CPU-heavy router builds.
+        return
+
     # After updating the delay map version, proactively rebuild the
     # delay-aware routers for today's AM and PM buckets in a background
     # thread so the first user request doesn't pay the build latency.
@@ -5737,6 +5618,10 @@ def _delay_updater_loop(stop_event: threading.Event):
     """Background loop to periodically refresh the delay map."""
     # Run once immediately, then sleep interval
     while not stop_event.is_set():
+        # When routing is running, pause delay recomputation/prebuilds.
+        if is_routing_active():
+            time.sleep(0.25)
+            continue
         try:
             _recompute_journey_delay_map_once()
         except Exception:
@@ -5764,20 +5649,39 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         cache_key = (date_str, bucket, _delay_map_version)
     else:
         cache_key = (date_str, bucket)
-    # First, attempt a fast lookup under the router cache lock. If the
-    # requested adjusted router (today + current delay version) is present,
-    # return it immediately. If it's missing but a fallback unadjusted
-    # router exists, schedule a background build of the adjusted router and
-    # return the fallback so requests are non-blocking. If no fallback is
-    # available, fall back to the original synchronous build behaviour.
-    today_str = datetime.now().date().isoformat()
-    fallback_key = (date_str, bucket)
-    need_sync_build = False
-    schedule_bg = False
-    fallback = None
-    with _router_cache_lock:
-        if cache_key in _router_cache:
-            return _router_cache[cache_key]
+    # Single-flight: ensure at most one build happens per cache_key.
+    # Others wait for the builder to populate the cache.
+    builder_event: threading.Event | None = None
+    while True:
+        with _router_cache_lock:
+            if cache_key in _router_cache:
+                return _router_cache[cache_key]
+            ev = _router_build_events.get(cache_key)
+            if ev is None:
+                ev = threading.Event()
+                _router_build_events[cache_key] = ev
+                builder_event = ev
+                break  # we are the builder
+        # Someone else is building it; wait and retry.
+        ev.wait()
+
+    # We are the builder for this cache_key. Always release waiters.
+    try:
+        # First, attempt a fast lookup under the router cache lock. If the
+        # requested adjusted router (today + current delay version) is present,
+        # return it immediately. If it's missing but a fallback unadjusted
+        # router exists, schedule a background build of the adjusted router and
+        # return the fallback so requests are non-blocking. If no fallback is
+        # available, fall back to the original synchronous build behaviour.
+        today_str = datetime.now().date().isoformat()
+        fallback_key = (date_str, bucket)
+        need_sync_build = False
+        schedule_bg = False
+        fallback = None
+        with _router_cache_lock:
+            if cache_key in _router_cache:
+                return _router_cache[cache_key]
+
         # If caller asked for a delay-aware router for today, prefer to
         # build the adjusted router in the background and return the
         # existing (non-delayed) router if present. Only schedule a
@@ -5819,121 +5723,130 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         # For non-delay or non-today requests, proceed to build synchronously
         # below (but do not hold the lock while performing heavy work).
 
-    # If we scheduled a background build, do it without blocking this
-    # request (background thread will populate the cache when ready).
-    if schedule_bg:
-        def _bg_build_and_cache(key, dstr, stime):
-            try:
-                # Obtain the base (non-delayed) merged/router/walking so we
-                # can apply delays and rebuild the adjusted router.
+        # If we scheduled a background build, do it without blocking this
+        # request (background thread will populate the cache when ready).
+        if schedule_bg:
+            def _bg_build_and_cache(key, dstr, stime):
                 try:
-                    merged, router, walking = get_router_for_date(dstr, start_time=stime, apply_delay=False)
-                except Exception:
-                    # If we can't obtain the base router, abort gracefully.
-                    return
-                # Apply live delays if present and rebuild
-                if _journey_delay_map:
+                    # Obtain the base (non-delayed) merged/router/walking so we
+                    # can apply delays and rebuild the adjusted router.
                     try:
-                        from raptor_router import RaptorRouter
-                        adj_merged = copy.deepcopy(merged)
-                        for j_idx, delta in list(_journey_delay_map.items()):
-                            if 0 <= j_idx < len(adj_merged.journey_times):
-                                jt = adj_merged.journey_times[j_idx]
-                                new_jt = []
-                                for sid, atime, dtime in jt:
-                                    at = atime + delta if atime is not None else None
-                                    dt = dtime + delta if dtime is not None else None
-                                    new_jt.append((sid, at, dt))
-                                adj_merged.journey_times[j_idx] = new_jt
-                        adj_router = RaptorRouter(adj_merged)
-                        _set_router_cache(key, (adj_merged, adj_router, walking))
-                        return
+                        merged, router, walking = get_router_for_date(dstr, start_time=stime, apply_delay=False)
                     except Exception:
-                        # Fall through to caching the unadjusted router
-                        pass
-                # If no delays or adjustment failed, cache the unadjusted router
-                _set_router_cache(key, (merged, router, walking))
-            finally:
-                with _router_cache_lock:
-                    _background_builds.discard(key)
+                        # If we can't obtain the base router, abort gracefully.
+                        return
+                    # Apply live delays if present and rebuild
+                    if _journey_delay_map:
+                        try:
+                            from raptor_router import RaptorRouter
+                            adj_merged = copy.deepcopy(merged)
+                            for j_idx, delta in list(_journey_delay_map.items()):
+                                if 0 <= j_idx < len(adj_merged.journey_times):
+                                    jt = adj_merged.journey_times[j_idx]
+                                    new_jt = []
+                                    for sid, atime, dtime in jt:
+                                        at = atime + delta if atime is not None else None
+                                        dt = dtime + delta if dtime is not None else None
+                                        new_jt.append((sid, at, dt))
+                                    adj_merged.journey_times[j_idx] = new_jt
+                            adj_router = RaptorRouter(adj_merged)
+                            _set_router_cache(key, (adj_merged, adj_router, walking))
+                            return
+                        except Exception:
+                            # Fall through to caching the unadjusted router
+                            pass
+                    # If no delays or adjustment failed, cache the unadjusted router
+                    _set_router_cache(key, (merged, router, walking))
+                finally:
+                    with _router_cache_lock:
+                        _background_builds.discard(key)
 
-        try:
-            t = threading.Thread(target=_bg_build_and_cache, args=(cache_key, date_str, start_time), daemon=True)
-            t.start()
-        except Exception:
-            logger.exception('Failed to start background build thread for cache_key %s', cache_key)
-        # Return the prepared fallback value (non-delayed router) so callers
-        # are not blocked; the background thread will populate the adjusted
-        # router when ready.
-        return fallback
+            try:
+                t = threading.Thread(target=_bg_build_and_cache, args=(cache_key, date_str, start_time), daemon=True)
+                t.start()
+            except Exception:
+                logger.exception('Failed to start background build thread for cache_key %s', cache_key)
+            # Return the prepared fallback value (non-delayed router) so callers
+            # are not blocked; the background thread will populate the adjusted
+            # router when ready.
+            return fallback
 
-    # At this point either we need a synchronous build (no fallback) or the
-    # request is for a non-delay router. Perform the original synchronous
-    # build behaviour (this may be heavy).
-    global _base_init_attempted
-    # If initialization hasn't run yet, run it synchronously (same as before)
-    if _base_cache is None and not _base_init_attempted:
-        from main import initialize_base
-        try:
-            _base_cache = initialize_base()
-            if _base_cache and "prebuilt_cache" in _base_cache:
-                _router_cache.update(_base_cache["prebuilt_cache"])
-            # If the cache was populated during init, return it
-            with _router_cache_lock:
-                if cache_key in _router_cache:
-                    return _router_cache[cache_key]
-        except Exception:
-            _base_init_attempted = True
-            raise
-        finally:
-            _base_init_attempted = True
-    elif _base_cache is None and _base_init_attempted:
-        try:
+        # At this point either we need a synchronous build (no fallback) or the
+        # request is for a non-delay router. Perform the original synchronous
+        # build behaviour (this may be heavy).
+        global _base_init_attempted
+        # If initialization hasn't run yet, run it synchronously (same as before)
+        if _base_cache is None and not _base_init_attempted:
             from main import initialize_base
-            if callable(initialize_base):
+            try:
                 _base_cache = initialize_base()
                 if _base_cache and "prebuilt_cache" in _base_cache:
                     _router_cache.update(_base_cache["prebuilt_cache"])
+                # If the cache was populated during init, return it
                 with _router_cache_lock:
                     if cache_key in _router_cache:
                         return _router_cache[cache_key]
-        except Exception:
-            raise RuntimeError("Backend base initialisation previously failed")
-    loader = _base_cache["loader"]
-    walking_raw = _base_cache["walking_raw"]
-    al = _base_cache.get("atco_loader")
-    from main import build_for_date
-    # Build the merged data / router for this date (potentially heavy)
-    merged, router, walking = build_for_date(
-        loader, walking_raw, date_str, start_time=start_time,
-        atco_loader=al)
-    # If we're asked to apply today's delay map, modify a deep copy
-    # of the merged timetable by adding per-journey delays and then
-    # rebuild the router from that adjusted merged object.
-    if apply_delay and date_str == today_str and _journey_delay_map:
-        try:
-            from raptor_router import RaptorRouter
-            adj_merged = copy.deepcopy(merged)
-            # Apply delays (per journey index) to every scheduled time
-            for j_idx, delta in list(_journey_delay_map.items()):
-                if 0 <= j_idx < len(adj_merged.journey_times):
-                    jt = adj_merged.journey_times[j_idx]
-                    new_jt = []
-                    for sid, atime, dtime in jt:
-                        at = atime + delta if atime is not None else None
-                        dt = dtime + delta if dtime is not None else None
-                        new_jt.append((sid, at, dt))
-                    adj_merged.journey_times[j_idx] = new_jt
-            router = RaptorRouter(adj_merged)
-            _set_router_cache(cache_key, (adj_merged, router, walking))
-            return adj_merged, router, walking
-        except Exception:
-            # Fall back to unadjusted merged/router on any failure
-            _set_router_cache(cache_key, (merged, router, walking))
-            return merged, router, walking
+            except Exception:
+                _base_init_attempted = True
+                raise
+            finally:
+                _base_init_attempted = True
+        elif _base_cache is None and _base_init_attempted:
+            try:
+                from main import initialize_base
+                if callable(initialize_base):
+                    _base_cache = initialize_base()
+                    if _base_cache and "prebuilt_cache" in _base_cache:
+                        _router_cache.update(_base_cache["prebuilt_cache"])
+                    with _router_cache_lock:
+                        if cache_key in _router_cache:
+                            return _router_cache[cache_key]
+            except Exception:
+                raise RuntimeError("Backend base initialisation previously failed")
+        loader = _base_cache["loader"]
+        walking_raw = _base_cache["walking_raw"]
+        al = _base_cache.get("atco_loader")
+        from main import build_for_date
+        # Build the merged data / router for this date (potentially heavy)
+        merged, router, walking = build_for_date(
+            loader, walking_raw, date_str, start_time=start_time,
+            atco_loader=al)
+        # If we're asked to apply today's delay map, modify a deep copy
+        # of the merged timetable by adding per-journey delays and then
+        # rebuild the router from that adjusted merged object.
+        if apply_delay and date_str == today_str and _journey_delay_map:
+            try:
+                from raptor_router import RaptorRouter
+                adj_merged = copy.deepcopy(merged)
+                # Apply delays (per journey index) to every scheduled time
+                for j_idx, delta in list(_journey_delay_map.items()):
+                    if 0 <= j_idx < len(adj_merged.journey_times):
+                        jt = adj_merged.journey_times[j_idx]
+                        new_jt = []
+                        for sid, atime, dtime in jt:
+                            at = atime + delta if atime is not None else None
+                            dt = dtime + delta if dtime is not None else None
+                            new_jt.append((sid, at, dt))
+                        adj_merged.journey_times[j_idx] = new_jt
+                router = RaptorRouter(adj_merged)
+                _set_router_cache(cache_key, (adj_merged, router, walking))
+                return adj_merged, router, walking
+            except Exception:
+                # Fall back to unadjusted merged/router on any failure
+                _set_router_cache(cache_key, (merged, router, walking))
+                return merged, router, walking
 
-    _set_router_cache(cache_key, (merged, router, walking))
-    return merged, router, walking
+        _set_router_cache(cache_key, (merged, router, walking))
+        return merged, router, walking
+    finally:
+        # Always release any waiters for this cache_key.
+        with _router_cache_lock:
+            _router_build_events.pop(cache_key, None)
+        try:
+            if builder_event is not None:
+                builder_event.set()
+        except Exception:
+            pass
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -6204,39 +6117,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             return []
 
         def _resolve_alias_route_id(rid: str) -> str:
-            """Resolve legacy ids (e.g. JPS*) to canonical ids using existing DB rules.
-
-            This follows the project's established rule system:
-            - route_id_aliases: populated by strict TXC mapping (jps_to_rs_map)
-              and the numeric-suffix rule (JPS<N> -> RS<N>) when canonical exists.
-            """
-            if not rid or not isinstance(rid, str):
-                return rid
-            try:
-                conn = _get_db_connection()
-                cur = conn.cursor()
-                # 1) Explicit alias table (preferred)
-                try:
-                    cur.execute(
-                        "SELECT canonical_id FROM route_id_aliases WHERE legacy_id = %s LIMIT 1",
-                        (rid,),
-                    )
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        return row[0]
-                except Exception:
-                    pass
-
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            """Deprecated: DB alias resolution removed (in-memory only)."""
             return rid
 
         # Small in-process cache to avoid repeatedly scanning variants.
@@ -6276,14 +6157,6 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     best_hops = hops
         except Exception:
             return None
-        # Apply the project's rule-based alias resolution (JPS -> canonical RS)
-        # so geometry can use stored section tracks.
-        try:
-            if best and isinstance(best, str):
-                best2 = _resolve_alias_route_id(best)
-                return best2 or best
-        except Exception:
-            pass
         return best
 
     if not route_result:
@@ -6374,7 +6247,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     route_data = {
         k: v
         for k, v in route_result.items()
-        if k not in ("_meta", "_route_id") and isinstance(v, dict)
+        if k not in ("_meta", "_route_id", "_route_int") and isinstance(v, dict)
     }
 
     all_prevs = {
@@ -6685,6 +6558,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         coords = []
 
         route_id = None
+        route_int = None
         track_coords = None
         geom_source = None
         trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
@@ -6693,39 +6567,49 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 j_info = curr_info.get("journey_info") or {}
                 if isinstance(j_info, dict) and j_info.get("route_id"):
                     route_id = j_info.get("route_id")
-                elif transport == 'bus':
-                    # Router didn't provide route_id, attempt best-effort resolution.
-                    try:
-                        prev_atco = merged.get_atco_code(prev_int)
-                    except Exception:
-                        prev_atco = None
-                    try:
-                        curr_atco = merged.get_atco_code(curr_int)
-                    except Exception:
-                        curr_atco = None
-                    try:
-                        line_name = leg.get('line_name')
-                    except Exception:
-                        line_name = None
-                    route_id = _resolve_route_id_for_leg(line_name, prev_atco, curr_atco)
-                    
-                    try:
-                        prev_atco = prev_atco or merged.get_atco_code(prev_int)
-                    except Exception:
-                        prev_atco = None
-                        
-                    try:
-                        curr_atco = curr_atco or merged.get_atco_code(curr_int)
-                    except Exception:
-                        curr_atco = None
-                        
-                    # (handled below) if route_id resolved we will attempt slicing
+                # Prefer route_int for direct in-memory route_tracks lookup.
+                try:
+                    j_id_tmp = curr_info.get('journey')
+                    if j_id_tmp is not None and hasattr(merged, 'journey_to_route') and j_id_tmp < len(merged.journey_to_route):
+                        r_tmp = merged.journey_to_route[j_id_tmp]
+                        if r_tmp is not None and int(r_tmp) >= 0:
+                            route_int = int(r_tmp)
+                except Exception:
+                    route_int = None
             except Exception as exc:
                 pass
 
-        # If we have a route_id for a non-walking leg and we know stop ids,
+            if (not route_id) and transport == 'bus':
+                # Router didn't provide route_id, attempt best-effort resolution.
+                try:
+                    prev_atco = merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+                try:
+                    curr_atco = merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+                try:
+                    line_name = leg.get('line_name')
+                except Exception:
+                    line_name = None
+                route_id = _resolve_route_id_for_leg(line_name, prev_atco, curr_atco)
+
+                try:
+                    prev_atco = prev_atco or merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+
+                try:
+                    curr_atco = curr_atco or merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+
+                # (handled below) if route_id resolved we will attempt slicing
+
+        # If we have a route track candidate (prefer route_int) and we know stop ids,
         # try to slice the track between the two stops.
-        if (transport != "walking") and route_id:
+        if transport != "walking":
             try:
                 prev_atco = None
                 curr_atco = None
@@ -6744,6 +6628,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                             'transport': transport,
                             'line_name': (leg.get('line_name') if isinstance(leg, dict) else None),
                             'route_id': route_id,
+                            'route_int': route_int,
                             'from_atco': prev_atco,
                             'to_atco': curr_atco,
                             'from_name': (from_loc.get('name') if isinstance(from_loc, dict) else None),
@@ -6759,7 +6644,161 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     if curr_coord:
                         local_coords[curr_atco] = curr_coord
 
-                    seg = _subsegment_from_tracks(route_id, [prev_atco, curr_atco], local_coords)
+                    seg = []
+                    if route_int is not None:
+                        try:
+                            # Prefer stop-to-stop fragment tracks if present.
+                            # These are indexed by (from_stop_int,to_stop_int)
+                            # and avoid the "jumbled full route polyline" problem.
+                            frag = None
+                            try:
+                                links = getattr(merged, 'route_link_tracks', None)
+                                if links and route_int < len(links):
+                                    # We only have ATCO strings here; resolve to stop_int.
+                                    # NOTE: merged.stop_metadata is a list of stop display names,
+                                    # not an ATCO->stop_int mapping, so we map within route_stops.
+                                    fs = None
+                                    ts = None
+                                    route_stops = []
+                                    try:
+                                        route_stops = merged.route_stops[route_int] if route_int < len(merged.route_stops) else []
+                                    except Exception:
+                                        route_stops = []
+                                    try:
+                                        if route_stops and (prev_atco or curr_atco):
+                                            atco_to_stop = {}
+                                            for s in route_stops:
+                                                try:
+                                                    c = merged.get_atco_code(s)
+                                                except Exception:
+                                                    c = None
+                                                if c:
+                                                    atco_to_stop.setdefault(c, s)
+                                            if prev_atco:
+                                                fs = atco_to_stop.get(prev_atco)
+                                            if curr_atco:
+                                                ts = atco_to_stop.get(curr_atco)
+                                    except Exception:
+                                        fs = None
+                                        ts = None
+                                    if fs is not None and ts is not None:
+                                        link_map = links[route_int]
+
+                                        frag = None
+
+                                        # Primary: stitch adjacent fragments along route stop sequence.
+                                        # This handles cases where section tracks are keyed by
+                                        # intermediate timing points rather than the leg endpoints.
+                                        # route_stops already resolved above.
+                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
+                                            i = route_stops.index(fs)
+                                            j = route_stops.index(ts)
+                                            step = 1 if j > i else -1
+                                            stitched = []
+                                            ok = True
+                                            k = i
+                                            # stitch consecutive stop pairs along the route
+                                            while k != j:
+                                                a = route_stops[k]
+                                                b = route_stops[k + step]
+                                                seg2 = link_map.get((a, b))
+                                                if not seg2:
+                                                    # allow reverse if needed
+                                                    rev2 = link_map.get((b, a))
+                                                    if rev2:
+                                                        seg2 = list(reversed(rev2))
+                                                if not seg2:
+                                                    ok = False
+                                                    break
+                                                if stitched and seg2 and stitched[-1] == seg2[0]:
+                                                    stitched.extend(seg2[1:])
+                                                else:
+                                                    stitched.extend(seg2)
+                                                k += step
+                                            if ok and len(stitched) >= 2:
+                                                frag = stitched
+
+                                        # Secondary: exact stop-pair fragment (either direction)
+                                        if not frag:
+                                            frag = link_map.get((fs, ts))
+                                            if not frag:
+                                                # Try reverse direction.
+                                                rev = link_map.get((ts, fs))
+                                                if rev:
+                                                    frag = list(reversed(rev))
+
+                                        # Tertiary: 1-hop near endpoints.
+                                        if not frag and route_stops:
+                                            if fs in route_stops:
+                                                try:
+                                                    i = route_stops.index(fs)
+                                                    for step in (1, -1):
+                                                        if 0 <= i + step < len(route_stops):
+                                                            b = route_stops[i + step]
+                                                            seg2 = link_map.get((fs, b))
+                                                            if not seg2:
+                                                                rev2 = link_map.get((b, fs))
+                                                                if rev2:
+                                                                    seg2 = list(reversed(rev2))
+                                                            if seg2 and len(seg2) >= 2:
+                                                                frag = seg2
+                                                                break
+                                                except Exception:
+                                                    pass
+                                            if (not frag) and ts in route_stops:
+                                                try:
+                                                    j = route_stops.index(ts)
+                                                    for step in (1, -1):
+                                                        if 0 <= j + step < len(route_stops):
+                                                            a = route_stops[j + step]
+                                                            seg2 = link_map.get((a, ts))
+                                                            if not seg2:
+                                                                rev2 = link_map.get((ts, a))
+                                                                if rev2:
+                                                                    seg2 = list(reversed(rev2))
+                                                            if seg2 and len(seg2) >= 2:
+                                                                frag = seg2
+                                                                break
+                                                except Exception:
+                                                    pass
+                            except Exception:
+                                frag = None
+
+                            if frag and len(frag) >= 2:
+                                tracks_ll = [[t[0], t[1]] for t in frag]
+                                seg = tracks_ll
+                                if trace:
+                                    try:
+                                        print('[journey_geom] route_int_fragment', {
+                                            'route_int': route_int,
+                                            'frag_len': len(frag),
+                                        })
+                                    except Exception:
+                                        pass
+                            tracks_pts = merged.route_tracks[route_int] if route_int < len(merged.route_tracks) else []
+                            if trace:
+                                try:
+                                    print('[journey_geom] route_int_tracks', {
+                                        'route_int': route_int,
+                                        'have_tracks': bool(tracks_pts),
+                                        'tracks_len': (len(tracks_pts) if tracks_pts else 0),
+                                    })
+                                except Exception:
+                                    pass
+                            if (not seg) and tracks_pts:
+                                tracks_ll = [[t[0], t[1]] for t in tracks_pts]
+                                seg = _subsegment_from_coords(tracks_ll, [prev_atco, curr_atco], local_coords)
+                        except Exception:
+                            seg = []
+                    if (not seg) and route_id:
+                        # Back-compat: allow route_id-based track lookup, but it must
+                        # remain in-memory only. Resolve full track via _fetch_route_tracks
+                        # (in-memory) and slice directly from coords.
+                        try:
+                            _tracks = _fetch_route_tracks(route_id)
+                        except Exception:
+                            _tracks = []
+                        seg = _subsegment_from_coords(_tracks, [prev_atco, curr_atco], local_coords) if _tracks else []
                     if seg and len(seg) >= 2:
                         track_coords = seg
                         if trace:
@@ -6799,6 +6838,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                         curr_coord[0], curr_coord[1],
                         mode=mode_hint,
                         route_id=route_id,
+                        route_int=route_int,
                         from_stop_id=prev_atco if 'prev_atco' in locals() else None,
                         to_stop_id=curr_atco if 'curr_atco' in locals() else None,
                     )
@@ -6965,12 +7005,8 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "start_point": list(start_point) if start_point else None,
             "destination": (list(destination_point)
                             if destination_point else None),
-            # Expose a canonical route_id (if the router attached one)
-            # so clients can lookup in-memory route_tracks. Routers no
-            # longer expose logged_journey_id — downstream callers should
-            # use this route_id to retrieve tracks from the in-memory
-            # timetable (MergedData.route_tracks).
-            "route_id": (route_result.get("_route_id") if isinstance(route_result, dict) else None),
+            # Expose a dense route_int for direct in-memory route_tracks lookup.
+            "route_int": (route_result.get("_route_int") if isinstance(route_result, dict) else None),
             "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
             "initial_departure_day_offset": (int(initial_departure_secs) // 86400) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else 0,
         },
@@ -6986,48 +7022,10 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     except Exception:
         resp["journeys"] = [{"legs": legs}]
 
-    # Note: routers do not need to surface a logged_journey_id; callers
-    # should use the returned `route_id` meta to lookup in-memory tracks.
-    # We still persist a minimal logged_journey for auditing where the
-    # router did not attach one, but we do not expose its id to clients.
-    try:
-        if isinstance(route_result, dict) and not route_result.get('_logged_journey_id'):
-            import uuid
-            from main import BUS_DB_PATH
-            from bus_loader import BusLoader
-
-            lj = {
-                'id': uuid.uuid4().hex,
-                'created_at': None,
-                'start_point': tuple(start_point) if start_point else None,
-                'destination_point': tuple(destination_point) if destination_point else None,
-                'total_arrival': meta.get('total_arrival'),
-                'legs': [],
-            }
-            # Build minimal legs with from_stop/to_stop coords (if available)
-            for leg in legs:
-                l = {}
-                if 'journey_origin' in leg or 'journey_destination' in leg or leg.get('line_name'):
-                    l['journey_metadata'] = {
-                        'line_name': leg.get('line_name'),
-                        'destination_display': leg.get('journey_destination')
-                    }
-                fs = leg.get('from_stop') or {}
-                ts = leg.get('to_stop') or {}
-                if isinstance(fs, dict) and 'lat' in fs and 'lon' in fs:
-                    l['from_stop'] = {'lat': fs['lat'], 'lon': fs['lon']}
-                if isinstance(ts, dict) and 'lat' in ts and 'lon' in ts:
-                    l['to_stop'] = {'lat': ts['lat'], 'lon': ts['lon']}
-                lj['legs'].append(l)
-
-            try:
-                bl = BusLoader(BUS_DB_PATH)
-                bl.insert_logged_journey(lj)
-                # Do NOT annotate route_result or response with the logged_journey id.
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Note: routers do not need to surface a logged_journey_id; clients should
+    # use the returned dense `route_int` meta for in-memory track lookup.
+    # Persisting logged journeys in the DB is intentionally disabled to keep
+    # request-time flows side-effect free and DB-independent.
 
     return resp
 
@@ -7051,21 +7049,22 @@ async def journey_plan(request: JourneyPlanRequest):
                          else {"bus", "train"})
         start_seconds = seconds_since_midnight(time_str)
 
-        # Run potentially-heavy router construction and routing in a thread
-        # so we don't block the ASGI event loop (keeps WebSocket/live updates responsive).
-        merged, router, walking = await asyncio.to_thread(
-            get_router_for_date, date_str, start_time=start_seconds
-        )
-        result = await asyncio.to_thread(
-            router.route,
-            # pass the same keyword args through to the threaded call
-            n_transfer_limit=max_transfers,
-            walking=walking,
-            start_time=start_seconds,
-            start_point=start_point,
-            destination=destination,
-            allowed_modes=allowed_modes,
-        )
+        # Run potentially-heavy router construction and routing in a thread.
+        # While we route, signal background services to pause CPU-heavy work.
+        with routing_activity():
+            merged, router, walking = await asyncio.to_thread(
+                get_router_for_date, date_str, start_time=start_seconds
+            )
+            result = await asyncio.to_thread(
+                router.route,
+                # pass the same keyword args through to the threaded call
+                n_transfer_limit=max_transfers,
+                walking=walking,
+                start_time=start_seconds,
+                start_point=start_point,
+                destination=destination,
+                allowed_modes=allowed_modes,
+            )
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(
             result, merged, stop_coords, request_start_seconds=start_seconds,
@@ -7099,125 +7098,127 @@ async def compare_routers(request: JourneyPlanRequest):
                          else {"bus", "train"})
         start_seconds = seconds_since_midnight(time_str)
 
-        # Build / fetch merged data + main router + walking helper in a thread
-        merged, main_router, walking = await asyncio.to_thread(
-            get_router_for_date, date_str, start_time=start_seconds
-        )
-
-        # Lazily construct optional routers (eco, cosy, lazy, greedy).
-        # optional routers: eco, cosy, lazy, greedy
-        eco_router = None
-        computed = None
-        lazy_router = None
-        greedy_router = None
-        try:
-            from eco_router import RaptorRouter as EcoRaptor
-            eco_router = EcoRaptor(merged)
-        except Exception:
-            eco_router = None
-
-        try:
-            from cosy_router import RaptorRouter as CosyRaptor
-            cosy_router = CosyRaptor(merged)
-        except Exception:
-            cosy_router = None
-        try:
-            from lazy_router import RaptorRouter as LazyRaptor
-            lazy_router = LazyRaptor(merged)
-        except Exception:
-            lazy_router = None
-        try:
-            from greedy_router import RaptorRouter as GreedyRaptor
-            greedy_router = GreedyRaptor(merged)
-        except Exception:
-            greedy_router = None
-
-        # Debug: record which optional routers were successfully constructed
-        available_routers = [name for name, obj in (
-            ("eco", eco_router), ("cosy", cosy_router),
-            ("lazy", lazy_router), ("greedy", greedy_router)
-        ) if obj is not None]
-        logger.debug("compare_routers: available optional routers: %s", available_routers)
-
-        # Helper wrapper to call router.route with timing
-        def _run_router(rtr):
-            import time as _t
-            t0 = _t.time()
-            res = rtr.route(
-                n_transfer_limit=max_transfers,
-                walking=walking,
-                start_time=start_seconds,
-                start_point=start_point,
-                destination=destination,
-                allowed_modes=allowed_modes,
+        # While we run multiple routers, signal background services to pause.
+        with routing_activity():
+            # Build / fetch merged data + main router + walking helper in a thread
+            merged, main_router, walking = await asyncio.to_thread(
+                get_router_for_date, date_str, start_time=start_seconds
             )
-            t1 = _t.time()
-            return res, (t1 - t0)
 
-        # Run routers in parallel threads. Build a list of (name, router)
-        routers = [("main", main_router)]
-        if eco_router is not None:
-            routers.append(("eco", eco_router))
-        if cosy_router is not None:
-            routers.append(("cosy", cosy_router))
-        if lazy_router is not None:
-            routers.append(("lazy", lazy_router))
-        if greedy_router is not None:
-            routers.append(("greedy", greedy_router))
+            # Lazily construct optional routers (eco, cosy, lazy, greedy).
+            # optional routers: eco, cosy, lazy, greedy
+            eco_router = None
+            computed = None
+            lazy_router = None
+            greedy_router = None
+            try:
+                from eco_router import RaptorRouter as EcoRaptor
+                eco_router = EcoRaptor(merged)
+            except Exception:
+                eco_router = None
 
-        tasks = [asyncio.to_thread(_run_router, rtr) for (_name, rtr) in routers]
-        results = await asyncio.gather(*tasks)
+            try:
+                from cosy_router import RaptorRouter as CosyRaptor
+                cosy_router = CosyRaptor(merged)
+            except Exception:
+                cosy_router = None
+            try:
+                from lazy_router import RaptorRouter as LazyRaptor
+                lazy_router = LazyRaptor(merged)
+            except Exception:
+                lazy_router = None
+            try:
+                from greedy_router import RaptorRouter as GreedyRaptor
+                greedy_router = GreedyRaptor(merged)
+            except Exception:
+                greedy_router = None
 
-        # Map names to (result, time)
-        router_results = {}
-        for (name, _), (res, timing) in zip(routers, results):
-            router_results[name] = (res, timing)
+            # Debug: record which optional routers were successfully constructed
+            available_routers = [name for name, obj in (
+                ("eco", eco_router), ("cosy", cosy_router),
+                ("lazy", lazy_router), ("greedy", greedy_router)
+            ) if obj is not None]
+            logger.debug("compare_routers: available optional routers: %s", available_routers)
 
-        main_res, main_time = router_results.get("main", (None, None))
-        eco_res, eco_time = router_results.get("eco", (None, None))
-        cosy_res, cosy_time = router_results.get("cosy", (None, None))
-        lazy_res, lazy_time = router_results.get("lazy", (None, None))
-        greedy_res, greedy_time = router_results.get("greedy", (None, None))
+            # Helper wrapper to call router.route with timing
+            def _run_router(rtr):
+                import time as _t
+                t0 = _t.time()
+                res = rtr.route(
+                    n_transfer_limit=max_transfers,
+                    walking=walking,
+                    start_time=start_seconds,
+                    start_point=start_point,
+                    destination=destination,
+                    allowed_modes=allowed_modes,
+                )
+                t1 = _t.time()
+                return res, (t1 - t0)
 
-        stop_coords = getattr(walking, "_coords", {})
+            # Run routers in parallel threads. Build a list of (name, router)
+            routers = [("main", main_router)]
+            if eco_router is not None:
+                routers.append(("eco", eco_router))
+            if cosy_router is not None:
+                routers.append(("cosy", cosy_router))
+            if lazy_router is not None:
+                routers.append(("lazy", lazy_router))
+            if greedy_router is not None:
+                routers.append(("greedy", greedy_router))
 
-        # Build full journey-plan responses (same shape as /journey/plan)
-        include_geom = bool(getattr(request, 'includeGeometry', False))
-        main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if main_res is not None else None
-        eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if eco_res is not None else None
-        cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if cosy_res is not None else None
-        lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if lazy_res is not None else None
-        greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if greedy_res is not None else None
+            tasks = [asyncio.to_thread(_run_router, rtr) for (_name, rtr) in routers]
+            results = await asyncio.gather(*tasks)
 
-        return {
-            "success": True,
-            "available_routers": available_routers,
-            "main": {
-                "route": main_plan,
-                "route_text": format_route_text(main_res, merged) if main_res is not None else None,
-                "time_seconds": main_time,
-            },
-            "eco": {
-                "route": eco_plan,
-                "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
-                "time_seconds": eco_time,
-            },
-            "cosy": {
-                "route": cosy_plan,
-                "route_text": format_route_text(cosy_res, merged) if cosy_res is not None else None,
-                "time_seconds": cosy_time,
-            },
-            "lazy": {
-                "route": lazy_plan,
-                "route_text": format_route_text(lazy_res, merged) if lazy_res is not None else None,
-                "time_seconds": lazy_time,
-            },
-            "greedy": {
-                "route": greedy_plan,
-                "route_text": format_route_text(greedy_res, merged) if greedy_res is not None else None,
-                "time_seconds": greedy_time,
-            },
-        }
+            # Map names to (result, time)
+            router_results = {}
+            for (name, _), (res, timing) in zip(routers, results):
+                router_results[name] = (res, timing)
+
+            main_res, main_time = router_results.get("main", (None, None))
+            eco_res, eco_time = router_results.get("eco", (None, None))
+            cosy_res, cosy_time = router_results.get("cosy", (None, None))
+            lazy_res, lazy_time = router_results.get("lazy", (None, None))
+            greedy_res, greedy_time = router_results.get("greedy", (None, None))
+
+            stop_coords = getattr(walking, "_coords", {})
+
+            # Build full journey-plan responses (same shape as /journey/plan)
+            include_geom = bool(getattr(request, 'includeGeometry', False))
+            main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if main_res is not None else None
+            eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if eco_res is not None else None
+            cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if cosy_res is not None else None
+            lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if lazy_res is not None else None
+            greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if greedy_res is not None else None
+
+            return {
+                "success": True,
+                "available_routers": available_routers,
+                "main": {
+                    "route": main_plan,
+                    "route_text": format_route_text(main_res, merged) if main_res is not None else None,
+                    "time_seconds": main_time,
+                },
+                "eco": {
+                    "route": eco_plan,
+                    "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
+                    "time_seconds": eco_time,
+                },
+                "cosy": {
+                    "route": cosy_plan,
+                    "route_text": format_route_text(cosy_res, merged) if cosy_res is not None else None,
+                    "time_seconds": cosy_time,
+                },
+                "lazy": {
+                    "route": lazy_plan,
+                    "route_text": format_route_text(lazy_res, merged) if lazy_res is not None else None,
+                    "time_seconds": lazy_time,
+                },
+                "greedy": {
+                    "route": greedy_plan,
+                    "route_text": format_route_text(greedy_res, merged) if greedy_res is not None else None,
+                    "time_seconds": greedy_time,
+                },
+            }
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
@@ -7401,6 +7402,8 @@ def parse_nrcc_messages(root: ElementTree):
 
 @app.get("/rail/departures/{station_code}")
 async def route_rail_departures(station_code):
+    if _live_endpoints_disabled():
+        return JSONResponse(status_code=200, content={"locationName": station_code, "services": [], "messages": []})
     if station_code is None:
         return JSONResponse(
             status_code=400,

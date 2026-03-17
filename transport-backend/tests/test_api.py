@@ -135,6 +135,25 @@ class TestRouteEndpoint:
         data = response.json()
         assert data["success"] is True
 
+        def test_routing_activity_gate_toggles(self):
+            """`routing_activity()` should mark routing as active only inside the context."""
+            from api import is_routing_active, routing_activity
+
+            assert is_routing_active() is False
+            with routing_activity():
+                assert is_routing_active() is True
+            assert is_routing_active() is False
+
+        def test_routing_activity_gate_is_nestable(self):
+            from api import is_routing_active, routing_activity
+
+            assert is_routing_active() is False
+            with routing_activity():
+                assert is_routing_active() is True
+                with routing_activity():
+                    assert is_routing_active() is True
+                assert is_routing_active() is True
+            assert is_routing_active() is False
     def test_route_with_bus_mode(self, client: TestClient):
         """POST /api/route with mode='bus' filters to bus only."""
         mock_timetable = MagicMock()

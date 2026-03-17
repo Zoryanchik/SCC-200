@@ -231,20 +231,27 @@ class RaptorRouter:
             'start_point': start_point,
             'destination': destination,
         }
-        # Annotate with a canonical route_id for in-memory track lookup
+        # Annotate with a dense route_int for in-memory track lookup
         try:
-            route_id_for_tracks = None
+            route_int_for_tracks = None
             for k, info in fastest_route.items():
                 if k == '_meta':
                     continue
                 if not isinstance(info, dict):
                     continue
-                jm = info.get('journey_info') or info.get('journey_metadata') or {}
-                if jm and isinstance(jm, dict) and jm.get('route_id'):
-                    route_id_for_tracks = jm.get('route_id')
-                    break
-            if route_id_for_tracks:
-                fastest_route['_route_id'] = route_id_for_tracks
+                j_id = info.get('journey')
+                if j_id is None:
+                    continue
+                try:
+                    if hasattr(net, 'journey_to_route') and j_id < len(net.journey_to_route):
+                        r_int = net.journey_to_route[j_id]
+                        if r_int is not None and int(r_int) >= 0:
+                            route_int_for_tracks = int(r_int)
+                            break
+                except Exception:
+                    pass
+            if route_int_for_tracks is not None:
+                fastest_route['_route_int'] = route_int_for_tracks
         except Exception:
             pass
         return fastest_route

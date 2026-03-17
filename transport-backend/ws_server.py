@@ -38,6 +38,19 @@ from fastapi import WebSocket, WebSocketDisconnect
 logger = logging.getLogger(__name__)
 
 
+def _routing_active() -> bool:
+    """Best-effort check whether routing is in progress.
+
+    Implemented via import from `api.py` to avoid duplicating state.
+    If the import fails (e.g., during isolated module tests), return False.
+    """
+    try:
+        from api import is_routing_active  # local module import
+        return bool(is_routing_active())
+    except Exception:
+        return False
+
+
 # ── STOMP frame representation ────────────────────────────────────────
 
 
@@ -258,6 +271,10 @@ class StompBroker:
         """Fetch live bus positions and broadcast to subscribers."""
         if self._bus_live_factory is None:
             return
+        # If we're routing, pause CPU-heavy live polling. Clients will keep
+        # their subscriptions; they'll just get fewer updates.
+        if _routing_active():
+            return
         if not self._has_subscribers("/topic/BUS_MVT_ALL"):
             return
 
@@ -300,6 +317,11 @@ class StompBroker:
 
         async def _loop() -> None:
             while True:
+                # When routing is running, pause the poll loop so routing gets
+                # the CPU. Wake up frequently enough to resume quickly.
+                if _routing_active():
+                    await asyncio.sleep(min(self._poll_interval, 0.5))
+                    continue
                 await self._poll_bus_live()
                 await asyncio.sleep(self._poll_interval)
 

@@ -44,11 +44,11 @@ def test_leg_geometry_bus_prefers_route_tracks_subsegment(monkeypatch):
     # Provide stop coords so subsegment selection can find nearest indices.
     # Use ATCO ids 'A' and 'B'.
     stop_coords = {"A": (54.01, -2.80), "B": (54.04, -2.80)}
-    seg = api._subsegment_from_tracks("RID", ["A", "B"], stop_coords)
+    seg = api._subsegment_from_coords(tracks, ["A", "B"], stop_coords)
     assert seg == tracks[1:5]
 
     # Order matters: reversing the stop order should reverse the slice.
-    seg_rev = api._subsegment_from_tracks("RID", ["B", "A"], stop_coords)
+    seg_rev = api._subsegment_from_coords(tracks, ["B", "A"], stop_coords)
     assert seg_rev == list(reversed(tracks[1:5]))
 
     client = TestClient(api.app, raise_server_exceptions=True)

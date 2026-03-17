@@ -464,11 +464,18 @@ class BusLoader:
             # so route_ids match across tables. Include service_code when
             # available to preserve the service-scoped namespace.
             rkey = f"{service_code}:{sec_id}" if service_code else sec_id
+
+            # IMPORTANT: seq is defined as (route_id, section_id, seq) primary key
+            # when persisted. If we restart seq at 0 for each RouteLink, later
+            # links overwrite earlier ones via ON CONFLICT (route_id, section_id, seq).
+            # Maintain a monotonically increasing seq across all RouteLinks in
+            # this RouteSection.
             if sec_id in route_section_links:
-                for link in route_section_links[sec_id]:
-                    from_atco, to_atco, lw = link
-                    for seq, (lat, lon) in enumerate(lw):
-                        route_section_track_rows.append((rkey, sec_id, seq, lat, lon, from_atco, to_atco))
+                seq_base = 0
+                for from_atco, to_atco, lw in route_section_links[sec_id]:
+                    for i, (lat, lon) in enumerate(lw):
+                        route_section_track_rows.append((rkey, sec_id, seq_base + i, lat, lon, from_atco, to_atco))
+                    seq_base += len(lw)
             else:
                 # If no per-link split, emit rows for the whole section
                 for seq, (lat, lon) in enumerate(waypoints):
@@ -1365,38 +1372,66 @@ class BusLoader:
                     "line_name": line_name,
                 }
 
-        # --- 5. load route tracks (lat/lon polylines) ---
-        # Canonical source: bus_route_section_tracks.
-        # Each `route_id` in this table represents a canonical route polyline
-        # (already ordered by seq). We do NOT concatenate sections.
+    # --- 5. load route tracks (lat/lon polylines) ---
+    # Canonical source: bus_route_section_tracks.
+    # IMPORTANT: seq is per-RouteLink, so ordering by (route_id, seq)
+    # alone can interleave separate link fragments and produce a mess.
+    # Use (route_id, section_id, from_atco, to_atco, seq) to keep each
+    # link fragment contiguous, then concatenate fragments.
     # NOTE: Legacy table `bus_route_tracks` is fully deprecated and is
     # not read or written by this code.
         def _load_tracks_from_table(table: str) -> bool:
             try:
-                cursor.execute(f"SELECT route_id, lat, lon FROM {table} ORDER BY route_id, seq")
+                cursor.execute(
+                    f"SELECT route_id, section_id, from_atco, to_atco, seq, lat, lon FROM {table} "
+                    "ORDER BY route_id, section_id, from_atco, to_atco, seq"
+                )
                 rows = cursor.fetchall()
                 if not rows:
                     return False
                 current_route = None
+                current_key = None  # (route_id, section_id, from_atco, to_atco)
                 track_buf = []
                 wrote_any = False
-                for route_id, lat, lon in rows:
+                for route_id, section_id, from_atco, to_atco, _seq, lat, lon in rows:
+                    key = (route_id, section_id, from_atco or '', to_atco or '')
                     if route_id != current_route:
                         if current_route is not None and track_buf:
                             bd.add_route_track(current_route, track_buf)
                             wrote_any = True
                         current_route = route_id
+                        current_key = key
                         track_buf = []
-                    track_buf.append((lat, lon))
+                    elif key != current_key:
+                        # New fragment for same route; keep concatenating but
+                        # avoid duplicating the junction point when fragments
+                        # share an endpoint.
+                        current_key = key
+                        # (no special action needed beyond optional de-dupe below)
+
+                    pt = (lat, lon)
+                    if track_buf and pt == track_buf[-1]:
+                        continue
+                    track_buf.append(pt)
+
                 if current_route is not None and track_buf:
                     bd.add_route_track(current_route, track_buf)
                     wrote_any = True
                 return wrote_any
             except Exception:
+                # Don't swallow errors here; if tracks fail to load we end up
+                # silently returning straight-line geometries everywhere.
+                import traceback
+                print(f"[bus_loader] ERROR loading tracks from {table}:")
+                traceback.print_exc()
                 return False
 
         # Only load canonical section tracks.
-        _load_tracks_from_table("bus_route_section_tracks")
+        # IMPORTANT: don't silently ignore this result; missing tracks
+        # degrade geometry to straight lines throughout the app.
+        loaded_any_tracks = _load_tracks_from_table("bus_route_section_tracks")
+        if not loaded_any_tracks:
+            print("[bus_loader] WARNING: no route tracks loaded from bus_route_section_tracks")
 
         conn.close()
         return bd
@@ -1687,9 +1722,63 @@ class BusLoader:
     # timing log removed
 
         # 3e. route tracks
-        # Deprecated: legacy bus_route_tracks is no longer loaded.
-        # Tracks are loaded from bus_route_section_tracks in load_busdata()'s
-        # canonical section-tracks loader.
+        # Canonical source: bus_route_section_tracks.
+        # IMPORTANT: date-filtered BusData must still include tracks for
+        # the valid routes; otherwise journey geometry degenerates to
+        # straight lines.
+        try:
+            cur.execute(
+                "SELECT st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
+                "FROM bus_route_section_tracks st "
+                "JOIN _valid_routes vr ON st.route_id = vr.route_id "
+                "ORDER BY st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq"
+            )
+            rows = cur.fetchall()
+            current_route = None
+            current_key = None
+            track_buf = []
+            for route_id, section_id, from_atco, to_atco, _seq, lat, lon in rows:
+                key = (route_id, section_id, from_atco or '', to_atco or '')
+                if route_id != current_route:
+                    if current_route is not None and track_buf:
+                        bd.add_route_track(current_route, track_buf)
+                    current_route = route_id
+                    current_key = key
+                    track_buf = []
+                elif key != current_key:
+                    current_key = key
+
+                pt = (lat, lon)
+                if track_buf and pt == track_buf[-1]:
+                    continue
+                track_buf.append(pt)
+
+                # Also maintain a stop-to-stop fragment index when possible.
+                if from_atco and to_atco:
+                    try:
+                        r_int = bd.map_routes.code_to_int.get(route_id)
+                        if r_int is None:
+                            r_int = bd.map_routes.get_int(route_id)
+                            bd._ensure_route_capacity(r_int)
+                        fs = bd.map_stops.get_int(from_atco)
+                        ts = bd.map_stops.get_int(to_atco)
+                        bd._ensure_stop_capacity(fs)
+                        bd._ensure_stop_capacity(ts)
+                        frag = bd.route_link_tracks[r_int].setdefault((fs, ts), [])
+                        if not frag or pt != frag[-1]:
+                            frag.append(pt)
+                    except Exception:
+                        # Best-effort: missing stop mappings shouldn't break load.
+                        pass
+
+            if current_route is not None and track_buf:
+                bd.add_route_track(current_route, track_buf)
+        except Exception:
+            # As per policy A, this is allowed (DB used for ingest/load),
+            # but if it fails we still want routing to work (without tracks).
+            import traceback
+            print("[bus_loader] WARNING: failed to load section tracks for date-filtered BusData")
+            traceback.print_exc()
 
         conn.commit()  # commit to drop temp tables
     # timing log removed

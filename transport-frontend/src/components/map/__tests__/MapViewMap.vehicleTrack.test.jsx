@@ -141,6 +141,7 @@ describe('MapViewMap vehicle track selection', () => {
     fetchRouteLabelMock.mockResolvedValue({
       line: '1A',
       variant_count: 2,
+      route_ints: ['RID1', 'RID2'],
       route_ids: ['RID1', 'RID2'],
     });
 
@@ -164,7 +165,7 @@ describe('MapViewMap vehicle track selection', () => {
       }
 
       // RID1 returns linear (should be ignored in strict mode)
-      if (u.includes('route_id=RID1')) {
+      if (u.includes('route_int=RID1') || u.includes('route_id=RID1')) {
         return {
           ok: true,
           status: 200,
@@ -175,7 +176,7 @@ describe('MapViewMap vehicle track selection', () => {
       }
 
       // RID2 returns route_tracks (should be selected)
-      if (u.includes('route_id=RID2')) {
+      if (u.includes('route_int=RID2') || u.includes('route_id=RID2')) {
         return {
           ok: true,
           status: 200,
@@ -239,8 +240,8 @@ describe('MapViewMap vehicle track selection', () => {
       // Ensure we tried both route_ids by the time selection settles.
       const calledUrls = global.fetch.mock.calls.map((c) => String(c[0]));
 		expect(calledUrls.length).toBeGreaterThan(0);
-		// At least one route_id-based leg-geometry request should be attempted.
-		expect(calledUrls.some((u) => u.includes('route_id='))).toBe(true);
+    // At least one route_int (preferred) or route_id (back-compat) request should be attempted.
+    expect(calledUrls.some((u) => u.includes('route_int=') || u.includes('route_id='))).toBe(true);
     });
 
     // Sanity: confirm we didn't render the legacy React-based vehicle-track elements.

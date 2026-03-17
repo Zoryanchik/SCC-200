@@ -18,6 +18,8 @@ class BusData:
         route_metadata   – {route_id, line_name, …} per route
         journey_metadata – {journey_id, …} per journey
         route_tracks     – ordered [(lat, lon), …] track polylines per route
+    route_link_tracks – dict[(from_stop_int,to_stop_int)] -> [(lat,lon),...]
+               per route (stop-to-stop fragments for geometry)
     """
 
     def __init__(self, num_routes: int, num_journeys: int, num_stops: int):
@@ -43,6 +45,9 @@ class BusData:
         self.journey_metadata = [None for _ in range(num_journeys)]
         # Indexed by route_id_int — ordered [(lat, lon), ...] track polylines
         self.route_tracks = [[] for _ in range(num_routes)]
+        # Indexed by route_id_int — dict mapping stop-int pairs to polyline
+        # fragments (lat,lon). These reflect RouteLink boundaries.
+        self.route_link_tracks = [{} for _ in range(num_routes)]
 
     # --- auto-resize helpers -----------------------------------------------
     def _ensure_route_capacity(self, route_id_int):
@@ -52,6 +57,7 @@ class BusData:
             self.route_journeys.append([])
             self.route_metadata.append(None)
             self.route_tracks.append([])
+            self.route_link_tracks.append({})
 
     def _ensure_journey_capacity(self, journey_id_int):
         """Ensure journey-based lists can hold index journey_id_int."""

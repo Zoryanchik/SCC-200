@@ -49,6 +49,7 @@ class MergedData:
         self.route_metadata = []
         self.journey_metadata = []
         self.route_tracks = []
+        self.route_link_tracks = []
 
         # Per-journey mode (BUS or TRAIN), filled during merge
         self._journey_mode = []
@@ -74,6 +75,7 @@ class MergedData:
         route_metadata_local = self.route_metadata
         journey_metadata_local = self.journey_metadata
         route_tracks_local = self.route_tracks
+        route_link_tracks_local = self.route_link_tracks
         journey_mode_local = self._journey_mode
         stop_mode_local = self._stop_mode
         group_mappers_local = self._group_mappers
@@ -128,6 +130,19 @@ class MergedData:
             route_tracks_local.extend(
                 getattr(data, "route_tracks", []) or [[] for _ in range(n_routes)]
             )
+
+            # --- route_link_tracks (remap stop ints + routes) ---
+            # Per route: dict[(from_stop_int,to_stop_int)] -> [(lat,lon),...]
+            # Stop ints must be offset into merged stop index space.
+            group_links = getattr(data, 'route_link_tracks', None) or [{} for _ in range(n_routes)]
+            for r_links in group_links:
+                if not r_links:
+                    route_link_tracks_local.append({})
+                    continue
+                out = {}
+                for (fs, ts), pts in r_links.items():
+                    out[(fs + stop_offset, ts + stop_offset)] = list(pts)
+                route_link_tracks_local.append(out)
 
             # Record the transport mode for every journey in this group
             journey_mode_local.extend([mode] * n_journeys)
