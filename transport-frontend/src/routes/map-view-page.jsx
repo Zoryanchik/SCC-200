@@ -253,6 +253,7 @@ if ((Array.isArray(busLocations) && busLocations.length > 0) ||
 
     const delayMinutes = bus.delay_minutes ?? bus.delayMinutes ?? null;
 
+
     // Use stable ids when possible (backend-provided vehicle id/ref) so UI
     // selections (popups / selectedVehicleTrack) remain associated with the
     // same vehicle across background refreshes. Fall back to a generated id
