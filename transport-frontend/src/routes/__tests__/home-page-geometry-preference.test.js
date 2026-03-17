@@ -27,7 +27,7 @@ const journeyRouteFromOption = (opt) => {
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i];
       const rawMode = (leg?.mode && String(leg.mode).toLowerCase()) || '';
-      const isWalk = rawMode === 'walking';
+      const isWalk = rawMode === 'walking' || rawMode === 'walk';
       const mode = rawMode || (leg?.line_name ? 'transit' : 'walking');
       const embeddedCoords = leg?.geometry && Array.isArray(leg.geometry.coords) ? leg.geometry.coords : null;
       if (!embeddedCoords || embeddedCoords.length < 2) continue;
@@ -44,7 +44,9 @@ const journeyRouteFromOption = (opt) => {
     if (segments.length > 0) return segments;
   }
 
-  return opt.routeGeometries ?? null;
+  if (Array.isArray(opt?.routeGeometries)) return opt.routeGeometries;
+  if (Array.isArray(opt?.route?.routeGeometries)) return opt.route.routeGeometries;
+  return null;
 };
 
 describe('HomePage journeyRoute geometry preference', () => {
@@ -88,5 +90,31 @@ describe('HomePage journeyRoute geometry preference', () => {
     const segs = journeyRouteFromOption(opt);
     expect(segs).toHaveLength(1);
     expect(segs[0].coords).toHaveLength(2);
+  });
+
+  test('falls back to nested opt.route.routeGeometries (walk + bus + walk)', () => {
+    const opt = {
+      sources: {
+        main: {
+          route: {
+            // No embedded geometry here, so we need fallback.
+            legs: [{ mode: 'bus', line_name: '100' }],
+          },
+        },
+      },
+      route: {
+        routeGeometries: [
+          { id: 'walk-0', mode: 'walking', coords: [[54.0, -2.8], [54.001, -2.801]] },
+          { id: 'bus-1', mode: 'bus', coords: [[54.001, -2.801], [54.01, -2.81]] },
+          { id: 'walk-2', mode: 'walking', coords: [[54.01, -2.81], [54.02, -2.82]] },
+        ],
+      },
+    };
+
+    const segs = journeyRouteFromOption(opt);
+    expect(segs).not.toBeNull();
+    expect(segs).toHaveLength(3);
+    expect(segs[0].id).toBe('walk-0');
+    expect(segs[2].id).toBe('walk-2');
   });
 });

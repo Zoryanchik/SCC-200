@@ -287,7 +287,12 @@ def initialize_base():
         train_today = train_today_f.result()
         train_tomorrow = train_tomorrow_f.result()
 
-    # Build AM (yesterday + today) and PM (today + tomorrow) in parallel
+    # Build AM (yesterday + today) and PM (today + tomorrow).
+    #
+    # Startup UX: build the time-relevant half first so the first routing call
+    # has a warm cache. (If it's currently AM, build AM first; otherwise PM.)
+    # We still build both variants, but ordering matters because the process
+    # may begin serving requests as soon as the first one completes.
     def _build_variant(day_a_data, day_b_data, offset_a, offset_b, label):
         bus_a, train_a = day_a_data
         bus_b, train_b = day_b_data
@@ -342,16 +347,32 @@ def initialize_base():
         print(f"    ✓ {label} ready")
         return merged, router, walking_obj
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        am_fut = ex.submit(_build_variant,
-            (bus_yesterday, train_yesterday), (bus_today, train_today),
-            -86400, 0, "AM")
-        pm_fut = ex.submit(_build_variant,
-            (bus_today, train_today), (bus_tomorrow, train_tomorrow),
-            0, 86400, "PM")
+    from datetime import datetime as _dt
+    try:
+        now_s = _dt.now().hour * 3600 + _dt.now().minute * 60 + _dt.now().second
+    except Exception:
+        now_s = 0
+    NOON = 43200
 
-        merged_am, router_am, walking_am = am_fut.result()
-        merged_pm, router_pm, walking_pm = pm_fut.result()
+    # Build the relevant one synchronously first, then build the other.
+    if now_s < NOON:
+        merged_am, router_am, walking_am = _build_variant(
+            (bus_yesterday, train_yesterday), (bus_today, train_today),
+            -86400, 0, "AM"
+        )
+        merged_pm, router_pm, walking_pm = _build_variant(
+            (bus_today, train_today), (bus_tomorrow, train_tomorrow),
+            0, 86400, "PM"
+        )
+    else:
+        merged_pm, router_pm, walking_pm = _build_variant(
+            (bus_today, train_today), (bus_tomorrow, train_tomorrow),
+            0, 86400, "PM"
+        )
+        merged_am, router_am, walking_am = _build_variant(
+            (bus_yesterday, train_yesterday), (bus_today, train_today),
+            -86400, 0, "AM"
+        )
 
     prebuilt_cache = {
         (today_str, "PM"): (merged_pm, router_pm, walking_pm),

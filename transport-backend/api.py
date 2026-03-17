@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import os
+import time
 import sys
 import threading
 from datetime import datetime
@@ -16,6 +17,264 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from urllib.request import Request as UrllibRequest, urlopen
 from xml.etree import ElementTree
+
+# --- Live bus track precompute cache (Option A: embed coords in /bus/live) ---
+#
+# Goal: make click-to-show-track instant by doing geometry lookup during the
+# periodic /bus/live refresh. The frontend can then render the polyline
+# immediately with no extra /route/leg-geometry calls.
+#
+# Cache is bounded + TTL to avoid unbounded growth.
+_BUS_TRACK_CACHE_LOCK = threading.Lock()
+_BUS_TRACK_CACHE: dict[str, tuple[float, list[list[float]]]] = {}
+
+
+def _bus_track_cache_limits() -> tuple[int, int]:
+    """Return (max_entries, ttl_seconds) for the in-memory track cache."""
+    try:
+        max_entries = int(os.environ.get('BUS_TRACK_CACHE_MAX', '300'))
+    except Exception:
+        max_entries = 300
+    try:
+        ttl_s = int(os.environ.get('BUS_TRACK_CACHE_TTL_S', '90'))
+    except Exception:
+        ttl_s = 90
+    # Safety clamps
+    max_entries = max(0, min(max_entries, 5000))
+    ttl_s = max(1, min(ttl_s, 3600))
+    return max_entries, ttl_s
+
+
+def _bus_track_cache_prune(now: float | None = None) -> None:
+    now = time.time() if now is None else float(now)
+    max_entries, ttl_s = _bus_track_cache_limits()
+    if max_entries <= 0:
+        # Disabled
+        _BUS_TRACK_CACHE.clear()
+        return
+    # TTL prune
+    cutoff = now - float(ttl_s)
+    try:
+        expired = [k for k, (ts, _coords) in _BUS_TRACK_CACHE.items() if ts < cutoff]
+        for k in expired:
+            _BUS_TRACK_CACHE.pop(k, None)
+    except Exception:
+        # Best-effort; never break API due to cache bookkeeping
+        pass
+    # Size prune (drop oldest)
+    try:
+        if len(_BUS_TRACK_CACHE) > max_entries:
+            items = sorted(_BUS_TRACK_CACHE.items(), key=lambda kv: kv[1][0])
+            for k, _v in items[: max(0, len(_BUS_TRACK_CACHE) - max_entries)]:
+                _BUS_TRACK_CACHE.pop(k, None)
+    except Exception:
+        pass
+
+
+def _bus_track_cache_key(entry: dict) -> str | None:
+    """Build a stable-ish cache key for a single vehicle from /bus/live entry."""
+    try:
+        op = (entry.get('operator_ref') or entry.get('operator') or '')
+        line = (entry.get('line') or '')
+        vref = entry.get('vehicle_ref') or entry.get('vehicle_journey_code') or entry.get('framed_journey_ref') or entry.get('dated_journey_ref')
+        jid = entry.get('logged_journey_id')
+        # Prefer vehicle_ref+logged_journey_id when present.
+        parts = [str(op).strip(), str(line).strip()]
+        if vref:
+            parts.append(str(vref).strip())
+        if jid:
+            parts.append(str(jid).strip())
+        # If we don't have *any* stable identifiers, don't cache.
+        if len(parts) <= 2:
+            return None
+        return '|'.join(parts)
+    except Exception:
+        return None
+
+
+def _normalize_latlon_coords(coords) -> list[list[float]]:
+    """Normalize a polyline to [[lat, lon], ...] floats."""
+    out: list[list[float]] = []
+    if not isinstance(coords, list):
+        return out
+    for pt in coords:
+        if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+            continue
+        try:
+            a = float(pt[0])
+            b = float(pt[1])
+        except Exception:
+            continue
+        if not (a == a and b == b):
+            continue
+        out.append([a, b])
+    return out
+
+
+def _get_cached_bus_track(entry: dict) -> list[list[float]] | None:
+    key = _bus_track_cache_key(entry)
+    if not key:
+        return None
+    now = time.time()
+    max_entries, ttl_s = _bus_track_cache_limits()
+    if max_entries <= 0:
+        return None
+    with _BUS_TRACK_CACHE_LOCK:
+        _bus_track_cache_prune(now)
+        hit = _BUS_TRACK_CACHE.get(key)
+        if not hit:
+            return None
+        ts, coords = hit
+        if (now - ts) > float(ttl_s):
+            _BUS_TRACK_CACHE.pop(key, None)
+            return None
+        return coords
+
+
+
+def _put_cached_bus_track(entry: dict, coords: list[list[float]]) -> None:
+    key = _bus_track_cache_key(entry)
+    if not key:
+        return
+    now = time.time()
+    with _BUS_TRACK_CACHE_LOCK:
+        max_entries, _ttl_s = _bus_track_cache_limits()
+        if max_entries <= 0:
+            return
+        _BUS_TRACK_CACHE[key] = (now, coords)
+        _bus_track_cache_prune(now)
+
+
+def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | None:
+    """Best-effort compute route_tracks geometry for a live vehicle.
+
+    This is intentionally conservative: if we can't confidently return a
+    route_tracks polyline, return None.
+    """
+    try:
+        # Fast path: if the live matcher provided a merged route index,
+        # pull coords directly from merged.route_tracks.
+        try:
+            ri = entry.get('route_int')
+            if ri is not None:
+                ri = int(ri)
+                merged = None
+                try:
+                    # Same merged discovery strategy as route_leg_geometry
+                    if globals().get('_base_cache'):
+                        prebuilt = _base_cache.get('prebuilt_cache')
+                        if prebuilt:
+                            for _k, v in prebuilt.items():
+                                try:
+                                    merged = v[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                    if merged is None:
+                        rcache = globals().get('_router_cache')
+                        rlock = globals().get('_router_cache_lock')
+                        if rcache is not None:
+                            if rlock:
+                                with rlock:
+                                    items = list(rcache.values())
+                            else:
+                                items = list(rcache.values())
+                            for val in items:
+                                try:
+                                    merged = val[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                except Exception:
+                    merged = None
+
+                if merged is not None:
+                    tracks = getattr(merged, 'route_tracks', None) or []
+                    if 0 <= ri < len(tracks):
+                        coords = _normalize_latlon_coords(tracks[ri])
+                        if len(coords) >= 2:
+                            _put_cached_bus_track(entry, coords)
+                            return coords
+        except Exception:
+            pass
+        # If we already computed/cached it recently, reuse.
+        cached = _get_cached_bus_track(entry)
+        if cached and len(cached) >= 2:
+            return cached
+
+
+        # We need either a canonical route_id/route_int to ask for route_tracks.
+        # The current frontend route-label step provides these, but /bus/live
+        # doesn't. So for now we only compute when we have a logged_journey_id
+        # that the frontend can use to fetch label cheaply later.
+        #
+        # (Follow-up: we can add a lightweight label lookup by line and jid.)
+        route_id = entry.get('route_id')
+        route_int = entry.get('route_int')
+        if route_id is None and route_int is None:
+            return None
+
+        lat_v = entry.get('lat')
+        lon_v = entry.get('lon')
+        if lat_v is None or lon_v is None:
+            return None
+
+        eps = 0.0001
+        data = route_leg_geometry(
+            from_lat=float(lat_v),
+            from_lon=float(lon_v),
+            to_lat=float(lat_v) + eps,
+            to_lon=float(lon_v) + eps,
+            mode='driving',
+            route_id=str(route_id) if route_id is not None else None,
+            route_int=int(route_int) if route_int is not None else None,
+            from_stop_id=entry.get('origin_atco'),
+            to_stop_id=entry.get('destination_atco'),
+        )
+        if not isinstance(data, dict):
+            return None
+        if data.get('source') == 'linear':
+            return None
+
+        coords = _normalize_latlon_coords(data.get('coords'))
+        if len(coords) < 2:
+            return None
+        if data.get('source') not in ('route_tracks', 'osrm'):
+            # Only accept well-defined sources.
+            return None
+        _put_cached_bus_track(entry, coords)
+        return coords
+    except Exception:
+        return None
+
+
+def _compute_vehicle_track_coords_with_source_for_live(entry: dict) -> tuple[list[list[float]] | None, str | None, bool]:
+    """Compute vehicle track coords plus provenance.
+
+    Returns (coords, source, cached) where:
+      - source in {"cache", "route_tracks", "leg_geometry", "none"}
+      - cached indicates we served coords from the in-memory cache.
+    """
+    cached = _get_cached_bus_track(entry)
+    if cached and len(cached) >= 2:
+        return cached, 'cache', True
+
+    coords = _compute_vehicle_track_coords_for_live(entry)
+    if not coords or len(coords) < 2:
+        return None, 'none', False
+
+    # Best-effort provenance inference: if route_int is present and we likely
+    # have merged.route_tracks, treat it as route_tracks; otherwise treat it as
+    # the fallback leg-geometry path.
+    try:
+        ri = entry.get('route_int')
+        if ri is not None:
+            return coords, 'route_tracks', False
+    except Exception:
+        pass
+    return coords, 'leg_geometry', False
 
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -169,6 +428,23 @@ async def lifespan(app: FastAPI):
             # base data is ready (NaPTAN download, walking precompute,
             # dataset loading).
             _base_cache = initialize_base()
+            # If initialize_base() prebuilt AM/PM routers, eagerly seed the
+            # request-time router cache now (during startup) so the first UI
+            # request doesn't accidentally miss and trigger a rebuild.
+            try:
+                pre = _base_cache.get('prebuilt_cache') if _base_cache else None
+                if isinstance(pre, dict) and pre:
+                    seeded = 0
+                    for k, v in pre.items():
+                        if isinstance(k, tuple) and len(k) == 2:
+                            try:
+                                _set_router_cache((str(k[0]), str(k[1])), v)
+                                seeded += 1
+                            except Exception:
+                                continue
+                    logger.info('[router] seeded %d prebuilt routers into _router_cache', seeded)
+            except Exception:
+                logger.debug('[router] failed to seed prebuilt routers into _router_cache', exc_info=True)
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "Backend initialisation failed  — endpoints requiring "
@@ -398,8 +674,12 @@ app.add_api_websocket_route("/ws/live", ws_live_endpoint)
 # Read allowed origins from the CORS_ORIGINS env var (comma-separated).
 # Falls back to localhost dev ports so local development works out of the box.
 _default_origins = (
+    # Legacy dev servers
     "http://localhost:3000,http://localhost:5075,http://localhost:5076,"
-    "http://127.0.0.1:3000,http://127.0.0.1:5075,http://127.0.0.1:5076"
+    "http://127.0.0.1:3000,http://127.0.0.1:5075,http://127.0.0.1:5076,"
+    # Vite dev server (default + common fallback when 5173 is taken)
+    "http://localhost:5173,http://localhost:5174,"
+    "http://127.0.0.1:5173,http://127.0.0.1:5174"
 )
 _cors_origins = [
     o.strip()
@@ -1454,63 +1734,54 @@ def _fetch_route_tracks(route_id: str):
         # In-memory lookup failed — fall back to DB below
         pass
 
-    # 1b) Best-effort: lazily build today's router once so route_tracks become
-    # available in memory even when this helper is called early in a process.
-    # This is slower than the cache paths above, so we only do it once.
+    # 1b) Scan any *already-built* router cache entries (if present).
+    # IMPORTANT: do NOT trigger router builds from here. This helper is used
+    # in hot request-time code paths (live matching + geometry) and must stay
+    # in-memory only.
     try:
-        if not globals().get('_route_tracks_bootstrapped'):
-            globals()['_route_tracks_bootstrapped'] = True
-            try:
-                from datetime import date as _date
-                # Build a router for today; this populates _router_cache.
-                get_router_for_date(_date.today().isoformat())
-            except Exception:
-                pass
-
-            # Retry router_cache scan after bootstrap
-            rcache = globals().get('_router_cache')
-            rlock = globals().get('_router_cache_lock')
-            if rcache is not None:
-                if rlock:
-                    with rlock:
-                        items = list(rcache.values())
-                else:
+        rcache = globals().get('_router_cache')
+        rlock = globals().get('_router_cache_lock')
+        if rcache is not None:
+            if rlock:
+                with rlock:
                     items = list(rcache.values())
-                for val in items:
-                    try:
-                        merged = val[0]
-                    except Exception:
-                        continue
-                    if not merged:
-                        continue
+            else:
+                items = list(rcache.values())
+            for val in items:
+                try:
+                    merged = val[0]
+                except Exception:
+                    continue
+                if not merged:
+                    continue
+                r_int = None
+                candidate_ints = []
+                try:
+                    for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
+                        if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                            r_int = i
+                            break
+                        if meta and isinstance(meta, dict) and vj_base:
+                            rid2 = meta.get('route_id')
+                            if _matches_vj_family(rid2):
+                                candidate_ints.append(i)
+                except Exception:
                     r_int = None
-                    candidate_ints = []
+
+                if r_int is None and candidate_ints:
                     try:
-                        for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
-                            if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                        for i in candidate_ints:
+                            if i < len(merged.route_tracks) and merged.route_tracks[i]:
                                 r_int = i
                                 break
-                            if meta and isinstance(meta, dict) and vj_base:
-                                rid2 = meta.get('route_id')
-                                if _matches_vj_family(rid2):
-                                    candidate_ints.append(i)
-                    except Exception:
-                        r_int = None
-
-                    if r_int is None and candidate_ints:
-                        try:
-                            for i in candidate_ints:
-                                if i < len(merged.route_tracks) and merged.route_tracks[i]:
-                                    r_int = i
-                                    break
-                            if r_int is None:
-                                r_int = candidate_ints[0]
-                        except Exception:
+                        if r_int is None:
                             r_int = candidate_ints[0]
-                    if r_int is not None and r_int < len(merged.route_tracks):
-                        tracks = merged.route_tracks[r_int]
-                        if tracks:
-                            return [[t[0], t[1]] for t in tracks]
+                    except Exception:
+                        r_int = candidate_ints[0]
+                if r_int is not None and r_int < len(merged.route_tracks):
+                    tracks = merged.route_tracks[r_int]
+                    if tracks:
+                        return [[t[0], t[1]] for t in tracks]
     except Exception:
         pass
 
@@ -2699,7 +2970,7 @@ async def routes_for_line(
     import time
     t0 = time.time()
     try:
-        merged, _router, _walking = get_router_for_date(date_str)
+        merged, _router, _walking = get_router_for_date(date_str, apply_delay=False)
     except Exception:
         return JSONResponse(
             status_code=503,
@@ -3233,6 +3504,11 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         mismatch against the wrong departure.
 
     Returns int seconds or None when no confident match is found.
+
+    When ``return_jid`` is True (historical name), this function returns a
+    tuple ``(delay_seconds, route_int)`` where ``route_int`` is the merged
+    route index (i.e. ``merged.journey_to_route[journey_id]``). This is the
+    most useful identifier for rendering route tracks.
     """
     try:
         from datetime import datetime
@@ -3249,6 +3525,110 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     except Exception:
         return None
 
+    # Index to avoid scanning all journeys on every live-vehicle match.
+    # Keyed by the identity of the merged timetable instance.
+    # Value: dict[str, list[int]] mapping short line name -> journey ids.
+    global _LIVE_MATCH_JOURNEYS_BY_LINE
+    try:
+        _LIVE_MATCH_JOURNEYS_BY_LINE
+    except NameError:
+        _LIVE_MATCH_JOURNEYS_BY_LINE = {}
+
+    def _journeys_for_line_short(short_line: str) -> list[int]:
+        try:
+            if not short_line:
+                return []
+            mkey = id(merged)
+            by_line = _LIVE_MATCH_JOURNEYS_BY_LINE.get(mkey)
+            if by_line is None:
+                by_line = {}
+                try:
+                    for j_id, jmeta in enumerate(getattr(merged, 'journey_metadata', []) or []):
+                        if not jmeta:
+                            continue
+                        line_name = jmeta.get('line_name') or ''
+                        s = line_name.split(':')[-1].strip() if line_name else ''
+                        if not s:
+                            continue
+                        by_line.setdefault(s, []).append(j_id)
+                except Exception:
+                    # If indexing fails, fall back to empty index.
+                    by_line = {}
+                _LIVE_MATCH_JOURNEYS_BY_LINE[mkey] = by_line
+            return by_line.get(short_line, [])
+        except Exception:
+            return []
+
+    # Cache per-journey endpoint ATCO sets and start/end times for this merged.
+    # This avoids repeatedly walking journey_times to extract endpoint stop codes.
+    global _LIVE_MATCH_JOURNEY_ENDPOINTS
+    try:
+        _LIVE_MATCH_JOURNEY_ENDPOINTS
+    except NameError:
+        _LIVE_MATCH_JOURNEY_ENDPOINTS = {}
+
+    def _get_journey_endpoint_cache():
+        """Return (origin_atcos, dest_atcos, start_dep, end_arr) arrays."""
+        mkey = id(merged)
+        cached = _LIVE_MATCH_JOURNEY_ENDPOINTS.get(mkey)
+        if cached is not None:
+            return cached
+
+        try:
+            ENDPOINT_SHIFT_STOPS = int(os.environ.get('MATCH_ENDPOINT_SHIFT_STOPS', '2'))
+        except Exception:
+            ENDPOINT_SHIFT_STOPS = 2
+
+        n_j = len(getattr(merged, 'journey_metadata', []) or [])
+        origin_list: list[set[str]] = [set() for _ in range(n_j)]
+        dest_list: list[set[str]] = [set() for _ in range(n_j)]
+        start_list: list[Optional[int]] = [None for _ in range(n_j)]
+        end_list: list[Optional[int]] = [None for _ in range(n_j)]
+
+        for j_id in range(n_j):
+            try:
+                jt = merged.journey_times[j_id]
+                if not jt:
+                    continue
+            except Exception:
+                continue
+
+            # Times
+            try:
+                start_list[j_id] = jt[0][2]
+            except Exception:
+                start_list[j_id] = None
+            try:
+                end_list[j_id] = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
+            except Exception:
+                end_list[j_id] = None
+
+            # Endpoint ATCO sets (allow a little shift at both ends)
+            try:
+                n_end = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
+            except Exception:
+                n_end = min(3, len(jt))
+
+            try:
+                for i in range(min(n_end, len(jt))):
+                    atco = merged.get_atco_code(jt[i][0])
+                    if atco:
+                        origin_list[j_id].add(str(atco).strip())
+            except Exception:
+                pass
+
+            try:
+                for i in range(1, min(n_end, len(jt)) + 1):
+                    atco = merged.get_atco_code(jt[-i][0])
+                    if atco:
+                        dest_list[j_id].add(str(atco).strip())
+            except Exception:
+                pass
+
+        cached = (origin_list, dest_list, start_list, end_list)
+        _LIVE_MATCH_JOURNEY_ENDPOINTS[mkey] = cached
+        return cached
+
     # Debug toggle: enable verbose matcher logging when MATCH_DEBUG=1 or BUS_LIVE_PROVENANCE is truthy
     try:
         DEBUG_MATCH = (str(os.environ.get('MATCH_DEBUG') or '') == '1') or (str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'))
@@ -3257,6 +3637,62 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
 
     line_q = (line_ref or "").strip()
     dest_q = (dest or "").strip().lower()
+
+    # Stop-name matching (free-text destination) is fuzzy and can be expensive.
+    # Disable by default for determinism/performance.
+    try:
+        ENABLE_STOP_NAME_MATCH = str(os.environ.get('ENABLE_STOP_NAME_MATCH') or '').lower() in ('1', 'true', 'yes')
+    except Exception:
+        ENABLE_STOP_NAME_MATCH = False
+
+    # Cache journey stop membership within a matcher call so we don't rebuild
+    # `[sid for sid, ... in jt]` and corresponding sets repeatedly per candidate.
+    _journey_stop_set_cache: dict[int, set[int]] = {}
+
+    def _get_journey_stop_set(j_id: int, jt_local) -> set[int]:
+        try:
+            cached = _journey_stop_set_cache.get(j_id)
+            if cached is not None:
+                return cached
+            s = set()
+            for sid, _at, _dt in jt_local:
+                try:
+                    s.add(int(sid))
+                except Exception:
+                    # stop ids are expected to be ints; ignore malformed
+                    continue
+            _journey_stop_set_cache[j_id] = s
+            return s
+        except Exception:
+            # Ensure dict has a stable value so we don't retry work for this j_id
+            _journey_stop_set_cache[j_id] = set()
+            return _journey_stop_set_cache[j_id]
+
+    # Local caches to cut repeated walking-module lookups.
+    # These exist only for the duration of a single matcher call (per vehicle).
+    _coords_cache: dict[int, Optional[tuple[float, float]]] = {}
+
+    def _get_coords(stop_int: int) -> Optional[tuple[float, float]]:
+        try:
+            if stop_int in _coords_cache:
+                return _coords_cache[stop_int]
+            c = walking.get_loc_coords(stop_int)
+            if c and len(c) == 2:
+                res = (float(c[0]), float(c[1]))
+            else:
+                res = None
+            _coords_cache[stop_int] = res
+            return res
+        except Exception:
+            _coords_cache[stop_int] = None
+            return None
+
+    # Query the walking module once. This is used both for defining a
+    # nearby-stops gate and (optionally) for nearest-stop consistency.
+    try:
+        _reachable_stops = walking.reachable_stops((lat_v, lon_v)) or []
+    except Exception:
+        _reachable_stops = []
 
     # Normalize feed ATCOs once so staged matching is consistent.
     try:
@@ -3348,7 +3784,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         result = []
         for sid, atime, dtime in jt:
             try:
-                slat, slon = walking_mod.get_loc_coords(sid)
+                coords = _get_coords(sid)
+                if not coords:
+                    continue
+                slat, slon = coords
             except Exception:
                 continue
             # Project stop onto track (edge-interpolated for consistency)
@@ -3386,21 +3825,21 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         result.sort(key=lambda x: x[0])
         return result
 
-    # Build a map of normalized stop-name -> list of merged stop indices
-    # so we can resolve feed destination free-text to ATCO codes when no
-    # explicit feed-provided ATCO is available.
+    # Optional: map of normalized stop-name -> list of merged stop indices,
+    # used only for weak free-text destination matching.
     stop_name_map = {}
-    try:
-        for si, sname in enumerate(merged.stop_metadata or []):
-            try:
-                if not sname:
+    if ENABLE_STOP_NAME_MATCH:
+        try:
+            for si, sname in enumerate(merged.stop_metadata or []):
+                try:
+                    if not sname:
+                        continue
+                    key = str(sname).strip().lower()
+                    stop_name_map.setdefault(key, []).append(si)
+                except Exception:
                     continue
-                key = str(sname).strip().lower()
-                stop_name_map.setdefault(key, []).append(si)
-            except Exception:
-                continue
-    except Exception:
-        stop_name_map = {}
+        except Exception:
+            stop_name_map = {}
 
     # ── 1. collect candidate journeys ──
     candidates = []
@@ -3414,18 +3853,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         except Exception:
             SEARCH_STOP_RADIUS_M = 3000
         nearby_stops_set = set()
-        total_stops = len(merged.stop_metadata or [])
-        for si in range(total_stops):
-            try:
-                sc = walking.get_loc_coords(si)
-                if not sc or len(sc) != 2:
-                    continue
-                slat, slon = sc
-                d = _hav(lat_v, lon_v, slat, slon)
-                if d <= SEARCH_STOP_RADIUS_M:
-                    nearby_stops_set.add(si)
-            except Exception:
-                continue
+        # Fast-path: use walking's own reachable stop search first, then
+        # treat the vehicle as off-track if nothing is reachable.
+        for sid, _walk_secs in _reachable_stops:
+            nearby_stops_set.add(sid)
     except Exception:
         nearby_stops_set = set()
 
@@ -3468,38 +3899,31 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             except Exception:
                 od_adj = None
 
-    for j_id, jmeta in enumerate(merged.journey_metadata):
+    # Iterate only journeys for this short line name.
+    j_ids_for_line = _journeys_for_line_short(line_q)
+    origin_atcos_by_j, dest_atcos_by_j, start_dep_by_j, end_arr_by_j = _get_journey_endpoint_cache()
+
+    for j_id in j_ids_for_line:
+        try:
+            jmeta = merged.journey_metadata[j_id]
+        except Exception:
+            continue
         if not jmeta:
             continue
-        line_name = jmeta.get("line_name") or ""
-        simple_line = line_name.split(":")[-1] if line_name else ""
-        if line_q and simple_line != line_q:
-            continue
-        # Gather endpoint ATCOs for staged matching.
+        # Line already filtered by index.
+        # Gather endpoint ATCOs for staged matching (cached).
+        try:
+            origin_atcos = origin_atcos_by_j[j_id] if j_id < len(origin_atcos_by_j) else set()
+            dest_atcos = dest_atcos_by_j[j_id] if j_id < len(dest_atcos_by_j) else set()
+        except Exception:
+            origin_atcos = set()
+            dest_atcos = set()
+
+        # Load journey_times only when we actually need them for deeper checks.
         try:
             jt = merged.journey_times[j_id]
             if not jt:
                 continue
-            # Allow small start/end stop index shifts when latching by
-            # origin/destination ATCO. Some feeds report the "origin" stop as
-            # the 2nd/3rd stop (timing points) and similarly for destination.
-            try:
-                ENDPOINT_SHIFT_STOPS = int(os.environ.get('MATCH_ENDPOINT_SHIFT_STOPS', '2'))
-            except Exception:
-                ENDPOINT_SHIFT_STOPS = 2
-            n_end = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
-
-            dest_atcos = []
-            for i in range(1, min(n_end, len(jt)) + 1):
-                atco = merged.get_atco_code(jt[-i][0])
-                if atco:
-                    dest_atcos.append(str(atco).strip())
-
-            origin_atcos = []
-            for i in range(min(n_end, len(jt))):
-                atco = merged.get_atco_code(jt[i][0])
-                if atco:
-                    origin_atcos.append(str(atco).strip())
         except Exception:
             continue
 
@@ -3510,7 +3934,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # destination matching (previous behaviour) but do NOT treat that as a
         # destination-atco latch. It's just a weak hint.
         weak_dest_text_match = False
-        if not feed_destination_atco_n and dest_q:
+        if ENABLE_STOP_NAME_MATCH and not feed_destination_atco_n and dest_q:
             try:
                 candidate_dest_atcos = set()
                 for sname_key, sidx_list in stop_name_map.items():
@@ -3573,8 +3997,12 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # We defer the endpoint/time latching decision until after we have
         # scanned all journeys. For now just store basic times.
         try:
-            start_dep = jt[0][2]   # departure time of first stop
-            end_arr = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
+            start_dep = start_dep_by_j[j_id] if j_id < len(start_dep_by_j) else None
+            end_arr = end_arr_by_j[j_id] if j_id < len(end_arr_by_j) else None
+            if start_dep is None or end_arr is None:
+                # fallback to direct extraction for this journey
+                start_dep = jt[0][2]
+                end_arr = jt[-1][1] if jt[-1][1] is not None else jt[-1][2]
         except Exception:
             continue
 
@@ -3595,11 +4023,11 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         if r_int < 0:
             continue
 
-    # Quick spatial pre-filter: ensure the candidate route/track has
-    # at least one vertex within MATCH_MAX_TRACK_DIST_M of the
-    # vehicle position. This prevents considering journeys in a
-    # different town that happen to share the same short line
-    # number / free-text destination.
+        # Quick spatial pre-filter: ensure the candidate route/track has
+        # at least one vertex within MATCH_MAX_TRACK_DIST_M of the
+        # vehicle position. This prevents considering journeys in a
+        # different town that happen to share the same short line
+        # number / free-text destination.
         try:
             nearby_min = 1e9
             # Prefer cached route_tracks when present
@@ -3617,8 +4045,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
                 for sid in route_stops:
                     try:
-                        coords = walking.get_loc_coords(sid)
-                        if coords and len(coords) == 2:
+                        coords = _get_coords(sid)
+                        if coords:
                             d = _hav(lat_v, lon_v, coords[0], coords[1])
                             if d < nearby_min:
                                 nearby_min = d
@@ -3637,7 +4065,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # geometry happens to pass nearby but does not serve the stop the
         # vehicle is at.
         try:
-            nearby = walking.reachable_stops((lat_v, lon_v))
+            nearby = _reachable_stops
             if nearby:
                 nearest_stop_int, walk_secs = nearby[0]
                 jsi = merged.journey_stop_index[j_id] if j_id < len(merged.journey_stop_index) else {}
@@ -3808,6 +4236,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 continue
         except Exception:
             continue
+
+        journey_stop_set = _get_journey_stop_set(j_id, jt)
         # Get or compute track + cumulative distances. Prefer a track
         # built from the candidate's scheduled stop ATCO coordinates
         # (the journey's `jt`) so expected_time is computed from the
@@ -3820,8 +4250,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             try:
                 for sid, atime, dtime in jt:
                     try:
-                        slat, slon = walking.get_loc_coords(sid)
-                        track.append((slat, slon))
+                        coords = _get_coords(sid)
+                        if coords:
+                            track.append(coords)
                     except Exception:
                         continue
             except Exception:
@@ -3836,8 +4267,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                     track = []
                     for sid in route_stops:
                         try:
-                            slat, slon = walking.get_loc_coords(sid)
-                            track.append((slat, slon))
+                            coords = _get_coords(sid)
+                            if coords:
+                                track.append(coords)
                         except Exception:
                             continue
 
@@ -3916,12 +4348,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             except Exception:
                 MATCH_REQUIRE_NEAREST_STOP = True
             if MATCH_REQUIRE_NEAREST_STOP and not allow_offtrack:
-                try:
-                    nearby = walking.reachable_stops((lat_v, lon_v))
-                except Exception:
-                    nearby = []
-                if nearby:
-                    nearest_stop_int = nearby[0][0]
+                if _reachable_stops:
+                    nearest_stop_int = _reachable_stops[0][0]
                     # If the nearest reachable stop is physically far away,
                     # reject this candidate — the vehicle is not plausibly
                     # at that stop. Threshold configurable via
@@ -3932,7 +4360,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                         except Exception:
                             MATCH_NEAREST_STOP_MAX_M = 4000
                         try:
-                            s_lat, s_lon = walking.get_loc_coords(nearest_stop_int)
+                            coords = _get_coords(nearest_stop_int)
+                            if not coords:
+                                raise Exception('no_coords')
+                            s_lat, s_lon = coords
                             nearest_stop_dist_m = _hav(lat_v, lon_v, s_lat, s_lon)
                         except Exception:
                             nearest_stop_dist_m = None
@@ -3943,24 +4374,19 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                     except Exception:
                         # If anything goes wrong computing distances, continue permissively
                         pass
-                    # Build a set of stop ints served by this journey
-                    try:
-                        journey_stop_ints = [sid for sid, at, dt in jt]
-                    except Exception:
-                        journey_stop_ints = []
                     # Require that the journey serves at least one of the
                     # stops within the precomputed nearby_stops_set. This
                     # enforces the "only map to journeys that pass through
                     # stops within X metres" rule.
                     try:
-                        if nearby_stops_set and not (set(journey_stop_ints) & nearby_stops_set):
+                        if nearby_stops_set and not (journey_stop_set & nearby_stops_set):
                             if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
                                 logger.info("matcher: candidate j_id=%s rejected because it serves none of the nearby stops", j_id)
                             continue
                     except Exception:
                         pass
 
-                    if nearest_stop_int not in journey_stop_ints:
+                    if nearest_stop_int not in journey_stop_set:
                         if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
                             logger.info("matcher: candidate j_id=%s rejected because nearest_stop %s not in journey stops", j_id, nearest_stop_int)
                         continue
@@ -4129,7 +4555,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         try:
             try:
                 dest_stop_int = jt[-1][0]
-                dest_coords = walking.get_loc_coords(dest_stop_int)
+                dest_coords = _get_coords(dest_stop_int)
             except Exception:
                 dest_coords = None
             if dest_coords and len(dest_coords) == 2:
@@ -4223,14 +4649,22 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     if best_start_dep is not None and best_start_dep - now_seconds > 1800:
         if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
             logger.info("matcher: rejecting matched bus for journey %s because its start_dep %d is > 30 mins in future", best_jid, best_start_dep)
-        return (None, None) if return_jid else None
+    return (None, None) if return_jid else None
 
     # Clamp negative delays to zero at the source of computation so
     # callers don't have to special-case early/negative values.
     if best_delay is not None and best_delay < 0:
         best_delay = 0
     if return_jid:
-        return (best_delay, best_jid)
+        try:
+            r_int = -1
+            try:
+                r_int = merged.journey_to_route[best_jid] if best_jid is not None else -1
+            except Exception:
+                r_int = -1
+            return (best_delay, r_int)
+        except Exception:
+            return (best_delay, -1)
     return best_delay
 
 
@@ -4640,6 +5074,11 @@ def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, 
 _live_delay_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
 _LIVE_DELAY_TTL = 30  # seconds
 
+# Live bus endpoint cache. This endpoint can be polled frequently by the
+# frontend; fetching and parsing SIRI XML plus running timetable matching is
+# expensive. Cache raw feed results briefly to reduce load.
+
+
 
 def _fetch_all_live_buses() -> list:
     """Return all live bus records from all operators (cached)."""
@@ -4737,6 +5176,15 @@ async def bus_live_operator(
     if _live_endpoints_disabled():
         return []
 
+    # If we're currently doing a heavy routing build, avoid doing any extra
+    # work here (including any lazy router init used for stop-name matching).
+    # Live updates can resume on the next poll tick.
+    try:
+        if is_routing_active():
+            return []
+    except Exception:
+        pass
+
     if lat is None or lon is None:
         return JSONResponse(
             status_code=400,
@@ -4756,10 +5204,7 @@ async def bus_live_operator(
             lon_tol=lonTol,
         )
     except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(exc)},
-        )
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
     out = []
     # Enable provenance/debug fields when BUS_LIVE_PROVENANCE is set in the env.
@@ -4771,30 +5216,41 @@ async def bus_live_operator(
         MAX_VISIBLE_DELAY_S = int(os.environ.get('MAX_VISIBLE_DELAY_S', '1200'))
     except Exception:
         MAX_VISIBLE_DELAY_S = 1200
-    # Attempt to load today's stop metadata and walking helper so we can
-    # filter out vehicles that are already at (or within 50m of) their
-    # destination stop. Failure to load merged/router/walking should not
-    # block the endpoint — in that case we simply skip the proximity filter.
+    # Optional destination-name stop proximity filter.
+    # This is fuzzy (depends on free-text destination) and can be expensive.
+    # Disabled by default; re-enable with ENABLE_STOP_NAME_MATCH=1.
     try:
-        from datetime import datetime as _dt
-        today_date = _dt.now().date().isoformat()
-        now_secs = _dt.now().hour * 3600 + _dt.now().minute * 60 + _dt.now().second
-        _merged, _rtr, _walking = get_router_for_date(today_date, start_time=now_secs, apply_delay=False)
-        # Build a map of normalized stop-name -> list of (stop_idx, lat, lon)
-        _stop_name_map = {}
-        for si, sname in enumerate(_merged.stop_metadata or []):
-            try:
-                if not sname:
-                    continue
-                key = str(sname).strip().lower()
-                coords = _walking.get_loc_coords(si)
-                if coords and len(coords) == 2:
-                    _stop_name_map.setdefault(key, []).append((si, coords[0], coords[1]))
-            except Exception:
-                # ignore stops we cannot resolve
-                continue
+        ENABLE_STOP_NAME_MATCH = str(os.environ.get('ENABLE_STOP_NAME_MATCH') or '').lower() in ('1', 'true', 'yes')
     except Exception:
-        _stop_name_map = None
+        ENABLE_STOP_NAME_MATCH = False
+
+    # Option A: embed precomputed route track coords in /bus/live responses.
+    # This shifts geometry work to refresh, making click-to-show-track instant.
+    try:
+        BUS_LIVE_INCLUDE_TRACKS = str(os.environ.get('BUS_LIVE_INCLUDE_TRACKS') or '').lower() in ('1', 'true', 'yes')
+    except Exception:
+        BUS_LIVE_INCLUDE_TRACKS = False
+
+    _stop_name_map = None
+    if ENABLE_STOP_NAME_MATCH:
+        try:
+            from datetime import datetime as _dt
+            today_date = _dt.now().date().isoformat()
+            now_secs = _dt.now().hour * 3600 + _dt.now().minute * 60 + _dt.now().second
+            _merged, _rtr, _walking = get_router_for_date(today_date, start_time=now_secs, apply_delay=False)
+            _stop_name_map = {}
+            for si, sname in enumerate(_merged.stop_metadata or []):
+                try:
+                    if not sname:
+                        continue
+                    key = str(sname).strip().lower()
+                    coords = _walking.get_loc_coords(si)
+                    if coords and len(coords) == 2:
+                        _stop_name_map.setdefault(key, []).append((si, coords[0], coords[1]))
+                except Exception:
+                    continue
+        except Exception:
+            _stop_name_map = None
     for item in results:
         # Support legacy 7-tuples and 8-tuples (with bearing) and the
         # extended shape where a final dict contains metadata (vehicle/journey ids).
@@ -4815,7 +5271,7 @@ async def bus_live_operator(
         else:
             line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep, bearing = base
         computed = None
-        matched_jid = None
+        matched_route_int = None
         # Diagnostic fields only computed when bus_provenance is enabled
         reject_reasons = None
         match_reason = None
@@ -4840,13 +5296,13 @@ async def bus_live_operator(
                     feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
                 )
                 if matched:
-                    # matched is expected to be a (delay_s, jid_int) tuple when return_jid=True.
-                    computed, matched_jid = matched
+                    # matched is expected to be a (delay_s, route_int) tuple when return_jid=True.
+                    computed, matched_route_int = matched
 
                     # (None, None) means "no match" (not a contract violation).
-                    if computed is None or matched_jid is None:
+                    if computed is None or matched_route_int is None:
                         computed = None
-                        matched_jid = None
+                        matched_route_int = None
                         if bus_provenance:
                             try:
                                 reject_reasons = _diagnose_match_failure(
@@ -4861,12 +5317,12 @@ async def bus_live_operator(
                             except Exception:
                                 reject_reasons = ['diagnosis_failed']
 
-                        # Only flag invalid_match_missing_jid when the matcher claims
-                        # it found a delay but did not provide a jid.
-                        if bus_provenance and computed is not None and matched_jid is None:
+                        # Only flag invalid_match_missing_route_int when the matcher claims
+                        # it found a delay but did not provide a route_int.
+                        if bus_provenance and computed is not None and matched_route_int is None:
                             reject_reasons = reject_reasons or []
-                            if 'invalid_match_missing_jid' not in reject_reasons:
-                                reject_reasons.append('invalid_match_missing_jid')
+                            if 'invalid_match_missing_route_int' not in reject_reasons:
+                                reject_reasons.append('invalid_match_missing_route_int')
                             try:
                                 entry_match_dbg = {
                                     'raw_match_return': repr(matched),
@@ -4923,7 +5379,7 @@ async def bus_live_operator(
         # strict filtering.
         show_unmatched_raw = str(os.environ.get('SHOW_UNMATCHED') or '').lower()
         show_unmatched = show_unmatched_raw not in ('0', 'false', 'no')
-        if matched_jid is None and not show_unmatched:
+        if matched_route_int is None and not show_unmatched:
             # do not render unmatched vehicles into the API response
             continue
         # If we loaded stop metadata, try to filter vehicles that are already
@@ -4973,79 +5429,18 @@ async def bus_live_operator(
             "status": _bus_delay_status(final_delay),
             "bearing": bearing,
         }
-        # If our strict timetable matcher returned a journey id, expose the
-        # external journey_id string from the merged data so the frontend
-        # can deterministically identify this vehicle's journey. Also expose
-        # diagnostic fields when available so clients can see why a vehicle
-        # was rejected by the strict matcher.
-        try:
-            _jm_debug = None
-            if matched_jid is not None and _merged and matched_jid < len(_merged.journey_metadata):
-                jm = _merged.journey_metadata[matched_jid] or {}
-                if bus_provenance:
-                    try:
-                        if isinstance(jm, dict):
-                            _jm_debug = {
-                                'matched_jid': matched_jid,
-                                'journey_meta_is_none': _merged.journey_metadata[matched_jid] is None,
-                                'journey_meta_keys': sorted(list(jm.keys())),
-                            }
-                        else:
-                            _jm_debug = {
-                                'matched_jid': matched_jid,
-                                'journey_meta_type': str(type(jm)),
-                            }
-                    except Exception:
-                        _jm_debug = {'matched_jid': matched_jid}
-                if jm.get("journey_id"):
-                    entry["logged_journey_id"] = jm.get("journey_id")
-                elif bus_provenance:
-                    # In provenance mode, surface a best-effort identifier so the
-                    # frontend can still treat the vehicle as mapped when we have
-                    # a timetable match but no merged journey_id string.
-                    #
-                    # NOTE: This is intentionally best-effort and marked as such.
-                    if meta and isinstance(meta, dict):
-                        fallback_id = (
-                            meta.get("vehicle_journey_code")
-                            or meta.get("dated_journey_ref")
-                            or meta.get("framed_journey_ref")
-                        )
-                        if fallback_id:
-                            entry["logged_journey_id"] = str(fallback_id)
-                            entry["logged_journey_id_source"] = "feed_fallback"
-        except Exception:
-            # best-effort only
-            pass
 
-        # In provenance mode, treat "matched" as a stronger contract:
-        # if we say it's matched, we must also provide a journey identifier
-        # so clients (and the frontend) can treat it as mapped.
-        if bus_provenance:
+        # Expose matched route_int so clients can render tracks instantly.
+        if matched_route_int is not None:
             try:
-                if (match_reason == 'matched' or matched_jid is not None) and not entry.get('logged_journey_id'):
-                    # We couldn't build a stable id for this match; downgrade.
-                    match_reason = 'unmatched'
-                    if reject_reasons is None:
-                        reject_reasons = []
-                    if 'matched_but_missing_logged_journey_id' not in reject_reasons:
-                        reject_reasons.append('matched_but_missing_logged_journey_id')
-                    # Add extra context so we can debug why the merged timetable
-                    # lacks a journey_id for this matched_jid.
-                    if matched_jid is None:
-                        if 'missing_matched_jid' not in reject_reasons:
-                            reject_reasons.append('missing_matched_jid')
-                    else:
-                        if 'missing_merged_journey_id' not in reject_reasons:
-                            reject_reasons.append('missing_merged_journey_id')
-                        if _jm_debug and not entry.get('journey_id_debug'):
-                            entry['journey_id_debug'] = _jm_debug
+                entry['route_int'] = int(matched_route_int)
             except Exception:
-                # Don't break the endpoint for provenance bookkeeping.
-                pass
+                entry['route_int'] = matched_route_int
+        # We intentionally do NOT expose logged_journey_id anymore; the
+        # frontend doesn't need it (route_int is enough to render tracks).
         # Expose diagnostic fields only when provenance mode is enabled
         if bus_provenance:
-            entry['match_reason'] = match_reason or ('matched' if matched_jid is not None else 'unmatched')
+            entry['match_reason'] = match_reason or ('matched' if matched_route_int is not None else 'unmatched')
             entry['reject_reasons'] = reject_reasons or []
             try:
                 if meta and isinstance(meta, dict) and meta.get('_match_contract_debug'):
@@ -5076,6 +5471,26 @@ async def bus_live_operator(
             # (set earlier from the merged timetable) — accepting a
             # feed-provided logged_journey_id can make the UI display a
             # vehicle as matched even when the strict matcher rejected it.
+
+        # Best-effort: attach cached or precomputed route track geometry.
+        # NOTE: currently only computes when entry already contains a
+        # route_id/route_int (future follow-up: derive these during refresh).
+        if BUS_LIVE_INCLUDE_TRACKS:
+            try:
+                if bus_provenance:
+                    coords, src, was_cached = _compute_vehicle_track_coords_with_source_for_live(entry)
+                    if coords and len(coords) >= 2:
+                        entry['track_coords'] = coords
+                        entry['track_source'] = src
+                        entry['track_cached'] = bool(was_cached)
+                else:
+                    coords = _get_cached_bus_track(entry)
+                    if not coords:
+                        coords = _compute_vehicle_track_coords_for_live(entry)
+                    if coords and len(coords) >= 2:
+                        entry['track_coords'] = coords
+            except Exception:
+                pass
 
         # UI-level filtering: do not include vehicles with delay > threshold
         try:
@@ -5608,7 +6023,11 @@ def _recompute_journey_delay_map_once() -> None:
 
     try:
         t = threading.Thread(target=_prebuild_routers_for_today, daemon=True)
-        t.start()
+        # Allow disabling this best-effort prebuild thread. In dev / first-search
+        # tuning, it can contend for CPU/IO and make the first search feel slow.
+        prebuild_enabled = str(os.environ.get('ENABLE_ROUTER_PREBUILD') or '').lower() not in ('0', 'false', 'no')
+        if prebuild_enabled:
+            t.start()
     except Exception:
         # If background thread creation fails, continue without prebuilding.
         logger.exception('Failed to start prebuild thread for routers')
@@ -5640,12 +6059,27 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
     queries use the correct two-day merge.
     """
     global _base_cache, _router_cache
+    # Optional per-request timing to diagnose slow first search.
+    timing_enabled = str(os.environ.get('ROUTER_BUILD_TIMING') or '').lower() in ('1', 'true', 'yes')
+    _t0 = time.perf_counter() if timing_enabled else None
     bucket = "AM" if (start_time is not None and start_time < 43200) else "PM"
     # When apply_delay is requested for today's date, include the
     # current delay-map version in the cache key so we rebuild the
     # router when the delay map changes.
     today_str = datetime.now().date().isoformat()
-    if apply_delay and date_str == today_str:
+    # If there's no delay data to apply, don't force a versioned cache key.
+    # This is important for fast startup: initialize_base() prebuilds the
+    # unadjusted (date,bucket) routers, and most endpoints (e.g. /routes/line)
+    # don't actually need a delay-adjusted router.
+    # NOTE: _delay_map_version increments even when the delay map is empty.
+    # So the *real* signal for whether delay-adjustment would change anything
+    # is whether _journey_delay_map has entries.
+    try:
+        no_delay_to_apply = (not _journey_delay_map) or (len(_journey_delay_map) == 0)
+    except Exception:
+        no_delay_to_apply = not _journey_delay_map
+
+    if apply_delay and date_str == today_str and not no_delay_to_apply:
         cache_key = (date_str, bucket, _delay_map_version)
     else:
         cache_key = (date_str, bucket)
@@ -5655,6 +6089,11 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
     while True:
         with _router_cache_lock:
             if cache_key in _router_cache:
+                if timing_enabled:
+                    try:
+                        logger.info('[router] cache hit %s in %.3fs', cache_key, time.perf_counter() - _t0)
+                    except Exception:
+                        pass
                 return _router_cache[cache_key]
             ev = _router_build_events.get(cache_key)
             if ev is None:
@@ -5663,10 +6102,16 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                 builder_event = ev
                 break  # we are the builder
         # Someone else is building it; wait and retry.
+        if timing_enabled:
+            try:
+                logger.info('[router] waiting for build %s', cache_key)
+            except Exception:
+                pass
         ev.wait()
 
     # We are the builder for this cache_key. Always release waiters.
     try:
+        _t_build_start = time.perf_counter() if timing_enabled else None
         # First, attempt a fast lookup under the router cache lock. If the
         # requested adjusted router (today + current delay version) is present,
         # return it immediately. If it's missing but a fallback unadjusted
@@ -5774,17 +6219,46 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         # At this point either we need a synchronous build (no fallback) or the
         # request is for a non-delay router. Perform the original synchronous
         # build behaviour (this may be heavy).
+        if timing_enabled:
+            try:
+                logger.info('[router] sync build start %s (apply_delay=%s)', cache_key, apply_delay)
+            except Exception:
+                pass
         global _base_init_attempted
         # If initialization hasn't run yet, run it synchronously (same as before)
         if _base_cache is None and not _base_init_attempted:
             from main import initialize_base
             try:
+                _t_init0 = time.perf_counter() if timing_enabled else None
                 _base_cache = initialize_base()
+                if timing_enabled and _t_init0 is not None:
+                    try:
+                        logger.info('[router] initialize_base() %.3fs', time.perf_counter() - _t_init0)
+                    except Exception:
+                        pass
                 if _base_cache and "prebuilt_cache" in _base_cache:
-                    _router_cache.update(_base_cache["prebuilt_cache"])
+                    # IMPORTANT: insert with _set_router_cache so single-flight
+                    # waits and key normalization apply. Otherwise prebuilt AM/PM
+                    # may not be visible and first requests rebuild.
+                    try:
+                        pre = _base_cache.get('prebuilt_cache') or {}
+                        if isinstance(pre, dict):
+                            for k, v in pre.items():
+                                try:
+                                    if isinstance(k, tuple) and len(k) == 2:
+                                        _set_router_cache((str(k[0]), str(k[1])), v)
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
                 # If the cache was populated during init, return it
                 with _router_cache_lock:
                     if cache_key in _router_cache:
+                        if timing_enabled:
+                            try:
+                                logger.info('[router] cache became available after init %s in %.3fs', cache_key, time.perf_counter() - _t0)
+                            except Exception:
+                                pass
                         return _router_cache[cache_key]
             except Exception:
                 _base_init_attempted = True
@@ -5797,7 +6271,17 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                 if callable(initialize_base):
                     _base_cache = initialize_base()
                     if _base_cache and "prebuilt_cache" in _base_cache:
-                        _router_cache.update(_base_cache["prebuilt_cache"])
+                        try:
+                            pre = _base_cache.get('prebuilt_cache') or {}
+                            if isinstance(pre, dict):
+                                for k, v in pre.items():
+                                    try:
+                                        if isinstance(k, tuple) and len(k) == 2:
+                                            _set_router_cache((str(k[0]), str(k[1])), v)
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            pass
                     with _router_cache_lock:
                         if cache_key in _router_cache:
                             return _router_cache[cache_key]
@@ -5808,15 +6292,22 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         al = _base_cache.get("atco_loader")
         from main import build_for_date
         # Build the merged data / router for this date (potentially heavy)
+        _t_build0 = time.perf_counter() if timing_enabled else None
         merged, router, walking = build_for_date(
             loader, walking_raw, date_str, start_time=start_time,
             atco_loader=al)
+        if timing_enabled and _t_build0 is not None:
+            try:
+                logger.info('[router] build_for_date(%s,%s) %.3fs', date_str, bucket, time.perf_counter() - _t_build0)
+            except Exception:
+                pass
         # If we're asked to apply today's delay map, modify a deep copy
         # of the merged timetable by adding per-journey delays and then
         # rebuild the router from that adjusted merged object.
         if apply_delay and date_str == today_str and _journey_delay_map:
             try:
                 from raptor_router import RaptorRouter
+                _t_delay0 = time.perf_counter() if timing_enabled else None
                 adj_merged = copy.deepcopy(merged)
                 # Apply delays (per journey index) to every scheduled time
                 for j_idx, delta in list(_journey_delay_map.items()):
@@ -5829,14 +6320,34 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                             new_jt.append((sid, at, dt))
                         adj_merged.journey_times[j_idx] = new_jt
                 router = RaptorRouter(adj_merged)
+                if timing_enabled and _t_delay0 is not None:
+                    try:
+                        logger.info('[router] apply_delay+rebuild %.3fs', time.perf_counter() - _t_delay0)
+                    except Exception:
+                        pass
                 _set_router_cache(cache_key, (adj_merged, router, walking))
+                if timing_enabled and _t0 is not None:
+                    try:
+                        logger.info('[router] total sync build %s %.3fs', cache_key, time.perf_counter() - _t0)
+                    except Exception:
+                        pass
                 return adj_merged, router, walking
             except Exception:
                 # Fall back to unadjusted merged/router on any failure
                 _set_router_cache(cache_key, (merged, router, walking))
+                if timing_enabled and _t0 is not None:
+                    try:
+                        logger.info('[router] total sync build (delay failed) %s %.3fs', cache_key, time.perf_counter() - _t0)
+                    except Exception:
+                        pass
                 return merged, router, walking
 
         _set_router_cache(cache_key, (merged, router, walking))
+        if timing_enabled and _t0 is not None:
+            try:
+                logger.info('[router] total sync build %s %.3fs', cache_key, time.perf_counter() - _t0)
+            except Exception:
+                pass
         return merged, router, walking
     finally:
         # Always release any waiters for this cache_key.
@@ -6443,6 +6954,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "name": f"Walk to {first_name}",
             "coords": wc,
             "color": "#888888",
+            "mode": "walking",
         })
         geo_idx += 1
 
@@ -6879,6 +7391,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "name": geo_name,
             "coords": coords,
             "color": color,
+            "mode": transport,
         })
         geo_idx += 1
 
@@ -6920,6 +7433,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "name": "Walk to destination",
             "coords": wc,
             "color": "#888888",
+            "mode": "walking",
         })
 
     # Compute the total real-time delay for the route.

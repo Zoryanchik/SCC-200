@@ -495,9 +495,16 @@ const normalizeLiveMarker = (item, type) => {
   const lon = item?.longitude ?? item?.lon;
   if (typeof lat !== 'number' || typeof lon !== 'number') return null;
 
-  // Prefer the server-authoritative journey id when available so live
-  // websocket updates refer to the same entity as the initial HTTP fetch.
-  const stableId = item?.logged_journey_id || item?.journey_id || item?.vehicleId || item?.id || `${type}-${lat}-${lon}`;
+  // Stable identity for live vehicles.
+  // We no longer require logged_journey_id: the backend provides route_int
+  // and vehicle_ref, which are enough for rendering + continuity.
+  const stableId = (
+    (item?.vehicle_ref != null && item?.route_int != null)
+      ? `bus|${String(item.vehicle_ref)}|r${String(item.route_int)}`
+      : (item?.vehicle_ref != null)
+        ? `bus|${String(item.vehicle_ref)}`
+        : item?.vehicleId || item?.id || `${type}-${lat}-${lon}`
+  );
 
   return {
     id: stableId,
@@ -509,12 +516,15 @@ const normalizeLiveMarker = (item, type) => {
     destination: item?.destination,
     departureTime: item?.departureTime || item?.scheduledTime,
     delayMinutes: item?.delay_minutes ?? item?.delayMinutes ?? null,
+  route_int: item?.route_int ?? null,
     operator: item?.operator || item?.operator_name || null,
     bearing: item?.bearing ?? item?.Bearing ?? item?.bearing_degrees ?? item?.heading ?? item?.course ?? null,
-    // Preserve backend metadata so mapping checks (isBusMapped) can see
-    // authoritative identifiers such as logged_journey_id / journey_id.
+  // Option A: backend may include precomputed polyline coords so selecting
+  // a vehicle renders instantly (no click-time geometry fetch).
+  track_coords: Array.isArray(item?.track_coords) ? item.track_coords : null,
+    // Preserve backend metadata if present.
     meta: item?.meta ?? null,
-    // Also expose common mapping identifiers at top-level for convenience.
+    // Backward-compatible fields (may be null).
     logged_journey_id: item?.logged_journey_id ?? item?.meta?.logged_journey_id ?? null,
     journey_id: item?.journey_id ?? item?.meta?.journey_id ?? null,
     route_id: item?.route_id ?? item?.meta?.route_id ?? null,

@@ -276,6 +276,7 @@ const MapClickClearHandler = ({ onClear }) => {
 const JourneyRouteLayer = ({ segments }) => {
 	const map = useMap();
 	const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050').replace(/\/$/, '');
+	const DEBUG_JOURNEY_ROUTE = String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || '').toLowerCase() === '1' || String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || '').toLowerCase() === 'true';
 
 	// Local cache of fetched OSRM geometries for segments which lack a usable
 	// polyline. Keyed by segment _normKey so refreshes replace entries.
@@ -348,6 +349,14 @@ const JourneyRouteLayer = ({ segments }) => {
 	};
 
 	const normSegments = normalizeSegments(segments);
+	// Preserve any explicit endpoints attached to the input array (Home page uses
+	// segments._start/_end) since normalizeSegments returns a new Array.
+	try {
+		if (segments && segments._start && !normSegments._start) normSegments._start = segments._start;
+		if (segments && segments._end && !normSegments._end) normSegments._end = segments._end;
+	} catch (e) {
+		// ignore
+	}
 
 	// Helper to normalise coords returned from the backend/OSRM to [[lat,lon],...]
 	const normalizeCoords = (raw) => {
@@ -506,6 +515,32 @@ const JourneyRouteLayer = ({ segments }) => {
 		}
 		return s;
 	});
+	// Preserve explicit endpoints through the map() which created a new array.
+	try {
+		if (normSegments._start && !displaySegments._start) displaySegments._start = normSegments._start;
+		if (normSegments._end && !displaySegments._end) displaySegments._end = normSegments._end;
+	} catch (e) {
+		// ignore
+	}
+
+	useEffect(() => {
+		if (!DEBUG_JOURNEY_ROUTE) return;
+		try {
+			const segs = Array.isArray(displaySegments) ? displaySegments : [];
+			const walkCount = segs.filter((s) => s && (s.mode === 'walking' || s.type === 'walk' || s.color === '#888888' || (s.id && String(s.id).startsWith('walk')))).length;
+			const stopPts = segs.reduce((n, s) => n + ((s && s._from) ? 1 : 0) + ((s && s._to) ? 1 : 0), 0);
+			console.debug('[JourneyRouteLayer] render', {
+				segCount: segs.length,
+				walkCount,
+				stopPts,
+				start: displaySegments && displaySegments._start,
+				end: displaySegments && displaySegments._end,
+				firstSeg: segs[0] ? { id: segs[0].id, mode: segs[0].mode, color: segs[0].color, dash: (segs[0].mode === 'walking') } : null,
+			});
+		} catch (e) {
+			// ignore
+		}
+	}, [DEBUG_JOURNEY_ROUTE, JSON.stringify(displaySegments.map((s) => s._normKey))]);
 
 	useEffect(() => {
 		if (!displaySegments || displaySegments.length === 0) return;
@@ -536,22 +571,39 @@ const JourneyRouteLayer = ({ segments }) => {
 			}
 
 			if (!displaySegments || displaySegments.length === 0) return;
-			const firstSeg = displaySegments[0];
-			const lastSeg = displaySegments[displaySegments.length - 1];
-			// The Journey array's coords structure can be nested. If segment 0 has no coords, look through until we find one.
+
+			// Prefer explicit endpoints when provided by the caller (Home page attaches
+			// these from journey.meta.start_point/destination).
 			let start = null;
-			for (const seg of displaySegments) {
-				if (seg?.coords?.length > 0) {
-					start = seg.coords[0];
-					break;
+			let end = null;
+			try {
+				if (displaySegments._start && Array.isArray(displaySegments._start) && displaySegments._start.length >= 2) {
+					start = displaySegments._start;
+				}
+				if (displaySegments._end && Array.isArray(displaySegments._end) && displaySegments._end.length >= 2) {
+					end = displaySegments._end;
+				}
+			} catch (e) {
+				start = null;
+				end = null;
+			}
+
+			// Fallback: derive endpoints from polyline coords.
+			if (!start) {
+				for (const seg of displaySegments) {
+					if (seg?.coords?.length > 0) {
+						start = seg.coords[0];
+						break;
+					}
 				}
 			}
-			let end = null;
-			for (let i = displaySegments.length - 1; i >= 0; i--) {
-				const seg = displaySegments[i];
-				if (seg?.coords?.length > 0) {
-					end = seg.coords[seg.coords.length - 1];
-					break;
+			if (!end) {
+				for (let i = displaySegments.length - 1; i >= 0; i--) {
+					const seg = displaySegments[i];
+					if (seg?.coords?.length > 0) {
+						end = seg.coords[seg.coords.length - 1];
+						break;
+					}
 				}
 			}
 			if (map && start && end) {
@@ -654,8 +706,8 @@ const JourneyRouteLayer = ({ segments }) => {
 									positions={actualCoords}
 									pathOptions={{
 										color: '#00ffff',
-										weight: isWalk ? 5 : 6,
-										opacity: 0.95,
+										weight: isWalk ? 6 : 6,
+										opacity: isWalk ? 0.55 : 0.95,
 										lineCap: 'round',
 										lineJoin: 'round',
 										dashArray: isWalk ? '10 6' : undefined,
@@ -667,10 +719,10 @@ const JourneyRouteLayer = ({ segments }) => {
 									key={seg._normKey}
 									positions={actualCoords}
 									pathOptions={{
-										// Walking legs: deep grey, dashed so they remain distinct from vehicle tracks
-										color: isWalk ? 'hsla(307, 53%, 67%, 1.00)' : (seg.color || '#1a73e8'),
+										// Walking legs: neutral grey + dashed so they read differently from transit
+										color: isWalk ? '#6b7280' : (seg.color || '#1a73e8'),
 										weight: isWalk ? 4 : 4,
-										opacity: isWalk ? 1 : 1,
+										opacity: isWalk ? 0.95 : 1,
 										lineCap: 'round',
 										lineJoin: 'round',
 										dashArray: isWalk ? '10 6' : undefined,
@@ -719,6 +771,33 @@ const JourneyRouteLayer = ({ segments }) => {
 										center={p}
 										radius={6}
 										pathOptions={{ color: '#fff', weight: 2, fillColor: '#F59E0B', fillOpacity: 1 }}
+									/>
+								));
+							})()}
+
+							{/* Stop markers: render from/to points when segments provide them (Home page attaches these per leg). */}
+							{(() => {
+								const pts = [];
+								const pushUnique = (p) => {
+									if (!p || !Array.isArray(p) || p.length < 2) return;
+									const lat = Number(p[0]);
+									const lon = Number(p[1]);
+									if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+									const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+									if (pts.some((x) => x._k === key)) return;
+									pts.push({ _k: key, p: [lat, lon] });
+								};
+								for (const seg of displaySegments) {
+									if (seg && seg._from) pushUnique(seg._from);
+									if (seg && seg._to) pushUnique(seg._to);
+								}
+								return pts.map((x, idx) => (
+									<CircleMarker
+										pane="transferPane"
+										key={`stoppt-${x._k}-${idx}`}
+										center={x.p}
+										radius={5}
+										pathOptions={{ color: '#ffffff', weight: 2, fillColor: '#111827', fillOpacity: 1 }}
 									/>
 								));
 							})()}
@@ -1673,8 +1752,28 @@ const makeMarkerSignature = (m) => {
 												// Don't run the synchronous variant-selection logic below, because it can
 												// overwrite the just-fetched in-memory track/label overlay.
 												const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-												// Don't set coords to [] here — wait for route_tracks fetch to succeed.
-												setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
+																		// Option A: if /bus/live already included precomputed polyline coords,
+																		// render immediately and skip click-time geometry fetches.
+																		try {
+																			const quick = marker && (marker.track_coords || marker.meta?.track_coords);
+																			if (Array.isArray(quick) && quick.length >= 2) {
+																				setSelectedVehicleTrack({ id: marker.id, coords: quick, color, stops: [], label: null });
+																				try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+																				return;
+																			}
+																		} catch (e) { /* ignore */ }
+																		// Default behaviour: do NOT do click-time geometry fetches.
+																		// Enable legacy fallback only for debugging.
+																		const allowClickTrackFallback = String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === '1'
+																			|| String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === 'true'
+																			|| String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === 'yes';
+																		if (!allowClickTrackFallback) {
+																			setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
+																			try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
+																			return;
+																		}
+																		// Don't set coords to [] here — wait for route_tracks fetch to succeed.
+																		setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
 												try {
 													try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																																																												// Intentionally not opening click popup (hover tooltips only).

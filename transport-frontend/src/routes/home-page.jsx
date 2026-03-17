@@ -584,6 +584,29 @@ export default function HomePage() {
     const opt = routeOptions?.[selectedRouteIdx];
     if (!opt) return null;
 
+    // Debug: show what geometry containers exist for the selected option.
+    // This is meant for diagnosing cases where the backend returns walking
+    // segments but the map only receives a bus segment.
+    try {
+      // eslint-disable-next-line no-console
+      console.debug('[journeyRoute] option geometry containers', {
+        selectedRouteIdx,
+        optHasRouteGeometries: Array.isArray(opt?.routeGeometries) ? opt.routeGeometries.length : 0,
+        optRouteHasRouteGeometries: Array.isArray(opt?.route?.routeGeometries) ? opt.route.routeGeometries.length : 0,
+        sourceRouteGeometriesLens: (() => {
+          const srcVals = opt?.sources ? Object.values(opt.sources) : [];
+          const out = [];
+          for (const s of srcVals) {
+            const j = s?.route?.route ? s.route.route : (s?.route ? s.route : s);
+            out.push(Array.isArray(j?.routeGeometries) ? j.routeGeometries.length : 0);
+          }
+          return out;
+        })(),
+      });
+    } catch (_e) {
+      // ignore
+    }
+
     // Pull the selected plan in a consistent way across /journey/plan and /journey/compare.
     // In compare mode, opt.sources is a map from label -> {router?, route:{legs...}}.
     // Some labels may be placeholders (no route). Don’t assume the first entry has legs.
@@ -605,15 +628,92 @@ export default function HomePage() {
 
     const legs = findLegs(opt);
 
+    // Prefer routeGeometries from the underlying journey object when present.
+    // In compare mode, the selected option may store the journey under:
+    // - opt.route (we inject this when building routeOptions)
+    // - opt.sources[label].route (or route.route)
+    // This avoids the embedded-legs geometry path which can be bus-only.
+    const findRouteGeometries = (option) => {
+      try {
+        if (Array.isArray(option?.routeGeometries) && option.routeGeometries.length > 0) return option.routeGeometries;
+        if (Array.isArray(option?.route?.routeGeometries) && option.route.routeGeometries.length > 0) return option.route.routeGeometries;
+        // Some shapes put routeGeometries directly on the journey object.
+        if (Array.isArray(option?.route?.routeGeometries) && option.route.routeGeometries.length > 0) return option.route.routeGeometries;
+        const srcVals = option?.sources ? Object.values(option.sources) : [];
+        for (const src of srcVals) {
+          const j = src?.route?.route ? src.route.route : (src?.route ? src.route : src);
+          if (Array.isArray(j?.routeGeometries) && j.routeGeometries.length > 0) return j.routeGeometries;
+        }
+      } catch (_e) {
+        // ignore
+      }
+      return null;
+    };
+
+    const preferredGeos = findRouteGeometries(opt);
+
+    // Extract start/destination from whichever nested journey object we can
+    // find. We attach these to the segments array so MapViewMap can place
+    // endpoint markers at the true requested origin/destination instead of
+    // guessing from polyline endpoints.
+    const extractMetaEndpoints = (option) => {
+      try {
+        // Prefer explicit plan attached on the option
+        if (option?.meta && option.meta.start_point && option.meta.destination) {
+          return option.meta;
+        }
+        if (option?.route?.meta && option.route.meta.start_point && option.route.meta.destination) {
+          return option.route.meta;
+        }
+        const srcVals = option?.sources ? Object.values(option.sources) : [];
+        for (const src of srcVals) {
+          if (!src) continue;
+          if (src?.route?.meta) return src.route.meta;
+          if (src?.meta) return src.meta;
+          if (src?.route?.route?.meta) return src.route.route.meta;
+        }
+      } catch (_e) {
+        // ignore
+      }
+      return null;
+    };
+
+    const meta = extractMetaEndpoints(opt);
+    const startPoint = (meta && Array.isArray(meta.start_point) && meta.start_point.length >= 2) ? meta.start_point : null;
+    const destinationPoint = (meta && Array.isArray(meta.destination) && meta.destination.length >= 2) ? meta.destination : null;
+
     // Build segments directly from legs[].geometry when present.
+    // NOTE: we only do this when routeGeometries is not available, because
+    // routeGeometries includes explicit walking segments.
     try {
-      if (legs && legs.length > 0) {
+      if ((!preferredGeos || preferredGeos.length === 0) && legs && legs.length > 0) {
         const segments = [];
+        let startFromMeta = null;
+        let endFromMeta = null;
+        try {
+          // Pull start/destination from the selected journey meta (compare/plan)
+          // so the map start marker reflects the true requested origin.
+          const m = extractMetaEndpoints(opt) || {};
+          const sp = m?.start_point;
+          const dp = m?.destination;
+          if (Array.isArray(sp) && sp.length >= 2 && Number.isFinite(sp[0]) && Number.isFinite(sp[1])) {
+            startFromMeta = [sp[0], sp[1]];
+          }
+          if (Array.isArray(dp) && dp.length >= 2 && Number.isFinite(dp[0]) && Number.isFinite(dp[1])) {
+            endFromMeta = [dp[0], dp[1]];
+          }
+        } catch (_e) {
+          startFromMeta = null;
+          endFromMeta = null;
+        }
+
         for (let i = 0; i < legs.length; i++) {
           const leg = legs[i];
           const rawMode = (leg?.mode && String(leg.mode).toLowerCase()) || '';
-          const isWalk = rawMode === 'walking';
+          const isWalk = rawMode === 'walking' || rawMode === 'walk';
           const mode = rawMode || (leg?.line_name ? 'transit' : 'walking');
+		  const fromPt = (leg?.from_stop && Array.isArray(leg.from_stop.coords) && leg.from_stop.coords.length >= 2) ? leg.from_stop.coords : null;
+		  const toPt = (leg?.to_stop && Array.isArray(leg.to_stop.coords) && leg.to_stop.coords.length >= 2) ? leg.to_stop.coords : null;
           const embeddedCoords = leg?.geometry && Array.isArray(leg.geometry.coords) ? leg.geometry.coords : null;
           if (!embeddedCoords || embeddedCoords.length < 2) continue;
           const norm = normalizeCoords(embeddedCoords);
@@ -622,14 +722,125 @@ export default function HomePage() {
             id: isWalk ? `walk-${i}` : `seg-${i}`,
             name: leg?.line_name || mode || `Segment ${i}`,
             coords: norm,
-            color: isWalk ? '#000000' : '#1a73e8',
+            color: isWalk ? '#888888' : '#1a73e8',
             mode,
+            isWalk,
+			  // These are used by the map to clip full-route tracks to the leg
+			  // and to mark intermediate stops.
+			  _from: fromPt ? [fromPt[0], fromPt[1]] : null,
+			  _to: toPt ? [toPt[0], toPt[1]] : null,
           });
         }
-        if (segments.length > 0) return segments;
+        // Force the visual start/end markers to match the requested start/destination
+        // when the backend provides them (journey.meta.start_point / destination).
+        try {
+          if (segments.length > 0 && startFromMeta) {
+            const first = segments[0];
+            if (first && Array.isArray(first.coords) && first.coords.length > 0) {
+              first.coords[0] = startFromMeta;
+            }
+          }
+          if (segments.length > 0 && endFromMeta) {
+            const last = segments[segments.length - 1];
+            if (last && Array.isArray(last.coords) && last.coords.length > 0) {
+              last.coords[last.coords.length - 1] = endFromMeta;
+            }
+          }
+        } catch (_e) {
+          // best-effort only
+        }
+        if (segments.length > 0) {
+          try {
+            if (startPoint) segments._start = [startPoint[0], startPoint[1]];
+            if (destinationPoint) segments._end = [destinationPoint[0], destinationPoint[1]];
+          } catch (_e) {
+            // ignore
+          }
+          return segments;
+        }
       }
     } catch (_e) {
       // If anything goes wrong, fall back to prefetched routeGeometries below.
+    }
+
+    // Fall back to backend-provided routeGeometries. These already include
+    // walking segments, but we still normalize and tag them so MapViewMap
+    // can render walking differently.
+    try {
+      // In some formats (especially compare mode), routeGeometries may be nested.
+      // Prefer the most specific one we can find.
+      const geos = preferredGeos;
+      if (geos && geos.length > 0) {
+        // Try to obtain start/end from meta for start-marker correctness.
+        let startFromMeta = null;
+        let endFromMeta = null;
+        try {
+          const srcVals = opt?.sources ? Object.values(opt.sources) : [];
+          let j = null;
+          for (const src of srcVals) {
+            if (src?.route?.meta) { j = src.route; break; }
+            if (src?.meta) { j = src; break; }
+          }
+          const meta = j?.meta || {};
+          const sp = meta?.start_point;
+          const dp = meta?.destination;
+          if (Array.isArray(sp) && sp.length >= 2 && Number.isFinite(sp[0]) && Number.isFinite(sp[1])) startFromMeta = [sp[0], sp[1]];
+          if (Array.isArray(dp) && dp.length >= 2 && Number.isFinite(dp[0]) && Number.isFinite(dp[1])) endFromMeta = [dp[0], dp[1]];
+        } catch (_e) {
+          startFromMeta = null;
+          endFromMeta = null;
+        }
+
+        const segs = [];
+        for (let i = 0; i < geos.length; i++) {
+          const g = geos[i];
+          if (!g || !Array.isArray(g.coords) || g.coords.length < 2) continue;
+          const norm = normalizeCoords(g.coords);
+          if (norm.length < 2) continue;
+          const rawMode = (g?.mode && String(g.mode).toLowerCase()) || '';
+          const isWalk = rawMode === 'walking' || rawMode === 'walk' || (typeof g?.id === 'string' && g.id.startsWith('walk-'));
+
+          // Prefer explicit per-segment endpoints if attachEndpoints() added them,
+          // otherwise fall back to the geometry endpoints.
+          const fromPt = (g?._from && Array.isArray(g._from) && g._from.length >= 2) ? [g._from[0], g._from[1]] : null;
+          const toPt = (g?._to && Array.isArray(g._to) && g._to.length >= 2) ? [g._to[0], g._to[1]] : null;
+          const geoFrom = (norm && norm.length > 0) ? norm[0] : null;
+          const geoTo = (norm && norm.length > 0) ? norm[norm.length - 1] : null;
+          segs.push({
+            ...(g || {}),
+            coords: norm,
+            mode: rawMode || (isWalk ? 'walking' : 'transit'),
+            isWalk,
+            color: isWalk ? '#888888' : (g?.color || '#1a73e8'),
+            _from: fromPt || (geoFrom ? [geoFrom[0], geoFrom[1]] : null),
+            _to: toPt || (geoTo ? [geoTo[0], geoTo[1]] : null),
+          });
+        }
+        // Force route endpoints to match requested origin/destination when present.
+        try {
+          if (segs.length > 0 && startFromMeta) {
+            const first = segs[0];
+            if (first?.coords?.length > 0) first.coords[0] = startFromMeta;
+          }
+          if (segs.length > 0 && endFromMeta) {
+            const last = segs[segs.length - 1];
+            if (last?.coords?.length > 0) last.coords[last.coords.length - 1] = endFromMeta;
+          }
+        } catch (_e) {
+          // ignore
+        }
+        if (segs.length > 0) {
+          try {
+            if (startPoint) segs._start = [startPoint[0], startPoint[1]];
+            if (destinationPoint) segs._end = [destinationPoint[0], destinationPoint[1]];
+          } catch (_e) {
+            // ignore
+          }
+          return segs;
+        }
+      }
+    } catch (_e) {
+      // ignore
     }
 
     return opt.routeGeometries ?? null;
@@ -1056,21 +1267,94 @@ export default function HomePage() {
       // Helper: attach from/to coords from journey.legs to the returned routeGeometries
       const attachEndpoints = (journey) => {
         if (!journey) return [];
-        const geos = Array.isArray(journey.routeGeometries) ? journey.routeGeometries.map(g => ({ ...(g || {}) })) : [];
+        const geosIn = Array.isArray(journey.routeGeometries) ? journey.routeGeometries : [];
+        const geos = geosIn.map((g) => ({ ...(g || {}) }));
         const legs = Array.isArray(journey.legs) ? journey.legs : [];
-        const n = Math.min(geos.length, legs.length);
-        for (let i = 0; i < n; i++) {
-          const geo = geos[i];
-          const leg = legs[i];
-          if (!geo) continue;
-          if (leg && leg.from_stop && typeof leg.from_stop.lat === 'number' && typeof leg.from_stop.lon === 'number') {
-            geo._from = [leg.from_stop.lat, leg.from_stop.lon];
+
+        // If backend didn't include geometry for walking legs, synthesize a simple
+        // 2-point segment so walking is still visible and styled correctly.
+        // We preserve the original travel order based on legs.
+        const out = [];
+        let geoIdx = 0;
+
+        const geoLooksLikeWalking = (g) => {
+          try {
+            const m = (g?.mode && String(g.mode).toLowerCase()) || '';
+            if (m === 'walking' || m === 'walk') return true;
+            if (typeof g?.id === 'string' && g.id.startsWith('walk-')) return true;
+          } catch (_e) {
+            // ignore
           }
-          if (leg && leg.to_stop && typeof leg.to_stop.lat === 'number' && typeof leg.to_stop.lon === 'number') {
-            geo._to = [leg.to_stop.lat, leg.to_stop.lon];
+          return false;
+        };
+
+        const legIsWalking = (leg) => {
+          const m = (leg?.mode && String(leg.mode).toLowerCase()) || '';
+          return m === 'walking' || m === 'walk';
+        };
+
+        const endpointPairFromLeg = (leg) => {
+          const fs = leg?.from_stop;
+          const ts = leg?.to_stop;
+          if (!fs || !ts) return null;
+          if (typeof fs.lat !== 'number' || typeof fs.lon !== 'number') return null;
+          if (typeof ts.lat !== 'number' || typeof ts.lon !== 'number') return null;
+          return {
+            from: [fs.lat, fs.lon],
+            to: [ts.lat, ts.lon],
+          };
+        };
+
+        for (let i = 0; i < legs.length; i++) {
+          const leg = legs[i];
+          const isWalkLeg = legIsWalking(leg);
+
+          // Find the next geometry segment (if any)
+          const g = geoIdx < geos.length ? geos[geoIdx] : null;
+          const gIsWalk = g ? geoLooksLikeWalking(g) : false;
+
+          // If leg is walking but next geometry isn't walking (or missing), synthesize.
+          if (isWalkLeg && (!g || !gIsWalk)) {
+            const ep = endpointPairFromLeg(leg);
+            if (ep) {
+              out.push({
+                id: `walk-${i}`,
+                name: 'Walk',
+                mode: 'walking',
+                color: '#888888',
+                dash: true,
+                coords: [ep.from, ep.to],
+                _from: ep.from,
+                _to: ep.to,
+              });
+              continue;
+            }
+            // If endpoints missing, just skip synthesizing and fall through.
+          }
+
+          // Otherwise, use the next geometry segment (when present).
+          if (g) {
+            const ep = endpointPairFromLeg(leg);
+            if (ep) {
+              if (!g._from) g._from = ep.from;
+              if (!g._to) g._to = ep.to;
+            }
+            // Ensure mode is set so map can style walking
+            if (!g.mode) {
+              g.mode = isWalkLeg ? 'walking' : ((leg?.mode && String(leg.mode).toLowerCase()) || 'transit');
+            }
+            out.push(g);
+            geoIdx += 1;
           }
         }
-        return geos;
+
+        // Append any remaining geometry segments (defensive)
+        while (geoIdx < geos.length) {
+          out.push(geos[geoIdx]);
+          geoIdx += 1;
+        }
+
+        return out;
       };
 
       const makeSignature = (card) => {
@@ -1100,6 +1384,10 @@ export default function HomePage() {
                 id,
                 card: { ...card, id },
                 routeGeometries: attachEndpoints(journey),
+                // Some parts of the UI (notably the map selector) will look for
+                // nested routeGeometries under `option.route.routeGeometries`.
+                // Keep them in sync so walking segments are never dropped.
+                route: { ...(journey || {}), routeGeometries: attachEndpoints(journey) },
                 labels: [item.label],
                 label: item.label,
                 sources: { [item.label]: res },
