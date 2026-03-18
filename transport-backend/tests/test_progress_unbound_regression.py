@@ -21,7 +21,7 @@ def test_compute_delay_does_not_raise_progress_unbound(monkeypatch):
 
     # Minimal stub objects with just the attributes the matcher touches.
     class MergedStub:
-        route_tracks = [[]]
+        legacy_polylines = [[]]
         route_stops = [["STOP:A", "STOP:B"]]
         journey_metadata = {}
 

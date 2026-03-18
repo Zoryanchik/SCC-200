@@ -479,7 +479,7 @@ class BusLoader:
     # write section-level `bus_route_section_tracks` and `bus_route_stops`.
         route_section_track_rows = []  # (route_id, section_id, seq, lat, lon, from_atco, to_atco)
         for sec_id, waypoints in route_section_tracks.items():
-            # Use the same canonical route key format as route_stops/route_tracks
+            # Use the same canonical route key format as route_stops / geometry tables
             # so route_ids match across tables. Include service_code when
             # available to preserve the service-scoped namespace.
             rkey = f"{service_code}:{sec_id}" if service_code else sec_id
@@ -783,7 +783,7 @@ class BusLoader:
         # Helper to apply per-file namespacing and merge parsed rows into buckets
         def _merge_parsed(fname, parsed):
             nonlocal counts
-            route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, route_tracks, route_section_tracks, file_rev, file_provided_name = parsed
+            route_stops, journey_routes, journey_times, stop_names, service_ops, serviced_orgs, journey_ops, _route_polyline_unused, route_section_tracks, file_rev, file_provided_name = parsed
 
             # Per-file namespacing: prefer provider FileName attribute
             if file_provided_name:
@@ -822,9 +822,6 @@ class BusLoader:
                         out.append((f"{file_prefix}::{jid}", svc, dow, s, e, org, orgw, operator_noc))
                 return out
 
-            def _pref_file_route_tracks(rt_list):
-                return [ (f"{file_prefix}::{rid}", seq, lat, lon) for (rid, seq, lat, lon) in (rt_list or []) ]
-
             def _pref_file_route_section_tracks(rs_list):
                 return [ (f"{file_prefix}::{rid}", sec, seq, lat, lon, fa, ta) for (rid, sec, seq, lat, lon, fa, ta) in (rs_list or []) ]
 
@@ -832,7 +829,6 @@ class BusLoader:
             journey_routes = _pref_file_journey_routes(journey_routes)
             journey_times = _pref_file_journey_times(journey_times)
             journey_ops = _pref_file_journey_ops(journey_ops)
-            route_tracks = _pref_file_route_tracks(route_tracks)
             route_section_tracks = _pref_file_route_section_tracks(route_section_tracks)
 
             op = fname.split('_', 1)[0] if '_' in fname else 'DEFAULT'
@@ -840,7 +836,7 @@ class BusLoader:
                 buckets[op] = {
                     'route_stops': [], 'journey_routes': [], 'journey_times': [],
                     'stop_names': [], 'service_ops': [], 'serviced_orgs': [], 'journey_ops': [],
-                    'route_tracks': [], 'route_section_tracks': [], 'revision': None, 'file_count': 0,
+                    'route_section_tracks': [], 'revision': None, 'file_count': 0,
                 }
             b = buckets[op]
             b['route_stops'].extend(route_stops)
@@ -850,7 +846,6 @@ class BusLoader:
             b['service_ops'].extend(service_ops)
             b['serviced_orgs'].extend(serviced_orgs)
             b['journey_ops'].extend(journey_ops)
-            b['route_tracks'].extend(route_tracks)
             b['route_section_tracks'].extend(route_section_tracks)
             if file_rev is not None:
                 if b['revision'] is None or (file_rev and file_rev > b['revision']):
@@ -887,7 +882,7 @@ class BusLoader:
                 self.populate(
                     b['route_stops'], b['journey_routes'], b['journey_times'],
                     b['stop_names'], b['service_ops'], b['serviced_orgs'], b['journey_ops'],
-                    b['route_tracks'], route_section_tracks=b.get('route_section_tracks', []), revision=b['revision'], tag=None,
+                    route_polyline_unused=None, route_section_tracks=b.get('route_section_tracks', []), revision=b['revision'], tag=None,
                 )
             except Exception as e:
                 print(f'  [bus] {prefix}ERR during populate for bucket {op}: {e}')
@@ -917,7 +912,7 @@ class BusLoader:
 
     def populate( self, route_stops, journey_routes, journey_times, stop_names=None,
                   service_ops=None, serviced_orgs=None, journey_ops=None,
-                  route_tracks=None, route_section_tracks=None, revision=None, tag=None ):
+                  route_polyline_unused=None, route_section_tracks=None, revision=None, tag=None, **_legacy_kwargs ):
         """Insert data into the database.
         Args:
             route_stops:    list of (route_id, atco_code, stop_order)
@@ -927,7 +922,7 @@ class BusLoader:
             service_ops:    list of (service_code, start_date, end_date)
             serviced_orgs:  list of (service_code, start_date, end_date)
             journey_ops:    list of (journey_id, service_code, days_of_week, start_date, end_date, org_ref, org_working)
-            route_tracks:   list of (route_id, seq, lat, lon)
+            route_polyline_unused: deprecated/unused (route-level polylines are not loaded)
         """
         conn = self._connect(self.db_path)
         cursor = conn.cursor()
@@ -936,7 +931,7 @@ class BusLoader:
         # When tag is provided, prefix journey_id/route_id values with "{tag}::" so
         # colliding ids from different datasets remain distinct.
         def _apply_namespacing_and_revision():
-            nonlocal route_stops, journey_routes, journey_times, journey_ops, route_tracks, route_section_tracks
+            nonlocal route_stops, journey_routes, journey_times, journey_ops, route_polyline_unused, route_section_tracks
 
             def _pref(x):
                 if not tag or not x:
@@ -961,7 +956,8 @@ class BusLoader:
                     # reorder to match DB columns: journey_id, service_code, operator_national_code, days_of_week, start_date, end_date, org_ref, org_working
                     normalized_jops.append((_pref(jid), svc, operator_noc, dow, s, e, org, orgw))
             journey_ops = normalized_jops
-            route_tracks = [( _pref(rid), seq, lat, lon ) for (rid, seq, lat, lon) in (route_tracks or [])]
+            # route-level polylines intentionally ignored
+            route_polyline_unused = []
             route_section_tracks = [( _pref(rid), sec, seq, lat, lon, fa, ta ) for (rid, sec, seq, lat, lon, fa, ta) in (route_section_tracks or [])]
 
             # Revision-aware skipping/deletion. If the DB table contains a 'revision'
@@ -1012,7 +1008,7 @@ class BusLoader:
 
                 if skip_rids:
                     route_stops = [r for r in route_stops if r[0] not in skip_rids]
-                    route_tracks = [r for r in route_tracks if r[0] not in skip_rids]
+                    # route-level polylines removed
 
             # Fallback: when incoming revision is missing/zero, avoid loading
             # data for IDs that already exist in the DB. This prevents
@@ -1391,7 +1387,7 @@ class BusLoader:
                     "line_name": line_name,
                 }
 
-    # --- 5. load route tracks (lat/lon polylines) ---
+    # --- 5. load geometry (lat/lon polylines) ---
     # Canonical source: bus_route_section_tracks.
     # IMPORTANT: seq is per-RouteLink, so ordering by (route_id, seq)
     # alone can interleave separate link fragments and produce a mess.
@@ -1799,16 +1795,22 @@ class BusLoader:
         _log('phase_metadata', _t_metadata)
     # timing log removed
 
-        # 3e. route tracks
+    # 3e. geometry fragments
         # Canonical source: bus_route_section_tracks.
         # IMPORTANT: date-filtered BusData must still include tracks for
         # the valid routes; otherwise journey geometry degenerates to
         # straight lines.
 
-        # Stop-to-stop fragment tracks (route_link_tracks) can be built during load
-        # (eager) but are expensive. Keep them optional; we now support a lazy
-        # on-demand build for a single route when requested.
-        build_link_fragments = str(_os.environ.get('BUS_BUILD_LINK_TRACKS') or '').lower() in ('1', 'true', 'yes')
+        # Stop-to-stop fragment tracks (route_link_tracks) are REQUIRED.
+        #
+    # Policy: full-route polylines must not be used as a geometry fallback. To
+        # support fragment-only geometry consistently, we always build the
+        # (from_stop_int,to_stop_int) -> polyline fragment index here.
+        #
+        # Note: this does add some dict overhead during load, but it keeps
+    # runtime behavior deterministic (no legacy full-route polyline fallback).
+        build_link_fragments = True
+
         _t_tracks = _time.perf_counter() if timing_enabled else None
         try:
             cur.execute(
@@ -1818,29 +1820,9 @@ class BusLoader:
                 "ORDER BY st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq"
             )
             rows = cur.fetchall()
-            current_route = None
-            current_key = None
-            track_buf = []
             for route_id, section_id, from_atco, to_atco, _seq, lat, lon in rows:
-                key = (route_id, section_id, from_atco or '', to_atco or '')
-                if route_id != current_route:
-                    if current_route is not None and track_buf:
-                        bd.add_route_track(current_route, track_buf)
-                    current_route = route_id
-                    current_key = key
-                    track_buf = []
-                elif key != current_key:
-                    current_key = key
-
                 pt = (lat, lon)
-                if track_buf and pt == track_buf[-1]:
-                    continue
-                track_buf.append(pt)
-
-                # Also maintain a stop-to-stop fragment index when possible.
-                # NOTE: this is expensive (many dict ops) and is not required
-                # for route-level geometry uses. Keep it behind a flag so day
-                # timetable loads during date-jumps stay fast.
+                # Maintain a stop-to-stop fragment index (required).
                 if build_link_fragments and from_atco and to_atco:
                     try:
                         r_int = bd.map_routes.code_to_int.get(route_id)
@@ -1857,9 +1839,6 @@ class BusLoader:
                     except Exception:
                         # Best-effort: missing stop mappings shouldn't break load.
                         pass
-
-            if current_route is not None and track_buf:
-                bd.add_route_track(current_route, track_buf)
         except Exception:
             # As per policy A, this is allowed (DB used for ingest/load),
             # but if it fails we still want routing to work (without tracks).
@@ -1867,7 +1846,7 @@ class BusLoader:
             print("[bus_loader] WARNING: failed to load section tracks for date-filtered BusData")
             traceback.print_exc()
 
-        _log('phase_route_tracks', _t_tracks)
+        _log('phase_geometry', _t_tracks)
 
         conn.commit()  # commit to drop temp tables
     # timing log removed
@@ -1909,8 +1888,8 @@ class BusLoader:
     def get_route_link_tracks_for_route(self, route_id: str):
         """Fetch stop-to-stop section track fragments for a single route.
 
-        This is used to build `MergedData.route_link_tracks` lazily for a
-        specific route_int when a request needs per-leg route_tracks.
+    This is used to build `MergedData.route_link_tracks` lazily for a
+    specific route_int when a request needs per-leg geometry fragments.
 
         Returns:
             dict[(from_atco, to_atco)] -> list[(lat, lon)]

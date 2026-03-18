@@ -92,13 +92,19 @@ def main():
                 info['dest_atco'] = merged.get_atco_code(dest_idx)
             except Exception:
                 info['dest_atco'] = None
-            # route tracks/route idx
+            # route idx
             route_idx = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else None
             info['route_idx'] = route_idx
-            if route_idx is not None and route_idx < len(merged.route_tracks):
-                info['has_track'] = bool(merged.route_tracks[route_idx])
-            else:
-                info['has_track'] = False
+            # Full-route polylines were removed; fragment geometry is stored as per-route link tracks.
+            # We can only provide a coarse “has geometry fragments” signal here.
+            try:
+                info['has_link_tracks'] = bool(
+                    getattr(merged, 'route_link_tracks', None)
+                    and route_idx is not None
+                    and merged.route_link_tracks.get(route_idx)
+                )
+            except Exception:
+                info['has_link_tracks'] = False
             # walking proximity
             try:
                 nearby = walking.reachable_stops((args.lat, args.lon))

@@ -287,7 +287,8 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
   if (!Array.isArray(legs) || legs.length === 0) return [];
 
   // Optional journey context (used only for routed-journey geometry so the backend
-  // can pick the correct day/bucket merged timetable when returning stored route_tracks).
+  // can pick the correct day/bucket merged timetable when returning stored
+  // stop-to-stop fragment geometry (route_link_tracks).
   // Expected shapes:
   //   { date: 'YYYY-MM-DD', departure_time: 'HH:MM[:SS]' }
   const ctxDate = opts && (opts.date || opts.journeyDate || opts.service_date || opts.serviceDate) ? (opts.date || opts.journeyDate || opts.service_date || opts.serviceDate) : null;
@@ -361,11 +362,11 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
 
     try {
   // Prefer backend-provided mode if present. For transit legs we still
-  // ask the backend for 'bus' so it can prefer stored route_tracks and
+  // ask the backend for 'bus' so it can prefer stored fragment geometry and
   // subsegment by stops.
   const isBusLikeLeg = !isWalk && (rawMode === 'bus' || rawMode === 'transit' || !!leg?.line_name);
   // IMPORTANT: For transit legs, ask the backend for mode=bus so it can
-  // prefer timetable route_tracks + stop-to-stop fragments. Using `driving`
+  // prefer timetable stop-to-stop fragments (route_link_tracks). Using `driving`
   // can fall back to OSRM road-following geometry, which may look wrong.
   const requestMode = isWalk ? 'walking' : (isBusLikeLeg ? 'bus' : 'driving');
       // If the leg carries an explicit route_id (or metadata with route_id)

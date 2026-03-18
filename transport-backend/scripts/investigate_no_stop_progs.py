@@ -169,9 +169,29 @@ def main(limit=20, tol=30):
 
             # attempt deeper projection/interpolation; if stop_progs empty, record
             r_int = merged.journey_to_route[j_id] if j_id < len(merged.journey_to_route) else -1
-            route_tracks = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
             route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
-            cum = _cum_distances(route_tracks) if route_tracks else [1.0]
+
+            # NOTE: full-route polylines were removed; prefer stitched link fragments.
+            route_poly = []
+            try:
+                from api import _try_stitch_route_link_tracks_for_route_int  # type: ignore
+
+                route_poly = _try_stitch_route_link_tracks_for_route_int(merged, r_int, walking) or []
+            except Exception:
+                route_poly = []
+
+            if not route_poly:
+                # fall back: coarse polyline from route stops coords
+                ttrack = []
+                for sid in route_stops:
+                    try:
+                        slat, slon = walking.get_loc_coords(sid)
+                        ttrack.append((slat, slon))
+                    except Exception:
+                        continue
+                route_poly = ttrack
+
+            cum = _cum_distances(route_poly) if route_poly else [1.0]
             # compute projection-based stop_progs
             proj_stop_progs = []
             for sid, atime, dtime in jt:
@@ -179,7 +199,7 @@ def main(limit=20, tol=30):
                     slat, slon = walking.get_loc_coords(sid)
                 except Exception:
                     continue
-                sd, along = _project_onto_track(slat, slon, route_tracks, cum)
+                sd, along = _project_onto_track(slat, slon, route_poly, cum)
                 sched = atime if atime is not None else dtime
                 if sched is not None:
                     proj_stop_progs.append((along, sched))
@@ -214,7 +234,7 @@ def main(limit=20, tol=30):
                     'line_ref': line_ref,
                     'j_id': j_id,
                     'r_int': r_int,
-                    'route_tracks_len': len(route_tracks) if route_tracks else 0,
+                    'route_poly_len': len(route_poly) if route_poly else 0,
                     'route_stops_len': len(route_stops) if route_stops else 0,
                     'projection_stop_progs_count': 0,
                     'synth_stop_progs_count': len(synth_stop_progs),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dump full rows for specified route_ids (route_stops, route_tracks, journey_routes).
+"""Dump full rows for specified route_ids (route_stops, route_section_tracks, journey_routes).
 
 Usage:
   python3 scripts/dump_route_details.py ROUTE_ID [ROUTE_ID ...]

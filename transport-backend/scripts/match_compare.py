@@ -273,7 +273,14 @@ def run_strategy(records, merged, walking, strategy_name, tol):
                 candidate_failed_reasons.append('no_route')
                 continue
 
-            track = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
+            track = []
+            try:
+                from api import _try_stitch_route_link_tracks_for_route_int  # type: ignore
+
+                track = _try_stitch_route_link_tracks_for_route_int(merged, r_int, walking) or []
+            except Exception:
+                track = []
+
             if not track:
                 route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
                 ttrack = []

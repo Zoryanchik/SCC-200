@@ -17,8 +17,7 @@ class BusData:
         journey_to_route – route-int for each journey
         route_metadata   – {route_id, line_name, …} per route
         journey_metadata – {journey_id, …} per journey
-        route_tracks     – ordered [(lat, lon), …] track polylines per route
-    route_link_tracks – dict[(from_stop_int,to_stop_int)] -> [(lat,lon),...]
+        route_link_tracks – dict[(from_stop_int,to_stop_int)] -> [(lat,lon),...]
                per route (stop-to-stop fragments for geometry)
     """
 
@@ -43,8 +42,6 @@ class BusData:
         self.route_metadata = [None for _ in range(num_routes)]
         # Indexed by journey_id_int — metadata dicts
         self.journey_metadata = [None for _ in range(num_journeys)]
-        # Indexed by route_id_int — ordered [(lat, lon), ...] track polylines
-        self.route_tracks = [[] for _ in range(num_routes)]
         # Indexed by route_id_int — dict mapping stop-int pairs to polyline
         # fragments (lat,lon). These reflect RouteLink boundaries.
         self.route_link_tracks = [{} for _ in range(num_routes)]
@@ -56,7 +53,6 @@ class BusData:
             self.route_stops.append([])
             self.route_journeys.append([])
             self.route_metadata.append(None)
-            self.route_tracks.append([])
             self.route_link_tracks.append({})
 
     def _ensure_journey_capacity(self, journey_id_int):
@@ -121,11 +117,5 @@ class BusData:
             validated.append((atco, atime, dtime))
         self.journey_times[journey_id_int] = validated
 
-    def add_route_track(self, route_id, waypoints):
-        """Set the ordered track polyline for a route.
-
-        waypoints: list of (lat, lon) tuples.
-        """
-        route_id_int = self.map_routes.get_int(route_id)
-        self._ensure_route_capacity(route_id_int)
-        self.route_tracks[route_id_int] = list(waypoints)
+    # NOTE: full-route polylines are intentionally removed. Geometry is provided via
+    # per-link fragments in `route_link_tracks`.

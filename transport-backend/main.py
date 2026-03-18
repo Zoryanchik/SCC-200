@@ -579,7 +579,7 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
     )
     # Ensure the merged instance can lazy-load DB-backed link fragments.
     # This is critical for historical dates where we still want route_link_tracks
-    # to be available (and avoid falling back to full route_tracks slicing).
+    # to be available (and avoid falling back to other less accurate geometry sources).
     try:
         merged.bus_loader = loader
     except Exception:

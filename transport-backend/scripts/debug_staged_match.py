@@ -46,7 +46,7 @@ class M:
         ]
         self.journey_to_route = [0, 0]
         self.journey_stop_index = [{0: 0, 2: 1}, {0: 0, 3: 1}]
-        self.route_tracks = [[(54.0, -2.8), (54.01, -2.79)]]
+        self.legacy_polylines = [[(54.0, -2.8), (54.01, -2.79)]]
         self.route_stops = [[0, 2, 3]]
         self.stop_metadata = ["O", "X", "A", "B"]
 

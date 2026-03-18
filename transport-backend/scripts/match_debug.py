@@ -295,9 +295,20 @@ def main():
                 continue
 
             # track availability
-            track = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
+            # NOTE: full-route polylines were removed; prefer stitched stop-to-stop fragments.
+            track = []
+            try:
+                # Local import to avoid pulling heavy API module at import time.
+                from api import _try_stitch_route_link_tracks_for_route_int  # type: ignore
+
+                # Best-effort: stitch a whole-route polyline; if the helper isn't
+                # available or has no fragments, we'll fall back to stop coords.
+                track = _try_stitch_route_link_tracks_for_route_int(merged, r_int, walking) or []
+            except Exception:
+                track = []
+
             if not track:
-                # try to build track from route stops coords
+                # fall back: build coarse track from route stops coords
                 route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
                 ttrack = []
                 for sid in route_stops:

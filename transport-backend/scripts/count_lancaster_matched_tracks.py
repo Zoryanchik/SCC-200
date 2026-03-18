@@ -71,8 +71,8 @@ def _fetch_json(url: str, timeout: float):
         return json.load(resp)
 
 
-def _debug_route_tracks_url(backend: str, route_id: str) -> str:
-    return f"{backend.rstrip('/')}/debug/route-tracks/{urllib.parse.quote(route_id, safe='')}"
+def _debug_route_link_tracks_url(backend: str, route_id: str) -> str:
+    return f"{backend.rstrip('/')}/debug/route-link-tracks/{urllib.parse.quote(route_id, safe='')}"
 
 
 def _leg_geometry_url(backend: str, *, route_int: str | None = None, route_id: str | None = None) -> str:
@@ -109,7 +109,7 @@ def _leg_geometry_url_with_coords(
 
 
 def _classify_leg_geometry(payload) -> str:
-    """Return one of: usable_route_tracks, usable_osrm, linear, empty, error, unknown."""
+    """Return one of: usable_route_link_tracks, usable_osrm, linear, empty, error, unknown."""
     if not isinstance(payload, dict):
         return "unknown"
     if payload.get("error"):
@@ -126,8 +126,8 @@ def _classify_leg_geometry(payload) -> str:
 
     if src == "linear":
         return "linear"
-    if src == "route_tracks":
-        return "usable_route_tracks"
+    if src == "route_link_tracks":
+        return "usable_route_link_tracks"
     if src == "osrm":
         return "usable_osrm"
     if src:
@@ -198,9 +198,9 @@ def main() -> int:
         classified = None
         for rid in candidates:
             # We don't know the leg endpoints here; we just pass the vehicle position
-            # for both endpoints so the server can still return route_tracks when present.
-            # (If no route_tracks are present, OSRM/linear may be less meaningful, but
-            # we're primarily measuring presence of authoritative timetable tracks.)
+            # for both endpoints so the server can still return any best-effort geometry.
+            # This script is primarily measuring whether we can resolve *non-linear*
+            # geometry (fragment-based `route_link_tracks`) vs OSRM/linear fallback.
             url = _leg_geometry_url_with_coords(
                 args.backend,
                 rid,
@@ -227,27 +227,23 @@ def main() -> int:
         track_counts[classified] += 1
 
         if classified == 'linear':
-            # Try to explain WHY: is timetable route_tracks missing for this route_id?
+            # Try to explain WHY: are fragment tracks missing for this route_id?
             # We keep this best-effort and small (no huge payloads).
             rid0 = candidates[0]
             try:
-                dbg = _fetch_json(_debug_route_tracks_url(args.backend, rid0), timeout=args.timeout)
-                found = bool(dbg.get('found'))
-                coords_len = dbg.get('coords_len')
-                sugg = dbg.get('suggestions') or []
-                if found and isinstance(coords_len, int) and coords_len >= 2:
-                    linear_diag['debug_found_tracks_but_leg_geometry_linear'] += 1
-                elif sugg:
-                    linear_diag['vj_id_missing_tracks_has_rs_suggestions'] += 1
+                dbg = _fetch_json(_debug_route_link_tracks_url(args.backend, rid0), timeout=args.timeout)
+                # Endpoint returns a summary; keep this loose to avoid coupling.
+                link_tracks_count = dbg.get('link_tracks_count')
+                has_any = (isinstance(link_tracks_count, int) and link_tracks_count > 0)
+                if has_any:
+                    linear_diag['debug_found_link_tracks_but_leg_geometry_linear'] += 1
                 else:
-                    linear_diag['no_route_tracks_and_no_suggestions'] += 1
+                    linear_diag['no_route_link_tracks'] += 1
 
                 if len(linear_examples) < 10:
                     linear_examples.append({
                         'route_id': rid0,
-                        'debug_found': found,
-                        'debug_coords_len': coords_len,
-                        'suggestions_sample': sugg[:5],
+                        'link_tracks_count': link_tracks_count,
                     })
             except Exception:
                 linear_diag['debug_endpoint_error'] += 1

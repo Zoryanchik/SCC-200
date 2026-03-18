@@ -4,7 +4,7 @@
  * What we want to lock in:
  * - label endpoint returns multiple route_ints (preferred)
  * - /route/leg-geometry may return `source: "linear"` for some route_ids
- * - we should keep trying until we find `source: "route_tracks"`
+ * - we should keep trying until we find non-linear geometry (e.g. `source: "route_link_tracks"`)
  * - and then render the vehicle track polyline
  */
 
@@ -147,10 +147,10 @@ describe('MapViewMap vehicle track selection', () => {
     });
 
             // Vehicle track selection behavior:
-            // - we use /route/leg-geometry with route_int / route_id to fetch stored `route_tracks`
+            // - we use /route/leg-geometry with route_int / route_id to fetch stored fragment geometry
             // - /route/leg-geometry may return `source: "linear"` for some route_ids
-            // - we should keep trying until we find `source: "route_tracks"`
-            // - we do NOT fall back to stitched/non-stop geometry; if route_tracks isn't available,
+            // - we should keep trying until we find non-linear geometry
+            // - we do NOT fall back to linear geometry; if fragments aren't available,
             //   we show no track.
 		// MapViewMap prefetches route data for visible markers.
 		fetchRouteLineWithFallbackMock.mockResolvedValue({
@@ -182,13 +182,13 @@ describe('MapViewMap vehicle track selection', () => {
         };
       }
 
-      // RID2 returns route_tracks (should be selected)
+  // RID2 returns non-linear geometry (should be selected)
       if (u.includes('route_int=RID2') || u.includes('route_id=RID2')) {
         return {
           ok: true,
           status: 200,
           headers: { get: () => 'application/json' },
-          json: async () => ({ source: 'route_tracks', coords: [[54.0, -2.8], [54.05, -2.75], [54.1, -2.7]] }),
+          json: async () => ({ source: 'route_link_tracks', coords: [[54.0, -2.8], [54.05, -2.75], [54.1, -2.7]] }),
           text: async () => '',
         };
       }
@@ -207,7 +207,7 @@ describe('MapViewMap vehicle track selection', () => {
     vi.restoreAllMocks();
   });
 
-  it('skips linear and selects route_tracks for vehicle track', async () => {
+  it('skips linear and selects non-linear geometry for vehicle track', async () => {
     // Create a single visible bus marker.
     const markers = [
       {
@@ -277,13 +277,13 @@ describe('MapViewMap vehicle track selection', () => {
         };
       }
 
-      // route_int succeeds with route_tracks.
+  // route_int succeeds with non-linear geometry.
       if (u.includes('route_int=RID2')) {
         return {
           ok: true,
           status: 200,
           headers: { get: () => 'application/json' },
-          json: async () => ({ source: 'route_tracks', coords: [[54.0, -2.8], [54.1, -2.7]] }),
+          json: async () => ({ source: 'route_link_tracks', coords: [[54.0, -2.8], [54.1, -2.7]] }),
           text: async () => '',
         };
       }
@@ -294,7 +294,7 @@ describe('MapViewMap vehicle track selection', () => {
           ok: true,
           status: 200,
           headers: { get: () => 'application/json' },
-          json: async () => ({ source: 'route_tracks', coords: [[54.0, -2.8], [54.05, -2.75]] }),
+          json: async () => ({ source: 'route_link_tracks', coords: [[54.0, -2.8], [54.05, -2.75]] }),
           text: async () => '',
         };
       }
@@ -454,7 +454,7 @@ describe('MapViewMap vehicle track selection', () => {
           ok: true,
           status: 200,
           headers: { get: () => 'application/json' },
-          json: async () => ({ source: 'route_tracks', coords: [] }),
+          json: async () => ({ source: 'route_link_tracks', coords: [] }),
           text: async () => '',
         };
       }
@@ -471,7 +471,7 @@ describe('MapViewMap vehicle track selection', () => {
         ok: true,
         status: 200,
         headers: { get: () => 'application/json' },
-        json: async () => ({ source: 'route_tracks', coords: [] }),
+  json: async () => ({ source: 'route_link_tracks', coords: [] }),
         text: async () => '',
       };
     });

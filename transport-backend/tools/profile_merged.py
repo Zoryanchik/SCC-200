@@ -63,7 +63,7 @@ def build_merged():
                 self.journey_to_route = [i % n_routes for i in range(n_journeys)]
                 self.route_metadata = [{} for _ in range(n_routes)]
                 self.journey_metadata = [{} for _ in range(n_journeys)]
-                self.route_tracks = [[] for _ in range(n_routes)]
+                # Legacy full-route polylines were removed; fragment geometry is stored elsewhere.
                 self.map_stops = DummyMapper(n_stops)
 
         bus_a = DummyData()

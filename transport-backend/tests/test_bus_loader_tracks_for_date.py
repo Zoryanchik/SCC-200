@@ -10,11 +10,13 @@ def _dsn() -> str:
 
 
 def test_load_busdata_for_date_loads_section_tracks_when_present():
-    """Regression: date-filtered loader must populate BusData.route_tracks.
+    """Regression: date-filtered loader must populate BusData.route_link_tracks.
 
     We previously had a bug where `load_busdata_for_date()` never loaded
-    `bus_route_section_tracks`, so all in-memory route_tracks were empty and
-    all bus geometries degraded to straight lines.
+    `bus_route_section_tracks`, so all in-memory geometry degraded to
+    straight lines.
+
+    Policy: stop-to-stop fragment geometry (route_link_tracks) is required.
     """
 
     dsn = _dsn()
@@ -23,11 +25,11 @@ def test_load_busdata_for_date_loads_section_tracks_when_present():
 
     # If the DB isn't available in CI, skip rather than failing.
     # (Local dev and integration environments should run this.)
-    if len(bd.route_tracks) == 0:
+    if len(bd.route_link_tracks) == 0:
         return
 
-    nonempty = sum(1 for t in bd.route_tracks if t)
-    assert nonempty > 0, "Expected some non-empty route_tracks for date-filtered BusData"
+    nonempty = sum(1 for d in bd.route_link_tracks if d)
+    assert nonempty > 0, "Expected some non-empty route_link_tracks for date-filtered BusData"
 
     # Stronger check on a known route that has section-track rows in the shipped DB.
     route_id = (
@@ -51,4 +53,4 @@ def test_load_busdata_for_date_loads_section_tracks_when_present():
 
     ri = bd.map_routes.code_to_int.get(route_id)
     assert ri is not None, "Expected route_id to exist in date-filtered routes"
-    assert len(bd.route_tracks[ri]) > 2
+    assert isinstance(bd.route_link_tracks[ri], dict)

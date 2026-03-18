@@ -54,7 +54,7 @@ def _fingerprint(merged):
         "routes": len(merged.route_stops),
         "journeys": len(merged.journey_times),
         "stops": len(merged.stop_to_routes),
-        "route_tracks": len(getattr(merged, "route_tracks", []) or []),
+    # full-route polylines were removed; fragment geometry is stored in route_link_tracks.
         "route_link_tracks": len(getattr(merged, "route_link_tracks", []) or []),
     }
 

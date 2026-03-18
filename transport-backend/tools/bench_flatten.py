@@ -46,7 +46,7 @@ def make_dummy_data(n_routes=50, n_journeys=200, n_stops=300):
             self.journey_to_route = [i % n_routes for i in range(n_journeys)]
             self.route_metadata = [{} for _ in range(n_routes)]
             self.journey_metadata = [{} for _ in range(n_journeys)]
-            self.route_tracks = [[] for _ in range(n_routes)]
+            # Legacy full-route polylines were removed; keep a placeholder attribute off by default.
             self.map_stops = DummyMapper(n_stops)
 
     return DummyData()

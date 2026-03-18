@@ -1,8 +1,8 @@
 """Regression: historical routing must use that day's in-memory caches.
 
-Bug: /route/leg-geometry resolved route_id tracks by scanning *any* loaded MergedData.
-In practice that often returned today's prebuilt merged timetable, so when the
-frontend routed for a different day, the drawn polyline was wrong.
+Bug: /route/leg-geometry resolved route_id geometry by scanning *any* loaded
+MergedData. In practice that often returned today's prebuilt merged timetable,
+so when the frontend routed for a different day, the drawn geometry was wrong.
 
 This test stubs the in-memory router cache with two different MergedData-like
 objects (today vs past). When requesting a past date, we must use the past

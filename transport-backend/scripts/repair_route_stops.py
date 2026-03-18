@@ -131,7 +131,7 @@ def main():
         print('Inserting desired rows...')
         for rid, atco, so in desired_rows:
             # Insert using the DB-resolved namespaced id so rows align with
-            # existing route_tracks/section_tracks stored under the same
+            # existing legacy-polylines/section_tracks stored under the same
             # prefix.
             cur.execute('INSERT INTO bus_route_stops (route_id, atco_code, stop_order) VALUES (%s, %s, %s)', (db_route, atco, so))
 

@@ -71,7 +71,6 @@ class MergedData:
         self.journey_to_route = []
         self.route_metadata = []
         self.journey_metadata = []
-        self.route_tracks = []
         self.route_link_tracks = []
 
         # Per-journey mode (BUS or TRAIN), filled during merge
@@ -97,7 +96,6 @@ class MergedData:
         journey_to_route_local = self.journey_to_route
         route_metadata_local = self.route_metadata
         journey_metadata_local = self.journey_metadata
-        route_tracks_local = self.route_tracks
         route_link_tracks_local = self.route_link_tracks
         journey_mode_local = self._journey_mode
         stop_mode_local = self._stop_mode
@@ -173,11 +171,6 @@ class MergedData:
             )
             journey_metadata_local.extend(
                 getattr(data, "journey_metadata", []) or [None] * n_journeys
-            )
-
-            # --- route_tracks (copy as-is, no remapping needed) ---
-            route_tracks_local.extend(
-                getattr(data, "route_tracks", []) or [[] for _ in range(n_routes)]
             )
 
             # --- route_link_tracks (remap stop ints + routes) ---
@@ -325,9 +318,9 @@ class MergedData:
         # Contract:
         # - `get_route_link_tracks(route_int)` returns a dict mapping
         #   (from_stop_int, to_stop_int) -> list[(lat, lon)].
-        # - If fragments already exist (loaded eagerly), it returns them.
-        # - If not, it derives fragments from `route_tracks[route_int]` by
-        #   splitting on stop coordinates from `route_stops[route_int]`.
+    # - If fragments already exist (loaded eagerly), it returns them.
+    # - If not, it attempts to fetch DB-backed fragments via an attached
+    #   BusLoader (merged.bus_loader).
         self._route_link_tracks_lock = threading.Lock()
 
     def _build_route_stop_departures(self, route_id_int: int):
@@ -420,91 +413,20 @@ class MergedData:
 
     # ── Route link track fragments ──────────────────────────────────
 
-    def _build_route_link_tracks_from_track(self, route_id_int: int):
-        """Derive per-link track fragments for a route from its full polyline.
-
-        This is a best-effort builder: if we can't split cleanly, it returns
-        an empty dict (callers should fall back to the full `route_tracks`).
-        """
-        try:
-            route_stops = self.route_stops[route_id_int]
-            if not route_stops or len(route_stops) < 2:
-                return {}
-
-            # Full track polyline: list[(lat, lon)]
-            track = self.route_tracks[route_id_int] if route_id_int < len(self.route_tracks) else None
-            if not track:
-                return {}
-
-            # Stop coordinates are stored on the route metadata if present.
-            # We try to locate them from route_tracks data itself (matching
-            # exact points) by scanning. This is intentionally conservative.
-            # If your dataset provides a faster / exact link fragment table,
-            # it will be used instead.
-            #
-            # Current bus loader builds fragments using stop point matches;
-            # we mimic that idea but keep it minimal.
-            #
-            # Strategy:
-            # - For each adjacent stop pair (fs, ts), find the first index in
-            #   `track` that equals stop i's coordinate and the last index that
-            #   equals stop i+1's coordinate; slice between them.
-            # - If we fail to find any stop coordinate matches, give up.
-
-            # Pull stop coordinates from route metadata if available.
-            meta = None
-            if route_id_int < len(self.route_metadata):
-                meta = self.route_metadata[route_id_int]
-
-            stop_points = None
-            if isinstance(meta, dict):
-                stop_points = meta.get('stop_points') or meta.get('stop_coords')
-
-            if not stop_points or len(stop_points) != len(route_stops):
-                return {}
-
-            # Normalize points into tuples so equality works.
-            stop_points = [tuple(p) for p in stop_points]
-            track_points = [tuple(p) for p in track]
-
-            # Build index list of stop positions in the polyline.
-            stop_idx = []
-            pos = 0
-            for sp in stop_points:
-                try:
-                    j = track_points.index(sp, pos)
-                except ValueError:
-                    return {}
-                stop_idx.append(j)
-                pos = j
-
-            out = {}
-            for i in range(len(route_stops) - 1):
-                fs = route_stops[i]
-                ts = route_stops[i + 1]
-                a = stop_idx[i]
-                b = stop_idx[i + 1]
-                if b <= a:
-                    continue
-                frag = track_points[a:b + 1]
-                if frag:
-                    out[(fs, ts)] = list(frag)
-            return out
-        except Exception:
-            return {}
-
     def get_route_link_tracks(self, route_id_int: int):
         """Lazy accessor for per-link route fragments for a given route."""
         if route_id_int < 0 or route_id_int >= len(self.route_link_tracks):
             return {}
 
         cached = self.route_link_tracks[route_id_int]
-        if cached:
+        # The merged structure initializes per-route slots to {}.
+        # An empty dict means "not built yet", not "built and empty".
+        if isinstance(cached, dict) and len(cached) > 0:
             return cached
 
         with self._route_link_tracks_lock:
             cached2 = self.route_link_tracks[route_id_int]
-            if cached2:
+            if isinstance(cached2, dict) and len(cached2) > 0:
                 return cached2
 
             # Preferred lazy path (ATCO-driven): if a BusLoader is attached,
@@ -562,16 +484,11 @@ class MergedData:
             except Exception:
                 built = None
 
+            # Policy: never derive fragments from full-route polylines. If DB-backed
+            # fragments aren't available, keep it empty and let callers decide the
+            # next-best geometry source explicitly.
             if built is None:
-                if os.environ.get('ROUTE_GEOM_TRACE') == '1':
-                    try:
-                        print('[link_tracks] fallback_build_from_track', {
-                            'route_int': int(route_id_int),
-                            'have_route_tracks': bool(self.route_tracks[route_id_int]) if route_id_int < len(self.route_tracks) else False,
-                        })
-                    except Exception:
-                        pass
-                built = self._build_route_link_tracks_from_track(route_id_int)
+                built = {}
             if os.environ.get('ROUTE_GEOM_TRACE') == '1':
                 try:
                     print('[link_tracks] built', {
@@ -580,7 +497,7 @@ class MergedData:
                     })
                 except Exception:
                     pass
-            # Store even empty dict so we don't repeatedly attempt.
+            # Store result. Note that an empty dict means "built but no fragments".
             self.route_link_tracks[route_id_int] = built
             return built
 
@@ -594,4 +511,4 @@ class _Empty:
     journey_to_route = []
     route_metadata = []
     journey_metadata = []
-    route_tracks = []
+    # full-route polylines intentionally removed

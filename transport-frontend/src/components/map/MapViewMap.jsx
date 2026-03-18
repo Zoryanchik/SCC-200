@@ -737,7 +737,7 @@ const JourneyRouteLayer = ({ segments }) => {
 				// Skip if we already fetched coords for this segment
 				if (seg._normKey && fetchedCoordsMap[seg._normKey]) continue;
 				// If the segment knows a canonical timetable route_int, pass it through so the backend
-				// can return clean stop-stitched geometry (and avoid messy raw route_tracks).
+				// can return clean stop-stitched geometry (and avoid messy raw route polylines).
 				const segRouteInt = (
 					seg?.route_int ??
 					seg?.routeInt ??
@@ -2291,7 +2291,7 @@ function HoverWinnerController({
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 																		// Best-effort: if backend provides canonical route_ints for this line,
-																		// try to fetch the in-memory route_tracks geometry and render it.
+																		// try to fetch fragment-based leg geometry and render it.
 																	try {
 																					const routeIntDirect = marker && (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) ? (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) : null;
 																					const routeIntsFromLabel = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
@@ -2301,7 +2301,7 @@ function HoverWinnerController({
 																			try { console.debug('[map] label route_ints/route_ids (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
 																			if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
 																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
-																				// but rely on route_int/route_id to return route_tracks.
+																				// but rely on route_int/route_id to return non-linear geometry.
 																			const eps = 0.0001;
 																					const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
 																					if (!candidates.length && routeIds && routeIds.length) {
@@ -2365,9 +2365,9 @@ function HoverWinnerController({
 																								try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																								continue;
 																						}
-																						try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																						try { console.debug('[map] leg-geometry selected non-linear geometry (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																						const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																						// If OSRM is up, snap the provided route_tracks geometry to roads.
+																						// If OSRM is up, snap the provided geometry to roads.
 																						// Best-effort only — fall back immediately to the raw coords.
 																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																						try {
@@ -2426,7 +2426,7 @@ function HoverWinnerController({
 																		} catch (e) { /* ignore */ }
 																		// No further fallback here.
 																		// If we didn't receive explicit per-vehicle track_coords from the feed,
-																		// we rely solely on /route/leg-geometry (route_tracks) flow kicked off
+																		// we rely solely on /route/leg-geometry flow kicked off
 																		// above. If that fails, we intentionally show no track.
 																		setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
 												try {
@@ -2452,7 +2452,7 @@ function HoverWinnerController({
 													try {
 														// IMPORTANT: Don't pass an AbortSignal for cached label fetch.
 														// We've seen these get aborted in practice ("Fetch is aborted"),
-														// which prevents us from ever discovering route_ids => route_tracks.
+															// which prevents us from ever discovering better route_ids for geometry.
 														const pos = marker && Array.isArray(marker.position) ? marker.position : null;
 														const labelData = await fetchRouteLabel(String(line), {
 															timeoutMs: 8000,
@@ -2461,7 +2461,7 @@ function HoverWinnerController({
 														});
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 																					// Best-effort: if backend provides canonical route_ints for this line,
-																					// try to fetch the in-memory route_tracks geometry and render it.
+																					// try to fetch fragment-based leg geometry and render it.
 														try {
 																						const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 																						const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
@@ -2524,7 +2524,7 @@ function HoverWinnerController({
 																						try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																						continue;
 																				}
-																				try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																				try { console.debug('[map] leg-geometry selected non-linear geometry (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																				// Hacky circular-route workaround:
 																				// Some circular lines (e.g. 6B) effectively have the same start/end stop.
 																				// The backend may return only one variant/arc per route_id, so stitch
@@ -2573,7 +2573,8 @@ function HoverWinnerController({
 																								if (!resp2 || !resp2.ok) continue;
 																								const data2 = await resp2.json();
 																								const norm2 = safeNormalizeCoords2(data2 && data2.coords);
-																								if (!(data2 && data2.source === 'route_tracks' && Array.isArray(norm2) && norm2.length >= 2)) continue;
+																									// Accept any non-linear geometry source; full route polylines are removed.
+																									if (!(data2 && data2.source !== 'linear' && Array.isArray(norm2) && norm2.length >= 2)) continue;
 
 																								// Choose orientation that best connects: append norm2, or append reversed norm2.
 																								const a = stitched;
@@ -2621,8 +2622,8 @@ function HoverWinnerController({
 																		try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
 																		continue;
 																	}
-																			if (data && data.source === 'route_tracks' && norm && norm.length >= 2) {
-																				try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																			if (data && data.source !== 'linear' && norm && norm.length >= 2) {
+																				try { console.debug('[map] leg-geometry selected geometry (post-route)', { line: String(line), rid, source: data && data.source, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																				break;
@@ -2644,7 +2645,7 @@ function HoverWinnerController({
 
 											// IMPORTANT: From here on, do not run any synchronous
 											// variant-selection / stop-based geometry logic. Those
-											// paths can overwrite a valid route_tracks polyline once
+															// paths can overwrite a valid non-linear polyline once
 											// it arrives, or cause us to accept fallback geometry.
 											// We only want the /route/leg-geometry route_id flow to
 											// populate coords.
@@ -3046,7 +3047,7 @@ function HoverWinnerController({
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 																	// Best-effort: if backend provides canonical route_ints for this line,
-																	// try to fetch the in-memory route_tracks geometry and render it.
+																	// try to fetch fragment-based leg geometry and render it.
 																	try {
 																		const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 																		const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
@@ -3058,7 +3059,7 @@ function HoverWinnerController({
 																		}
 																		if (candidates.length && pos && pos.length === 2) {
 																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
-																			// but rely on route_int/route_id to return route_tracks.
+																			// but rely on route_int/route_id to return non-linear geometry.
 																			const eps = 0.0001;
 																			for (const cand of candidates) {
 																				const raw = cand && cand.value != null ? cand.value : null;
@@ -3105,7 +3106,7 @@ function HoverWinnerController({
 																						return out;
 																					};
 																					norm = safeNormalizeCoords(data && data.coords);
-																					try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																					try { console.debug('[map] leg-geometry selected non-linear geometry (cached)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																					const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																					break;
@@ -3147,7 +3148,7 @@ function HoverWinnerController({
 												// Don't run the synchronous variant-selection logic below, because it can
 												// overwrite the just-fetched in-memory track/label overlay.
 												const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-												// Don't set coords to [] here — wait for route_tracks fetch to succeed.
+												// Don't set coords to [] here — wait for the non-linear geometry fetch to succeed.
 												setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
 												try {
 													try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
@@ -3176,7 +3177,7 @@ function HoverWinnerController({
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
 														// Best-effort: if backend provides canonical route_ints for this line,
-														// try to fetch the in-memory route_tracks geometry and render it.
+														// try to fetch fragment-based leg geometry and render it.
 														try {
 															const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 															const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
@@ -3215,7 +3216,7 @@ function HoverWinnerController({
 																		if (!Array.isArray(norm) || norm.length < 2) continue;
 																		if (data && data.source === 'linear') continue;
 																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																		// If OSRM is up, snap the provided route_tracks geometry to roads.
+																		// If OSRM is up, snap the provided geometry to roads.
 																		// Best-effort only — fall back immediately to the raw coords.
 																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																		try {

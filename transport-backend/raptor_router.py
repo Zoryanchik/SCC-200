@@ -324,7 +324,7 @@ class RaptorRouter:
                     # but makes the id available for subsequent geometry lookups.
                     try:
                         # Annotate the returned route with a dense route_int
-                        # that can be used for direct in-memory route_tracks lookup.
+                        # that can be used for direct in-memory fragment lookup.
                         route_int_for_tracks = None
                         for leg in lj.get('legs', []) or []:
                             try:
@@ -345,7 +345,7 @@ class RaptorRouter:
                     # Persist route geometries (if present) onto the logged
                     # journey so later geometry lookups can reconstruct
                     # a road-following polyline using OSRM when stored
-                    # route_tracks are missing.
+                    # fragment tracks are missing.
                     try:
                         if isinstance(fastest_route, dict) and 'routeGeometries' in fastest_route:
                             lj['routeGeometries'] = fastest_route.get('routeGeometries')

@@ -62,14 +62,33 @@ def main():
             detail['using_fallback'] = e.get('using_fallback')
         detail['stops'] = stops
 
-        # route track snippet
-        track = []
+        # Geometry diagnostics
+    # NOTE: full-route polylines were removed; geometry is provided via stop-to-stop
+        # link fragments (route_link_tracks).
+        link_tracks = None
         try:
-            track = merged.route_tracks[r_int] if r_int < len(merged.route_tracks) else []
+            link_tracks = merged.get_route_link_tracks()
         except Exception:
-            track = []
-        detail['route_tracks_len'] = len(track) if track else 0
-        detail['route_track_snippet'] = track[:6] if track else []
+            link_tracks = None
+
+        if isinstance(link_tracks, dict):
+            # We don't have route_int -> fragments directly anymore;
+            # report global availability and a small sample for debugging.
+            detail['route_link_tracks_links'] = len(link_tracks)
+            sample_keys = list(link_tracks.keys())[:5]
+            detail['route_link_tracks_sample_keys'] = sample_keys
+            # best-effort snippet: first fragment of the first sampled key
+            frag_snip = []
+            try:
+                if sample_keys:
+                    frags = link_tracks.get(sample_keys[0]) or []
+                    if frags and isinstance(frags[0], (list, tuple)):
+                        frag_snip = list(frags[0])[:6]
+            except Exception:
+                frag_snip = []
+            detail['route_link_tracks_sample_fragment_snippet'] = frag_snip
+        else:
+            detail['route_link_tracks_links'] = 0
 
         out['details'].append(detail)
 

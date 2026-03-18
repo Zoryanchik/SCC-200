@@ -21,6 +21,14 @@ if isinstance(_bl_mod, _MagicMock):
 BusLoader = _bl_mod.BusLoader
 
 
+def _connect_or_skip(loader: BusLoader):
+    """Return a DB connection, or skip this test module if DB isn't reachable."""
+    try:
+        return loader._connect()
+    except Exception as e:
+        pytest.skip(f"DB not reachable for integration-style loader test: {e}")
+
+
 def _cleanup(conn, prefix):
     cur = conn.cursor()
     cur.execute("DELETE FROM bus_journey_operating_profile WHERE journey_id LIKE %s", (f"{prefix}%",))
@@ -36,7 +44,7 @@ def test_per_file_namespacing_keeps_variants(tmp_path):
     assert both produce distinct namespaced route_ids and contiguous stop_order.
     """
     ld = BusLoader(BUS_DB_PATH)
-    conn = ld._connect()
+    conn = _connect_or_skip(ld)
 
     # anomaly_sources are stored under transport-backend/transport-backend/tmp/anomaly_sources
     base = os.path.join(os.path.dirname(__file__), "..", "transport-backend", "tmp", "anomaly_sources")
@@ -63,7 +71,7 @@ def test_per_file_namespacing_keeps_variants(tmp_path):
 
     # Re-open connection so we see the committed data from populate()
     conn.close()
-    conn = ld._connect()
+    conn = _connect_or_skip(ld)
     conn.autocommit = True
     cur = conn.cursor()
     # Verify distinct namespaced route_ids exist
@@ -96,11 +104,18 @@ def test_revision_aware_ingest_ignores_missing_revision():
     """
     ld = BusLoader(BUS_DB_PATH)
 
+    # Skip early if DB isn't reachable.
+    conn_probe = _connect_or_skip(ld)
+    conn_probe.close()
+
     # Ensure schema has revision columns
-    ld.create_schema()
+    try:
+        ld.create_schema()
+    except Exception as e:
+        pytest.skip(f"DB not reachable for integration-style loader test: {e}")
 
     tag = 'TESTREV'
-    conn = ld._connect()
+    conn = _connect_or_skip(ld)
     conn.autocommit = True
     _cleanup(conn, tag)
 
@@ -127,7 +142,7 @@ def test_revision_aware_ingest_ignores_missing_revision():
 
     # Re-open to see committed state
     conn.close()
-    conn = ld._connect()
+    conn = _connect_or_skip(ld)
     conn.autocommit = True
     cur = conn.cursor()
 
@@ -153,7 +168,7 @@ def test_revision_aware_ingest_ignores_missing_revision():
                 revision=200, tag=tag)
 
     conn.close()
-    conn = ld._connect()
+    conn = _connect_or_skip(ld)
     conn.autocommit = True
     cur = conn.cursor()
 

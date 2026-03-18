@@ -42,7 +42,7 @@ class _DummyMerged:
     journey_times: list[list[tuple[int, int | None, int | None]]]
     journey_to_route: list[int]
     journey_stop_index: list[dict]
-    route_tracks: list[list[tuple[float, float]]]
+    legacy_full_route_polyline: list[list[tuple[float, float]]]
     route_stops: list[list[int]]
     stop_metadata: list[str]
 
@@ -79,7 +79,7 @@ def test_staged_matching_prefers_origin_atco_time_latch(monkeypatch):
             ],
             journey_to_route=[0, 0],
             journey_stop_index=[{1: 0, 2: 1}, {0: 0, 1: 1, 3: 2}],
-        route_tracks=[[(54.0, -2.8), (54.01, -2.79)]],
+    legacy_full_route_polyline=[[(54.0, -2.8), (54.01, -2.79)]],
         route_stops=[[0, 1, 2, 3]],
         # stop_metadata length drives the matcher's spatial scan, so include
         # all stops we reference.
@@ -137,7 +137,7 @@ def test_staged_matching_falls_back_to_destination_then_origin_stop_time(monkeyp
         ],
         journey_to_route=[0, 0],
         journey_stop_index=[{0: 0, 2: 1}, {0: 0, 2: 1}],
-        route_tracks=[[(54.0, -2.8), (54.01, -2.79)]],
+        legacy_full_route_polyline=[[(54.0, -2.8), (54.01, -2.79)]],
         route_stops=[[0, 2]],
         stop_metadata=["Origin", "Mid", "DestA", "DestB"],
     )
