@@ -277,6 +277,19 @@ const JourneyRouteLayer = ({ segments }) => {
 	const map = useMap();
 	const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5050').replace(/\/$/, '');
 	const DEBUG_JOURNEY_ROUTE = String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || '').toLowerCase() === '1' || String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || '').toLowerCase() === 'true';
+	// Debug overlay toggle for hover-intent investigation.
+	// NOTE: this component lives outside MapViewMap's scope, so it must compute its
+	// own flag (it can't reference MapViewMap-local variables).
+	const showHoverDebugUi = React.useMemo(() => {
+		try {
+			if (typeof window === 'undefined') return false;
+			const qsEnabled = new URLSearchParams(window.location.search || '').get('hoverDebug') === '1';
+			const lsEnabled = !!(window.localStorage && window.localStorage.getItem('HOVER_INTENT_DEBUG_UI') === '1');
+			return qsEnabled || lsEnabled;
+		} catch (e) {
+			return false;
+		}
+	}, []);
 
 	// Local cache of fetched OSRM geometries for segments which lack a usable
 	// polyline. Keyed by segment _normKey so refreshes replace entries.
@@ -690,29 +703,7 @@ const JourneyRouteLayer = ({ segments }) => {
 
 	return (
 		<>
-			{showHoverDebugUi ? (
-				<div
-					style={{
-						position: 'fixed',
-						left: 12,
-						top: 12,
-						zIndex: 99999,
-						padding: '8px 10px',
-						borderRadius: 8,
-						background: 'rgba(0,0,0,0.75)',
-						color: '#fff',
-						fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-						fontSize: 12,
-						lineHeight: 1.3,
-						pointerEvents: 'none',
-						maxWidth: 360,
-					}}
-				>
-					<div>hoveredMarkerId: {String(hoveredMarkerId ?? '')}</div>
-					<div>activeHoverId: {String(activeHoverId ?? '')}</div>
-				</div>
-			) : null}
-				{renderSegments.map((seg, segIdx) => {
+			{renderSegments.map((seg, segIdx) => {
 					// Prefer any fetched OSRM geometry for segments that lacked a usable polyline
 					const actualCoords = (seg && seg._normKey && fetchedCoordsMap[seg._normKey]) ? fetchedCoordsMap[seg._normKey] : seg.coords;
 					if (!actualCoords || actualCoords.length < 2) return null;

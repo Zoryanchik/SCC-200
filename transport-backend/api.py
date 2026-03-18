@@ -5697,76 +5697,38 @@ async def bus_live_operator(
         # Diagnostic fields only computed when bus_provenance is enabled
         reject_reasons = None
         match_reason = None
-        if delay_s is None:
+
+        # Always attempt timetable matching so we can attach stable journey/route
+        # mapping fields (route_int + match_reason) even when the feed already
+        # provides a delay. The frontend uses this to decide whether a bus is
+        # "mapped" (and thus colored) per-refresh.
+        try:
+            # Prefer feed-supplied operator code when available in metadata
+            op_for_match = meta.get('operator_ref') if meta and isinstance(meta, dict) and meta.get('operator_ref') else _operator
+            # Normalize spacing: strip whitespace so comparisons are stable
             try:
-                # Prefer feed-supplied operator code when available in metadata
-                op_for_match = meta.get('operator_ref') if meta and isinstance(meta, dict) and meta.get('operator_ref') else _operator
-                # Normalize spacing: strip whitespace so comparisons are stable
-                try:
-                    if op_for_match is not None:
-                        op_for_match = str(op_for_match).strip()
-                except Exception:
-                    pass
-                matched = _compute_delay_from_timetable(
-                    line_ref, dest, lat_v, lon_v,
-                    return_jid=True,
-                    origin_dep_secs=origin_dep,
-                    origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
-                    operator_ref=op_for_match,
-                    strict_tol=600,
-                    feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
-                    feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
-                )
-                if matched:
-                    # matched is expected to be a (delay_s, route_int) tuple when return_jid=True.
-                    computed, matched_route_int = matched
+                if op_for_match is not None:
+                    op_for_match = str(op_for_match).strip()
+            except Exception:
+                pass
+            matched = _compute_delay_from_timetable(
+                line_ref, dest, lat_v, lon_v,
+                return_jid=True,
+                origin_dep_secs=origin_dep,
+                origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
+                operator_ref=op_for_match,
+                strict_tol=600,
+                feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+            )
+            if matched:
+                # matched is expected to be a (delay_s, route_int) tuple when return_jid=True.
+                computed, matched_route_int = matched
 
-                    # (None, None) means "no match" (not a contract violation).
-                    if computed is None or matched_route_int is None:
-                        computed = None
-                        matched_route_int = None
-                        if bus_provenance:
-                            try:
-                                reject_reasons = _diagnose_match_failure(
-                                    line_ref, dest, lat_v, lon_v,
-                                    origin_dep_secs=origin_dep,
-                                    origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
-                                    operator_ref=op_for_match,
-                                    strict_tol=600,
-                                    feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
-                                    feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
-                                )
-                            except Exception:
-                                reject_reasons = ['diagnosis_failed']
-
-                        # Only flag invalid_match_missing_route_int when the matcher claims
-                        # it found a delay but did not provide a route_int.
-                        if bus_provenance and computed is not None and matched_route_int is None:
-                            reject_reasons = reject_reasons or []
-                            if 'invalid_match_missing_route_int' not in reject_reasons:
-                                reject_reasons.append('invalid_match_missing_route_int')
-                            try:
-                                entry_match_dbg = {
-                                    'raw_match_return': repr(matched),
-                                    'raw_match_type': str(type(matched)),
-                                }
-                                meta_dbg = {
-                                    'line': line_ref,
-                                    'dest': dest,
-                                    'origin_dep_secs': origin_dep,
-                                    'operator_ref': op_for_match,
-                                    'origin_atco': (meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
-                                    'destination_atco': (meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
-                                }
-                                meta['_match_contract_debug'] = {'match': entry_match_dbg, 'ctx': meta_dbg}
-                            except Exception:
-                                pass
-                    else:
-                        if bus_provenance:
-                            match_reason = 'matched'
-                else:
+                # (None, None) means "no match" (not a contract violation).
+                if computed is None or matched_route_int is None:
                     computed = None
-                    # perform diagnosis to explain rejection only when provenance enabled
+                    matched_route_int = None
                     if bus_provenance:
                         try:
                             reject_reasons = _diagnose_match_failure(
@@ -5780,8 +5742,52 @@ async def bus_live_operator(
                             )
                         except Exception:
                             reject_reasons = ['diagnosis_failed']
-            except Exception:
+
+                    # Only flag invalid_match_missing_route_int when the matcher claims
+                    # it found a delay but did not provide a route_int.
+                    if bus_provenance and computed is not None and matched_route_int is None:
+                        reject_reasons = reject_reasons or []
+                        if 'invalid_match_missing_route_int' not in reject_reasons:
+                            reject_reasons.append('invalid_match_missing_route_int')
+                        try:
+                            entry_match_dbg = {
+                                'raw_match_return': repr(matched),
+                                'raw_match_type': str(type(matched)),
+                            }
+                            meta_dbg = {
+                                'line': line_ref,
+                                'dest': dest,
+                                'origin_dep_secs': origin_dep,
+                                'operator_ref': op_for_match,
+                                'origin_atco': (meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                                'destination_atco': (meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+                            }
+                            meta['_match_contract_debug'] = {'match': entry_match_dbg, 'ctx': meta_dbg}
+                        except Exception:
+                            pass
+                else:
+                    if bus_provenance:
+                        match_reason = 'matched'
+            else:
                 computed = None
+                matched_route_int = None
+                # perform diagnosis to explain rejection only when provenance enabled
+                if bus_provenance:
+                    try:
+                        reject_reasons = _diagnose_match_failure(
+                            line_ref, dest, lat_v, lon_v,
+                            origin_dep_secs=origin_dep,
+                            origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
+                            operator_ref=op_for_match,
+                            strict_tol=600,
+                            feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
+                            feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+                        )
+                    except Exception:
+                        reject_reasons = ['diagnosis_failed']
+        except Exception:
+            computed = None
+            matched_route_int = None
         # Prefer timetable-derived (computed) delay when we have a
         # confident timetable match (computed). Feed-supplied delays can
         # be incorrect or absurd; if we've matched a vehicle to a
