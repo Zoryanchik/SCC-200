@@ -29,6 +29,9 @@ export function useRouteLine() {
    */
   const toggleRoute = useCallback(
     async (line, opts = {}) => {
+      try {
+        console.debug('[useRouteLine] toggleRoute', { line: String(line), opts: opts ? { ...opts } : null, wasActive: activeRef.current.has(line) });
+      } catch (e) { /* ignore */ }
       if (activeRef.current.has(line)) {
         // Turn OFF — just remove from the active map
         activeRef.current.delete(line);
@@ -40,6 +43,7 @@ export function useRouteLine() {
       let data = cacheRef.current.get(line);
       if (!data) {
         try {
+          try { console.debug('[useRouteLine] fetching route line', { line: String(line), atcoCode: opts && opts.atcoCode ? String(opts.atcoCode) : null }); } catch (e) { /* ignore */ }
           if (opts && opts.atcoCode) {
             data = await fetchRouteLineAtStop(opts.atcoCode, line);
           } else {
@@ -54,6 +58,9 @@ export function useRouteLine() {
 
       const dashed = Boolean(opts && opts.atcoCode);
       activeRef.current.set(line, { data, style: { dashed } });
+      try {
+        console.debug('[useRouteLine] active route set', { line: String(line), dashed, variantsLen: data && Array.isArray(data.variants) ? data.variants.length : null });
+      } catch (e) { /* ignore */ }
       bump();
     },
     [bump],

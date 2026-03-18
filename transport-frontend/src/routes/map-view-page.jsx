@@ -150,6 +150,10 @@ const { data: trainDepartures, loading: trainLoading, error: trainError } = useL
 // STOMP/websocket is used only for train movements in this deployment.
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 
+// In this deployment we don't use websocket live updates for buses.
+// Keep this flag defined so UI chips can safely reference it.
+const busLiveConnected = false;
+
 // Track whether real API data has ever arrived so we know when to stop the mock animation.
 const [hasRealData, setHasRealData] = useState(false);
 
@@ -269,6 +273,9 @@ if ((Array.isArray(busLocations) && busLocations.length > 0) ||
       delayMinutes,
       operator: operatorName,
       bearing: bus.bearing ?? bus.Bearing ?? bus.bearing_degrees ?? bus.heading ?? bus.course ?? null,
+      // Canonical timetable route identifier used for strict, stop-stitched track lookup.
+      // Keep it top-level for MapViewMap click handling.
+      route_int: bus.route_int ?? bus.routeInt ?? meta?.route_int ?? meta?.routeInt ?? null,
       meta,
     });
   });

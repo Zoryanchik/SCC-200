@@ -111,53 +111,64 @@ const createCustomIcon = (type, color, label = null, bearing = null) => {
 	// Assemble SVG:
 	//  - rotating group (arrow + circle) → direction tracks bearing
 	//  - static group (text/icon) → always upright, never counter-rotated via brittle string hacks
-	let innerHtml;
-	if (hasBearing) {
-		innerHtml = `<g transform="rotate(${rot} ${cx} ${cx})">${arrowSvg}${circleEl}</g>${staticContent}`;
-	} else {
-		innerHtml = `${circleEl}${staticContent}`;
-	}
-
-	const svg = `<svg width="${S}" height="${S}" viewBox="0 0 ${S} ${S}" xmlns="http://www.w3.org/2000/svg">${innerHtml}</svg>`;
+	const rotDeg = hasBearing ? rot : 0;
+	const rotatingGroup = hasBearing
+		? `<g transform="rotate(${rotDeg} ${cx} ${cx})">${arrowSvg}${circleEl}</g>`
+		: circleEl;
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">${rotatingGroup}${staticContent}</svg>`;
 
 	return L.divIcon({
+		className: '',
 		html: svg,
-		className: 'custom-marker-icon',
 		iconSize: [hit, hit],
-		iconAnchor: [cx, cx],
-		popupAnchor: [0, -(cx + 2)],
+		iconAnchor: [hit / 2, hit / 2],
+		popupAnchor: [0, -hit / 2]
 	});
+
 };
 
+/**
+ * Small, high-contrast icon for the user's location.
+ */
 const createUserIcon = () => {
-	const svg = `<svg width="36" height="36" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
-		<circle cx="18" cy="18" r="16" fill="white" stroke="#F59E0B" stroke-width="3"/>
-		<circle cx="18" cy="18" r="6" fill="#F59E0B"/>
-	</svg>`;
-
+	const size = 18;
+	const r = 6;
+	const cx = size / 2;
+	const cy = size / 2;
+	const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">`
+		+ `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#1d4ed8" stroke="white" stroke-width="2"/>`
+		+ `</svg>`;
 	return L.divIcon({
-		html: svg,
-		className: 'custom-user-marker-icon',
-		iconSize: [36, 36],
-		iconAnchor: [18, 18],
-		popupAnchor: [0, -18]
+		className: '',
+		html,
+		iconSize: [size, size],
+		iconAnchor: [cx, cy],
+		popupAnchor: [0, -cy]
 	});
 };
 
 /**
- * Create a prominent endpoint icon (Start / Destination).
- * @param {string} color - fill color for the endpoint
- * @param {string} label - short label to render inside the icon ('S'|'D' or text)
+ * Create a simple circular endpoint marker icon with an optional letter.
  */
-const createEndpointIcon = (color = '#10B981', label = '') => {
-	const size = 36;
-	const c = size / 2;
-	const r = c - 2;
-	const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
-		<circle cx="${c}" cy="${c}" r="${r}" fill="${color}" stroke="#ffffff" stroke-width="3" />
-		<text x="${c}" y="${c}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Helvetica,sans-serif" font-size="12" font-weight="700" fill="#fff">${label}</text>
-	</svg>`;
-	return L.divIcon({ html: svg, className: 'endpoint-div-icon', iconSize: [size, size], iconAnchor: [c, c], popupAnchor: [0, -c] });
+const createEndpointIcon = (color, letter) => {
+	const size = 28;
+	const cx = size / 2;
+	const cy = size / 2;
+	const r = 11;
+	const text = (letter == null) ? '' : String(letter).substring(0, 1);
+	const html = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">`
+		+ `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" stroke="white" stroke-width="3"/>`
+		+ (text
+			? `<text x="${cx}" y="${cy + 0.5}" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Helvetica,sans-serif" font-size="12" font-weight="bold" fill="white">${text}</text>`
+			: '')
+		+ `</svg>`;
+	return L.divIcon({
+		className: '',
+		html,
+		iconSize: [size, size],
+		iconAnchor: [cx, cy],
+		popupAnchor: [0, -cy]
+	});
 };
 
 /**
@@ -204,12 +215,14 @@ const isBusMappedLocal = (m) => {
   if (m.mock === true) return true;
   if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
   const meta = m.meta || {};
-  const top = m.logged_journey_id || m.journey_id || m.route_id || null;
+	// Canonical mapping marker is now route_int; if we have it, the backend matched
+	// this vehicle to a timetable journey for this refresh.
+	const top = m.logged_journey_id || m.journey_id || m.route_id || m.route_int || null;
   if (top) return true;
   const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
   if (mr != null) return String(mr).toLowerCase() === 'matched';
   const keys = Object.keys(meta).map(k => String(k).toLowerCase());
-  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+	const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid', 'route_int', 'routeint'];
   for (const w of want) {
     if (keys.includes(w)) return true;
     if (meta[w] || meta[w.replace(/_/g, '')]) return true;
@@ -219,6 +232,77 @@ const isBusMappedLocal = (m) => {
 
 const TRAIN_ICON = createCustomIcon('train', '#2e7d32', null, null);
 const USER_ICON = createUserIcon();
+
+// --- OSRM snapping (best-effort) -----------------------------------------
+// Input/Output coords are always [lat, lon].
+// Uses OSRM /route as a lightweight road-following smoother. If OSRM isn't
+// reachable or returns an error, we fall back to the original coords.
+const OSRM_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OSRM_BASE)
+	? String(import.meta.env.VITE_OSRM_BASE)
+	: 'http://127.0.0.1:5012';
+
+const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 2500, maxWaypoints = 90 } = {}) => {
+	try {
+		if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
+		// Normalize to numbers and drop junk.
+		const norm = [];
+		for (const pt of coordsLatLon) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const lat = Number(pt[0]);
+			const lon = Number(pt[1]);
+			if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+			norm.push([lat, lon]);
+		}
+		if (norm.length < 2) return coordsLatLon;
+
+		// Downsample to keep URL size and OSRM compute reasonable.
+		let sampled = norm;
+		if (norm.length > maxWaypoints) {
+			const step = (norm.length - 1) / (maxWaypoints - 1);
+			sampled = [];
+			for (let i = 0; i < maxWaypoints; i++) {
+				const idx = Math.round(i * step);
+				sampled.push(norm[Math.min(norm.length - 1, Math.max(0, idx))]);
+			}
+			// De-dupe consecutive identical points.
+			const dedup = [];
+			for (const p of sampled) {
+				const last = dedup[dedup.length - 1];
+				if (!last || last[0] !== p[0] || last[1] !== p[1]) dedup.push(p);
+			}
+			sampled = dedup;
+			if (sampled.length < 2) return coordsLatLon;
+		}
+
+		const coordStr = sampled.map(([lat, lon]) => `${lon},${lat}`).join(';');
+		const url = `${OSRM_BASE.replace(/\/$/, '')}/route/v1/${encodeURIComponent(profile)}/${coordStr}?overview=full&geometries=geojson`;
+
+		const controller = new AbortController();
+		const t = setTimeout(() => controller.abort(), timeoutMs);
+		let resp;
+		try {
+			resp = await fetch(url, { signal: controller.signal });
+		} finally {
+			clearTimeout(t);
+		}
+		if (!resp || !resp.ok) return coordsLatLon;
+		const data = await resp.json();
+		const osrmCoords = data && data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+		if (!Array.isArray(osrmCoords) || osrmCoords.length < 2) return coordsLatLon;
+		// OSRM returns [lon, lat]
+		const out = [];
+		for (const pt of osrmCoords) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const lon = Number(pt[0]);
+			const lat = Number(pt[1]);
+			if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+			out.push([lat, lon]);
+		}
+		return out.length >= 2 ? out : coordsLatLon;
+	} catch (e) {
+		return coordsLatLon;
+	}
+};
 
 // Utility: project point P onto segment AB and return nearest point on segment
 const _projectPointOntoSegment = (px, py, ax, ay, bx, by) => {
@@ -652,6 +736,15 @@ const JourneyRouteLayer = ({ segments }) => {
 				if (!seg || !Array.isArray(seg.coords) || seg.coords.length >= 2) continue;
 				// Skip if we already fetched coords for this segment
 				if (seg._normKey && fetchedCoordsMap[seg._normKey]) continue;
+				// If the segment knows a canonical timetable route_int, pass it through so the backend
+				// can return clean stop-stitched geometry (and avoid messy raw route_tracks).
+				const segRouteInt = (
+					seg?.route_int ??
+					seg?.routeInt ??
+					seg?.meta?.route_int ??
+					seg?.meta?.routeInt ??
+					null
+				);
 				// Determine from/to points from neighbouring segments
 				let from = null;
 				let to = null;
@@ -671,7 +764,10 @@ const JourneyRouteLayer = ({ segments }) => {
 				if (!to && seg.coords && seg.coords.length) to = seg.coords[0];
 				if (!from || !to) continue;
 				try {
-					const url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(from[0])}&from_lon=${encodeURIComponent(from[1])}&to_lat=${encodeURIComponent(to[0])}&to_lon=${encodeURIComponent(to[1])}&mode=driving`;
+					let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(from[0])}&from_lon=${encodeURIComponent(from[1])}&to_lat=${encodeURIComponent(to[0])}&to_lon=${encodeURIComponent(to[1])}&mode=driving`;
+					if (segRouteInt != null && String(segRouteInt) !== '') {
+						url += `&route_int=${encodeURIComponent(String(segRouteInt))}`;
+					}
 					const resp = await fetch(url);
 					if (!resp.ok) continue;
 					const data = await resp.json();
@@ -1332,8 +1428,8 @@ export default function MapViewMap({
 	const beginHoverIntent = React.useCallback((marker) => {
 		try {
 			if (!marker || marker.type !== 'bus') return;
-			// Ignore unmatched/grey buses (no hover-card requests).
-			if (!isBusMappedLocal(marker)) return;
+			// Allow hover for unmatched/grey buses too.
+			// (They may still have useful labels even if they aren't matched to a timetable.)
 			// If we already have an active hover on a different marker, clear it now.
 			// This prevents “sticky” hover cards when sliding across dense clusters
 			// where mouseout sometimes doesn’t fire for the old marker.
@@ -1460,8 +1556,7 @@ const pickNearestVehicleMarker = ({ markers, map, latlng, radiusPx = DEFAULT_HOV
 		for (const m of markers) {
 			if (!m) continue;
 			if (m.type !== 'bus' && m.type !== 'train') continue;
-			// Only buses require a mapping check (grey/unmatched buses shouldn't be hoverable).
-			if (m.type === 'bus' && !isBusMappedLocal(m)) continue;
+			// Allow hover picking for grey/unmatched buses too.
 			const pos = Array.isArray(m.position) ? m.position : null;
 			if (!pos || pos.length < 2) continue;
 			const pt = map.latLngToLayerPoint({ lat: pos[0], lng: pos[1] });
@@ -1679,8 +1774,10 @@ function HoverWinnerController({
 	// Used to avoid stale async responses overwriting newer selections.
 	const selectedVehicleReqTokenRef = React.useRef(0);
 	// Cooldown to avoid rapid repeated clicks triggering overlapping async selection flows.
-	// Stores a timestamp (ms) until which bus clicks are ignored.
-	const busClickCooldownUntilRef = React.useRef(0);
+	// IMPORTANT: this is per-vehicle, not global — so clicking different buses
+	// after a refresh doesn't get “blocked” by a prior click.
+	// Map: vehicleId -> timestamp (ms) until which clicks for that vehicle are ignored.
+	const busClickCooldownByIdRef = React.useRef(new Map());
 
 	// Debugging: log when showRouteLines changes and when we clear routes
 	React.useEffect(() => {
@@ -1765,6 +1862,7 @@ function HoverWinnerController({
 	// SHOW_ALL_BUSES_DEBUG, allow the UI to fall back to nearest-geometry variant
 	// selection for debugging. Default is false in normal operation.
 	const debugShowAllBuses = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_ALL_BUSES_DEBUG') === '1');
+	const debugTrackClickFlow = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_TRACK_DEBUG') === '1');
 
 	// Cache routeData per-line so first-click has immediate access when possible.
 	const [routeDataCache, setRouteDataCache] = React.useState({});
@@ -2129,12 +2227,20 @@ function HoverWinnerController({
 									} catch (e) { /* ignore */ }
 
 									if (marker.type === 'bus') {
-										// Throttle bus clicks for 1 second after a handled click.
-										// This prevents overlapping async selection flows from rapid double-clicks.
+										// Throttle clicks for THIS bus for 1 second after a handled click.
+										// This prevents overlapping async selection for double-clicks,
+										// without blocking clicks on other buses.
 										try {
 											const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-											if (now < (busClickCooldownUntilRef.current || 0)) return;
-											busClickCooldownUntilRef.current = now + 1000;
+											const idKey = marker && marker.id != null ? String(marker.id) : null;
+											if (idKey) {
+												const until = busClickCooldownByIdRef.current.get(idKey) || 0;
+												if (now < until) {
+													if (debugTrackClickFlow) console.debug('[trackClick] dropped by cooldown', { id: idKey, remainingMs: Math.max(0, Math.round(until - now)) });
+												return;
+											}
+												busClickCooldownByIdRef.current.set(idKey, now + 1000);
+											}
 										} catch (e) {
 											// If anything goes wrong with timing APIs, don't block clicks.
 										}
@@ -2142,7 +2248,8 @@ function HoverWinnerController({
 											// This avoids falling back to route tracks/mock geometry for
 											// vehicles that aren't mapped to a timetable journey.
 											try {
-												if (!isBusMappedLocal(marker)) return;
+												const hasRouteInt = !!(marker && (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt));
+												if (!hasRouteInt && !isBusMappedLocal(marker)) return;
 											} catch (e) {
 												return;
 											}
@@ -2186,8 +2293,10 @@ function HoverWinnerController({
 																		// Best-effort: if backend provides canonical route_ints for this line,
 																		// try to fetch the in-memory route_tracks geometry and render it.
 																	try {
-																			const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
-																			const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
+																					const routeIntDirect = marker && (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) ? (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) : null;
+																					const routeIntsFromLabel = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
+																					const routeInts = [routeIntDirect, ...routeIntsFromLabel].filter((v, i, a) => v != null && a.indexOf(v) === i);
+																					const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 																		const pos = marker && Array.isArray(marker.position) ? marker.position : null;
 																			try { console.debug('[map] label route_ints/route_ids (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
 																			if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
@@ -2255,7 +2364,15 @@ function HoverWinnerController({
 																						}
 																						try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																						const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																						// If OSRM is up, snap the provided route_tracks geometry to roads.
+																						// Best-effort only — fall back immediately to the raw coords.
 																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																						try {
+																							const snapped = await osrmRouteCoordsLatLon(norm);
+																							if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
+																								setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
+																							}
+																						} catch (e) { /* ignore */ }
 																						break;
 																				} catch (je) {
 																					let txt = null;
@@ -2304,17 +2421,10 @@ function HoverWinnerController({
 																				return;
 																			}
 																		} catch (e) { /* ignore */ }
-																		// Default behaviour: do NOT do click-time geometry fetches.
-																		// Enable legacy fallback only for debugging.
-																		const allowClickTrackFallback = String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === '1'
-																			|| String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === 'true'
-																			|| String(import.meta.env.VITE_ALLOW_CLICK_TRACK_FALLBACK || '').toLowerCase() === 'yes';
-																		if (!allowClickTrackFallback) {
-																			setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
-																			try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
-																			return;
-																		}
-																		// Don't set coords to [] here — wait for route_tracks fetch to succeed.
+																		// No further fallback here.
+																		// If we didn't receive explicit per-vehicle track_coords from the feed,
+																		// we rely solely on /route/leg-geometry (route_tracks) flow kicked off
+																		// above. If that fails, we intentionally show no track.
 																		setSelectedVehicleTrack({ id: marker.id, coords: null, color, stops: [], label: null });
 												try {
 													try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
@@ -2412,8 +2522,83 @@ function HoverWinnerController({
 																						continue;
 																				}
 																				try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																				// Hacky circular-route workaround:
+																				// Some circular lines (e.g. 6B) effectively have the same start/end stop.
+																				// The backend may return only one variant/arc per route_id, so stitch
+																				// multiple route_ids together when available.
+																				let stitched = norm;
+																				try {
+																					if (Array.isArray(routeIds) && routeIds.length >= 2 && pos && pos.length === 2) {
+																						const primaryRid = (cand.kind === 'route_id') ? val : (routeIds && routeIds.length ? String(routeIds[0]) : null);
+																						if (primaryRid) {
+																							// Cap extra fetches so a pathological label doesn't spam requests.
+																							const maxExtras = 4;
+																							const extras = routeIds
+																								.map((v) => String(v))
+																								.filter((v) => v && v !== primaryRid)
+																								.slice(0, maxExtras);
+
+																							const safeNormalizeCoords2 = (raw) => {
+																									if (typeof normalizeCoords === 'function') return normalizeCoords(raw);
+																									if (!Array.isArray(raw)) return [];
+																									const out = [];
+																									for (const pt of raw) {
+																										if (!Array.isArray(pt) || pt.length < 2) continue;
+																										const a = Number(pt[0]);
+																										const b = Number(pt[1]);
+																										if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+																										out.push([a, b]);
+																									}
+																								return out;
+																							};
+
+																							const joinIfClose = (aIn, bIn) => {
+																								const a = Array.isArray(aIn) ? aIn : [];
+																								const b = Array.isArray(bIn) ? bIn : [];
+																								if (a.length < 2 || b.length < 2) return null;
+																								const lastA = a[a.length - 1];
+																								const firstB = b[0];
+																								const drop = lastA && firstB && lastA[0] === firstB[0] && lastA[1] === firstB[1];
+																								return drop ? a.concat(b.slice(1)) : a.concat(b);
+																							};
+
+																							for (const other of extras) {
+																								let url2 = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																								url2 += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																								url2 += `&mode=driving&route_id=${encodeURIComponent(other)}`;
+																								const resp2 = await fetch(url2);
+																								if (!resp2 || !resp2.ok) continue;
+																								const data2 = await resp2.json();
+																								const norm2 = safeNormalizeCoords2(data2 && data2.coords);
+																								if (!(data2 && data2.source === 'route_tracks' && Array.isArray(norm2) && norm2.length >= 2)) continue;
+
+																								// Choose orientation that best connects: append norm2, or append reversed norm2.
+																								const a = stitched;
+																								const b = norm2;
+																								const bRev = b.slice().reverse();
+																								const joinedFwd = joinIfClose(a, b);
+																								const joinedRev = joinIfClose(a, bRev);
+																								// If both possible, prefer the one that yields a longer path (usually means better continuity).
+																								if (joinedFwd && joinedRev) {
+																									stitched = joinedRev.length > joinedFwd.length ? joinedRev : joinedFwd;
+																								} else if (joinedFwd) {
+																									stitched = joinedFwd;
+																								} else if (joinedRev) {
+																									stitched = joinedRev;
+																								} else {
+																									// Last resort: just concatenate (better than dropping a segment).
+																									stitched = a.concat(b);
+																								}
+
+																								try { console.debug('[map] circular stitch applied (post-route)', { line: String(line), route_id_a: primaryRid, route_id_b: other, coordsLen: stitched.length }); } catch (e) { /* ignore */ }
+																							}
+																						}
+																				}
+																			} catch (e) {
+																			/* ignore */
+																		}
 																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
+																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: stitched, color } : { id: marker.id, coords: stitched, color, stops: [], label: null });
 																				break;
 																	} catch (je) {
 																		let txt = null;
@@ -2505,7 +2690,13 @@ function HoverWinnerController({
 														const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 														// Label will be attached asynchronously when/if the fetch completes.
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
+																setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
+																try {
+																	const snapped = await osrmRouteCoordsLatLon(norm);
+																	if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
+																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
+																	}
+																} catch (e) { /* ignore */ }
 														try { 
 															// Notify parent of the popup open and its signature (optional)
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
@@ -2516,7 +2707,13 @@ function HoverWinnerController({
 													if (stops.length >= 2) {
 														const norm = stops.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-														setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
+																setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
+																try {
+																	const snapped = await osrmRouteCoordsLatLon(norm);
+																	if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
+																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
+																	}
+																} catch (e) { /* ignore */ }
 														try { 
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																																																																																																						// Intentionally not opening click popup (hover tooltips only).
@@ -2555,7 +2752,13 @@ function HoverWinnerController({
 
 											const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 											const stops = Array.isArray(best.variant && best.variant.stops) ? stopsToLatLngs(best.variant.stops) : [];
-											setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
+															setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
+															try {
+																const snapped = await osrmRouteCoordsLatLon(best.norm);
+																if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
+																	setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
+																}
+															} catch (e) { /* ignore */ }
 											try { 
 												try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																																																																																																						// Intentionally not opening click popup (hover tooltips only).
@@ -2839,37 +3042,44 @@ function HoverWinnerController({
 														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
-																	// Best-effort: if backend provides canonical route_ids for this line,
+																	// Best-effort: if backend provides canonical route_ints for this line,
 																	// try to fetch the in-memory route_tracks geometry and render it.
 																	try {
+																		const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 																		const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 																		const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-																		try { console.debug('[map] label route_ids (cached)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-																		if (routeIds && routeIds.length && pos && pos.length === 2) {
+																		try { console.debug('[map] label route_ints/route_ids (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+																		const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
+																		if (!candidates.length && routeIds && routeIds.length) {
+																			candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
+																		}
+																		if (candidates.length && pos && pos.length === 2) {
 																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
-																			// but rely on route_id to return route_tracks.
+																			// but rely on route_int/route_id to return route_tracks.
 																			const eps = 0.0001;
-																			for (const ridRaw of routeIds) {
-																				const rid = ridRaw != null ? String(ridRaw) : null;
-																				if (!rid) continue;
-																				try { console.debug('[map] trying route_id (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																			for (const cand of candidates) {
+																				const raw = cand && cand.value != null ? cand.value : null;
+																				const val = raw != null ? String(raw) : null;
+																				if (!val) continue;
+																				try { console.debug('[map] trying leg-geometry candidate (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																				let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																				url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
-																				url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
-																				try { console.debug('[map] leg-geometry request (cached)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																				url += `&mode=driving`;
+																				url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																				try { console.debug('[map] leg-geometry request (cached)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																				const controllerGeom = new AbortController();
 																				const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
 																				const resp = await fetch(url, { signal: controllerGeom.signal });
 																				clearTimeout(tgeom);
 																				if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
-																					try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					try { console.debug('[map] token mismatch after fetch (cached) — stopping', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																					break;
 																				}
 																				if (!resp) {
-																					try { console.debug('[map] leg-geometry no response (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																					try { console.debug('[map] leg-geometry no response (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																					continue;
 																				}
-																				try { console.debug('[map] leg-geometry status (cached)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
+																				try { console.debug('[map] leg-geometry status (cached)', { line: String(line), kind: cand.kind, val, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
 																				if (!resp.ok) continue;
 																				let data = null;
 																				let norm = null;
@@ -2892,7 +3102,7 @@ function HoverWinnerController({
 																						return out;
 																					};
 																					norm = safeNormalizeCoords(data && data.coords);
-																					try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																					try { console.debug('[map] leg-geometry selected route_tracks (cached)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																					const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																					break;
@@ -2902,7 +3112,8 @@ function HoverWinnerController({
 																					try {
 																						console.debug('[map] leg-geometry parse/process failed (cached)', {
 																							line: String(line),
-																							rid,
+																							kind: cand ? cand.kind : null,
+																							val,
 																							error: je && je.message ? je.message : String(je),
 																							contentType: resp.headers ? resp.headers.get('content-type') : null,
 																							textSample: txt ? String(txt).slice(0, 300) : null,
@@ -2911,7 +3122,7 @@ function HoverWinnerController({
 																					continue;
 																				}
 																				if (data && data.source === 'linear') {
-																					try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
+																				try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), kind: cand ? cand.kind : null, val, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
 																					continue;
 																				}
 																			}
@@ -2961,81 +3172,58 @@ function HoverWinnerController({
 														const labelData = await fetchRouteLabel(String(line), { signal: controllerLabel.signal, timeoutMs: 5000 });
 														clearTimeout(tlabel);
 															if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
-														// Best-effort: if backend provides canonical route_ids for this line,
+														// Best-effort: if backend provides canonical route_ints for this line,
 														// try to fetch the in-memory route_tracks geometry and render it.
 														try {
+															const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 															const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 															const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-														try { console.debug('[map] label route_ids (post-route)', { line: String(line), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-															if (routeIds && routeIds.length && pos && pos.length === 2) {
+															try { console.debug('[map] label route_ints/route_ids (post-route)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
+															const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
+															if (!candidates.length && routeIds && routeIds.length) {
+																candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
+															}
+															if (candidates.length && pos && pos.length === 2) {
 																const eps = 0.0001;
-																for (const ridRaw of routeIds) {
-																	const rid = ridRaw != null ? String(ridRaw) : null;
-																	if (!rid) continue;
-																	try { console.debug('[map] trying route_id (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																for (const cand of candidates) {
+																	const raw = cand && cand.value != null ? cand.value : null;
+																	const val = raw != null ? String(raw) : null;
+																	if (!val) continue;
+																	try { console.debug('[map] trying leg-geometry candidate (post-route)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																	let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																	url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
-																	url += `&mode=driving&route_id=${encodeURIComponent(rid)}`;
-																	try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), rid, url }); } catch (e) { /* ignore */ }
+																	url += `&mode=driving`;
+																	url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																	try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																	const controllerGeom = new AbortController();
 																	const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
 																	const resp = await fetch(url, { signal: controllerGeom.signal });
 																	clearTimeout(tgeom);
 																	if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
-																		try { console.debug('[map] token mismatch after fetch (post-route) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																		try { console.debug('[map] token mismatch after fetch (post-route) — stopping', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																		break;
 																	}
-																	if (!resp) {
-																		try { console.debug('[map] leg-geometry no response (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
-																		continue;
-																	}
-																	try { console.debug('[map] leg-geometry status (post-route)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
-																	if (!resp.ok) continue;
+																	if (!resp || !resp.ok) continue;
 																	let data = null;
 																	let norm = null;
 																	try {
 																		data = await resp.json();
-																		const safeNormalizeCoords = (raw) => {
-																			if (typeof normalizeCoords === 'function') return normalizeCoords(raw);
-																			if (!Array.isArray(raw)) return [];
-																			const out = [];
-																			for (const pt of raw) {
-																				if (!Array.isArray(pt) || pt.length < 2) continue;
-																				const a = Number(pt[0]);
-																				const b = Number(pt[1]);
-																				if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
-																				out.push([a, b]);
-																			}
-																			return out;
-																		};
-																		norm = safeNormalizeCoords(data && data.coords);
-																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
+																		norm = (typeof normalizeCoords === 'function') ? normalizeCoords(data && data.coords) : (data && data.coords);
+																		if (!Array.isArray(norm) || norm.length < 2) continue;
+																		if (data && data.source === 'linear') continue;
 																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																		// If OSRM is up, snap the provided route_tracks geometry to roads.
+																		// Best-effort only — fall back immediately to the raw coords.
 																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																		break;
-																	} catch (je) {
-																		let txt = null;
-																		try { txt = await resp.text(); } catch (te) { /* ignore */ }
 																		try {
-																			console.debug('[map] leg-geometry parse/process failed (post-route)', {
-																				line: String(line),
-																				rid,
-																				error: je && je.message ? je.message : String(je),
-																				contentType: resp.headers ? resp.headers.get('content-type') : null,
-																				textSample: txt ? String(txt).slice(0, 300) : null,
-																			});
+																			const snapped = await osrmRouteCoordsLatLon(norm);
+																			if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
+																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
+																			}
 																		} catch (e) { /* ignore */ }
+																	break;
+																	} catch (_je) {
 																		continue;
-																	}
-																	if (data && data.source === 'linear') {
-																		try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
-																		continue;
-																	}
-																	if (norm && norm.length >= 2 && data && data.source === 'route_tracks') {
-																		try { console.debug('[map] leg-geometry selected route_tracks (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																		break;
 																	}
 																}
 															}

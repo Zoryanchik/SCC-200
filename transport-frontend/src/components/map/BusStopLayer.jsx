@@ -298,6 +298,9 @@ export default function BusStopLayer({
     // Signature supports passing stop context so ambiguous lines (e.g. "1")
     // can be resolved locally.
     window.__busRouteToggle = async (line, atcoCode = null, lat = null, lon = null) => {
+      try {
+        console.debug('[BusStopLayer] __busRouteToggle invoked', { line: String(line), atcoCode, lat, lon });
+      } catch (e) { /* ignore */ }
       if (toggleRef.current) await toggleRef.current(line, { atcoCode, lat, lon });
       // After the async toggle resolves, sync every visible chip for this line.
       if (isRouteActiveRef.current) {

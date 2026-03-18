@@ -2,7 +2,7 @@
  * Unit-ish coverage for the bus-click "vehicle track" flow living inside MapViewMap.
  *
  * What we want to lock in:
- * - label endpoint returns multiple route_ids
+ * - label endpoint returns multiple route_ints (preferred)
  * - /route/leg-geometry may return `source: "linear"` for some route_ids
  * - we should keep trying until we find `source: "route_tracks"`
  * - and then render the vehicle track polyline
@@ -142,9 +142,16 @@ describe('MapViewMap vehicle track selection', () => {
       line: '1A',
       variant_count: 2,
       route_ints: ['RID1', 'RID2'],
-      route_ids: ['RID1', 'RID2'],
+      // route_ids are legacy fallback only.
+      route_ids: [],
     });
 
+            // Vehicle track selection behavior:
+            // - we use /route/leg-geometry with route_int / route_id to fetch stored `route_tracks`
+            // - /route/leg-geometry may return `source: "linear"` for some route_ids
+            // - we should keep trying until we find `source: "route_tracks"`
+            // - we do NOT fall back to stitched/non-stop geometry; if route_tracks isn't available,
+            //   we show no track.
 		// MapViewMap prefetches route data for visible markers.
 		fetchRouteLineWithFallbackMock.mockResolvedValue({
 			line: '1A',
@@ -246,6 +253,94 @@ describe('MapViewMap vehicle track selection', () => {
 
     // Sanity: confirm we didn't render the legacy React-based vehicle-track elements.
     expect(queryAllByTestId('vehicle-track')).toHaveLength(0);
+  });
+
+  it('attempts extra route_id geometry fetches when route_int succeeds but label contains multiple route_ids (circular stitch)', async () => {
+    fetchRouteLabelMock.mockResolvedValue({
+      line: '6B',
+      variant_count: 2,
+      // Pretend the backend matched and provides route_int that will succeed.
+      route_ints: ['RID2'],
+      // But also provides multiple route_ids for circular variants.
+      route_ids: ['RIDA', 'RIDB', 'RIDC'],
+    });
+
+    global.fetch = vi.fn(async (url) => {
+      const u = String(url);
+      if (!u.includes('/route/leg-geometry')) {
+        return {
+          ok: false,
+          status: 404,
+          headers: new Map(),
+          json: async () => ({}),
+          text: async () => 'not found',
+        };
+      }
+
+      // route_int succeeds with route_tracks.
+      if (u.includes('route_int=RID2')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ source: 'route_tracks', coords: [[54.0, -2.8], [54.1, -2.7]] }),
+          text: async () => '',
+        };
+      }
+
+      // route_ids also succeed so stitches can occur.
+      if (u.includes('route_id=RIDA') || u.includes('route_id=RIDB') || u.includes('route_id=RIDC')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ source: 'route_tracks', coords: [[54.0, -2.8], [54.05, -2.75]] }),
+          text: async () => '',
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ source: 'linear', coords: [] }),
+        text: async () => '',
+      };
+    });
+
+    const markers = [
+      {
+        id: 'bus-6b',
+        type: 'bus',
+        position: [54.0, -2.8],
+        routeNumber: '6B',
+        delayMinutes: 0,
+        meta: { match_reason: 'matched', logged_journey_id: 'JID-6B' },
+      },
+    ];
+
+    const { getByTestId } = render(
+      <MapViewMap
+        filteredMarkers={markers}
+        showRouteLines={false}
+        journeyRoute={null}
+        onOpenPopup={() => {}}
+        onClosePopup={() => {}}
+        onOpenPopupSignature={() => {}}
+        onMoveEnd={() => {}}
+        onMapReady={() => {}}
+      />,
+    );
+
+    fireEvent.click(getByTestId('marker'));
+
+    await waitFor(() => {
+      const calledUrls = global.fetch.mock.calls.map((c) => String(c[0]));
+      // We should have fetched the base route_int geometry...
+      expect(calledUrls.some((u) => u.includes('route_int=RID2'))).toBe(true);
+      // ...and then tried at least one route_id extra segment.
+      expect(calledUrls.some((u) => u.includes('route_id=RID'))).toBe(true);
+    });
   });
 
   it('does nothing when clicking an unmatched (grey) bus', async () => {

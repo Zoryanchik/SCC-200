@@ -2,6 +2,88 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Polyline, CircleMarker, Tooltip } from 'react-leaflet';
 import { stopsToLatLngs } from '../../services/routeLineApi';
 
+// Best-effort OSRM snapping for route overlays.
+// Input/Output coords are [lat, lon].
+const OSRM_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OSRM_BASE)
+  ? String(import.meta.env.VITE_OSRM_BASE)
+  : 'http://127.0.0.1:5012';
+
+const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 2500, maxWaypoints = 90 } = {}) => {
+  try {
+    if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
+    const norm = [];
+    for (const pt of coordsLatLon) {
+      if (!Array.isArray(pt) || pt.length < 2) continue;
+      const lat = Number(pt[0]);
+      const lon = Number(pt[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      norm.push([lat, lon]);
+    }
+    if (norm.length < 2) return coordsLatLon;
+
+    let sampled = norm;
+    if (norm.length > maxWaypoints) {
+      const step = (norm.length - 1) / (maxWaypoints - 1);
+      sampled = [];
+      for (let i = 0; i < maxWaypoints; i++) {
+        const idx = Math.round(i * step);
+        sampled.push(norm[Math.min(norm.length - 1, Math.max(0, idx))]);
+      }
+      const dedup = [];
+      for (const p of sampled) {
+        const last = dedup[dedup.length - 1];
+        if (!last || last[0] !== p[0] || last[1] !== p[1]) dedup.push(p);
+      }
+      sampled = dedup;
+      if (sampled.length < 2) return coordsLatLon;
+    }
+
+    const coordStr = sampled.map(([lat, lon]) => `${lon},${lat}`).join(';');
+    const url = `${OSRM_BASE.replace(/\/$/, '')}/route/v1/${encodeURIComponent(profile)}/${coordStr}?overview=full&geometries=geojson`;
+
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    let resp;
+    try {
+      resp = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!resp || !resp.ok) return coordsLatLon;
+    const data = await resp.json();
+    const osrmCoords = data && data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+    if (!Array.isArray(osrmCoords) || osrmCoords.length < 2) return coordsLatLon;
+    const out = [];
+    for (const pt of osrmCoords) {
+      if (!Array.isArray(pt) || pt.length < 2) continue;
+      const lon = Number(pt[0]);
+      const lat = Number(pt[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      out.push([lat, lon]);
+    }
+    return out.length >= 2 ? out : coordsLatLon;
+  } catch (e) {
+    return coordsLatLon;
+  }
+};
+
+const buildSnapKey = (coords, { maxPts = 12 } = {}) => {
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const take = Math.min(maxPts, coords.length);
+  const step = (coords.length - 1) / Math.max(1, (take - 1));
+  const parts = [];
+  for (let i = 0; i < take; i++) {
+    const idx = Math.round(i * step);
+    const p = coords[Math.min(coords.length - 1, Math.max(0, idx))];
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const lat = Number(p[0]);
+    const lon = Number(p[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    parts.push(`${lat.toFixed(5)},${lon.toFixed(5)}`);
+  }
+  return parts.length >= 2 ? parts.join('|') : null;
+};
+
 /**
  * Leaflet tooltips open immediately on hover by default; this wrapper delays
  * mounting the Tooltip so users must dwell on the feature for a short time
@@ -188,9 +270,40 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
         };
 
         const hasSaneGeom = Boolean(variant.geometry && isGeometrySane(variant.geometry, stopPositions));
-        const positions = hasSaneGeom
+        const basePositions = hasSaneGeom
           ? chaikinSmooth(insertStopsIntoGeometry(variant.geometry, stopPositions), 1)
           : stopPositions;
+
+        // Always try OSRM snapping when available; fall back silently.
+        // Cache by a small key so we don't spam OSRM on re-renders.
+        const [snapped, setSnapped] = useState(null);
+        const snapKey = useMemo(
+          () => buildSnapKey(basePositions),
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+          [variant && variant.route_id, basePositions && basePositions.length, hasSaneGeom],
+        );
+
+        useEffect(() => {
+          let cancelled = false;
+          if (!snapKey || !Array.isArray(basePositions) || basePositions.length < 2) {
+            setSnapped(null);
+            return () => { cancelled = true; };
+          }
+          (async () => {
+            try {
+              const out = await osrmRouteCoordsLatLon(basePositions);
+              if (cancelled) return;
+              setSnapped((Array.isArray(out) && out.length >= 2) ? out : null);
+            } catch (e) {
+              if (cancelled) return;
+              setSnapped(null);
+            }
+          })();
+          return () => { cancelled = true; };
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [snapKey]);
+
+        const positions = (Array.isArray(snapped) && snapped.length >= 2) ? snapped : basePositions;
         
         
         if (positions.length < 2) return null;

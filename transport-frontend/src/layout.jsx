@@ -162,7 +162,14 @@ export default function AppLayout({ children }) {
 							<Typography 
 								variant="h6" 
 								fontWeight={700} 
-								sx={{ letterSpacing: 0.4, textAlign: { xs: "center", sm: "left" }, fontSize: { xs: "1.05rem", sm: "1.25rem" }, lineHeight: 1.2 }}
+								sx={{
+									letterSpacing: 0.4,
+									textAlign: { xs: "center", sm: "left" },
+									fontSize: { xs: "1.05rem", sm: "1.25rem" },
+									lineHeight: 1.2,
+									whiteSpace: 'nowrap',
+									minWidth: 0,
+								}}
 								component="h1"
 							>
 									Lancashire Transport

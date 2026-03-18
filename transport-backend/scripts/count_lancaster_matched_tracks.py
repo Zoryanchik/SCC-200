@@ -12,9 +12,11 @@ How it works
 2) For each matched record, determine a leading route_id candidate:
    - prefer `logged_journey_id`
    - else try `journey_id` (if present; some payloads use this field)
-3) For each candidate, request /route/leg-geometry?route_id=... and classify response.
+3) For each candidate, request /route/leg-geometry?route_int=... (preferred) and classify response.
+    Fall back to route_id only if route_int is unavailable.
 
 This mirrors what the frontend uses (it queries /route/leg-geometry for each route_id).
+This mirrors what the frontend should use (it prefers /route/leg-geometry with route_int).
 
 Usage
 - Start backend locally (port 5050 as in existing scripts)
@@ -73,15 +75,21 @@ def _debug_route_tracks_url(backend: str, route_id: str) -> str:
     return f"{backend.rstrip('/')}/debug/route-tracks/{urllib.parse.quote(route_id, safe='')}"
 
 
-def _leg_geometry_url(backend: str, route_id: str) -> str:
-    q = urllib.parse.urlencode({"route_id": route_id})
+def _leg_geometry_url(backend: str, *, route_int: str | None = None, route_id: str | None = None) -> str:
+    params: dict[str, str] = {}
+    if route_int is not None and str(route_int) != "":
+        params["route_int"] = str(route_int)
+    elif route_id is not None and str(route_id) != "":
+        params["route_id"] = str(route_id)
+    q = urllib.parse.urlencode(params)
     return f"{backend.rstrip('/')}/route/leg-geometry?{q}"
 
 
 def _leg_geometry_url_with_coords(
     backend: str,
-    route_id: str,
     *,
+    route_int: str | None = None,
+    route_id: str | None = None,
     from_lat: float,
     from_lon: float,
     to_lat: float,

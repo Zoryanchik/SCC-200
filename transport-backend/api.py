@@ -1506,7 +1506,35 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                     break
                     if merged is not None:
                         ri = int(route_int)
-                        # If we have stop context, prefer stitching from fragment index.
+                        # If caller didn't provide stop ids, derive endpoints from this
+                        # route's stop list (first/last) so we stitch the *whole* route.
+                        # This avoids returning raw `merged.route_tracks[ri]` geometry
+                        # that may not be aligned to stops.
+                        if merged is not None and (from_stop_id is None or to_stop_id is None):
+                            try:
+                                route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+                            except Exception:
+                                route_stops = []
+                            if route_stops and len(route_stops) >= 2:
+                                try:
+                                    if from_stop_id is None:
+                                        c0 = merged.get_atco_code(route_stops[0])
+                                        if c0:
+                                            from_stop_id = str(c0).strip()
+                                    if to_stop_id is None:
+                                        c1 = merged.get_atco_code(route_stops[-1])
+                                        if c1:
+                                            to_stop_id = str(c1).strip()
+                                    if trace:
+                                        print('[route_leg_geometry] derived_stop_ids', {
+                                            'route_int': ri,
+                                            'from_stop_id': from_stop_id,
+                                            'to_stop_id': to_stop_id,
+                                        })
+                                except Exception:
+                                    pass
+
+                        # Prefer stitching from fragment index when we have stop context.
                         if merged is not None and from_stop_id and to_stop_id:
                             try:
                                 # Prefer a lazy accessor when available; otherwise
@@ -1593,10 +1621,11 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                             except Exception:
                                 frag_seg = []
 
-                        if 0 <= ri < len(getattr(merged, 'route_tracks', []) or []):
-                            pts = merged.route_tracks[ri]
-                            if pts:
-                                tracks = [[t[0], t[1]] for t in pts]
+                        # IMPORTANT: do NOT return raw merged.route_tracks[ri] when
+                        # route_int is provided. If fragment stitching isn't available,
+                        # we fall through to OSRM/linear fallback rather than emitting
+                        # a potentially messy non-stop-stitched polyline.
+                        tracks = []
                 except Exception:
                     tracks = []
 
@@ -3898,7 +3927,7 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
-def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False, origin_dep_secs: int = None, operator_ref: str = None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0, allow_offtrack: bool = False, allow_abs_delay: bool = False):
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False, origin_dep_secs: int = None, operator_ref: str = None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0, allow_offtrack: bool = False, allow_abs_delay: bool = False, return_debug: bool = False):
     """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
 
     Stable algorithm – designed to return consistent results across
@@ -3946,6 +3975,166 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         merged, router, walking = get_router_for_date(today, start_time=now_seconds, apply_delay=False)
     except Exception:
         return None
+
+    # --- provenance/debug: capture what actually blocked matching ---
+    _dbg: dict[str, Any] = {
+        'line': (line_ref or '').split(':')[-1].strip() if line_ref else None,
+        'operator_ref': operator_ref,
+        'origin_dep_secs': origin_dep_secs,
+        'origin_atco': (str(feed_origin_atco).strip() if feed_origin_atco else None),
+        'destination_atco': (str(feed_destination_atco).strip() if feed_destination_atco else None),
+    }
+
+    def _dbg_cand_dist(name: str, cands: list[tuple] | list[int] | set[int]) -> None:
+        """Record a small neg/pos distribution snapshot for candidate journeys.
+
+        `cands` can be:
+        - list[(j_id, start_dep, end_arr, r_int)]
+        - list[j_id] / set[j_id]
+        """
+        if not return_debug:
+            return
+        try:
+            # Normalise to journey ids
+            if not cands:
+                _dbg.setdefault('candidate_trace', []).append({'stage': name, 'n': 0})
+                return
+            if isinstance(next(iter(cands)), tuple):
+                jids = [int(x[0]) for x in cands]  # type: ignore[index]
+            else:
+                jids = [int(x) for x in cands]  # type: ignore[arg-type]
+            neg = 0
+            pos = 0
+            unknown = 0
+            sd_min = None
+            sd_max = None
+            neg_ex = []
+            pos_ex = []
+            for jid in jids:
+                try:
+                    jt = merged.journey_times[jid]
+                    if not jt:
+                        unknown += 1
+                        continue
+                    sd = jt[0][2]
+                    if sd is None:
+                        unknown += 1
+                        continue
+                    sd = int(sd)
+                except Exception:
+                    unknown += 1
+                    continue
+                if sd_min is None or sd < sd_min:
+                    sd_min = sd
+                if sd_max is None or sd > sd_max:
+                    sd_max = sd
+                if sd < 0:
+                    neg += 1
+                    if len(neg_ex) < 3:
+                        neg_ex.append(jid)
+                else:
+                    pos += 1
+                    if len(pos_ex) < 3:
+                        pos_ex.append(jid)
+            rec = {
+                'stage': name,
+                'n': int(len(jids)),
+                'neg_n': int(neg),
+                'pos_n': int(pos),
+                'unknown_n': int(unknown),
+                'start_dep_min': int(sd_min) if sd_min is not None else None,
+                'start_dep_max': int(sd_max) if sd_max is not None else None,
+                'neg_examples': neg_ex,
+                'pos_examples': pos_ex,
+            }
+            _dbg.setdefault('candidate_trace', []).append(rec)
+        except Exception:
+            pass
+
+    # Staging debug: capture candidate distributions (neg vs pos day-frame)
+    # after each stage latch/refine. This is *debug only* and does not affect
+    # matching behaviour.
+    if return_debug:
+        try:
+            _stage_res = _stage_filter_journeys_for_live_bus(
+                merged,
+                walking,
+                line_ref=(line_ref or '').split(':')[-1].strip() if line_ref else (line_ref or ''),
+                operator_ref=operator_ref,
+                dest=dest,
+                feed_origin_atco=feed_origin_atco,
+                feed_destination_atco=feed_destination_atco,
+                origin_dep_secs=origin_dep_secs,
+                origin_tz_offset_secs=origin_tz_offset_secs,
+                strict_tol=strict_tol,
+                return_debug=True,
+            )
+            # _stage_res is (ids, debug)
+            _dbg['stage_debug'] = _stage_res[1]
+        except Exception as _e:
+            try:
+                _dbg['stage_debug_error'] = str(_e)
+            except Exception:
+                pass
+
+    # Prefilter breakdown: help explain why pos-day candidates disappear *before*
+    # latching. This is debug-only and intentionally bounded.
+    _prefilter_dbg = None
+    if return_debug:
+        _prefilter_dbg = {
+            'spatial_too_far_total': 0,
+            'spatial_too_far_pos': 0,
+            'spatial_too_far_neg': 0,
+            'spatial_too_far_examples': [],  # [{j_id, start_dep, r_int, nearby_min_m, threshold_m}]
+            'nearest_stop_not_served_total': 0,
+            'nearest_stop_not_served_pos': 0,
+            'nearest_stop_not_served_neg': 0,
+            'nearest_stop_not_served_examples': [],  # [{j_id, start_dep, nearest_stop_int, r_int}]
+        }
+        _dbg['prefilter_breakdown'] = _prefilter_dbg
+
+    def _dbg_gate(name: str, **extra) -> None:
+        """Record the deepest-known fatal gate that caused rejection.
+
+        We keep only the first fatal gate in a stable order so payload stays small.
+        """
+        try:
+            if not return_debug:
+                return
+            if _dbg.get('fatal_gate') is None:
+                _dbg['fatal_gate'] = name
+                if extra:
+                    # keep it bounded
+                    for k, v in list(extra.items())[:20]:
+                        _dbg[k] = v
+        except Exception:
+            pass
+
+    # Ensure we emit gate summary even on early returns later.
+    def _log_gate_summary(result) -> Any:
+        try:
+            if (DEBUG_MATCH or return_debug) and _gate_counts:
+                top = sorted(_gate_counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
+                logger.info(
+                    "matcher: gate_summary line=%s op=%s origin_dep=%s origin_atco=%s dest_atco=%s gates=%s",
+                    (line_ref or '').split(':')[-1].strip(),
+                    operator_ref,
+                    origin_dep_secs,
+                    (str(feed_origin_atco).strip() if feed_origin_atco else None),
+                    (str(feed_destination_atco).strip() if feed_destination_atco else None),
+                    dict(top),
+                )
+        except Exception:
+            pass
+        if return_debug:
+            # Only return a small bounded summary for API diagnostics.
+            try:
+                top = sorted(_gate_counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
+                _dbg['gates_top'] = dict(top)
+                return (result, _dbg)
+            except Exception:
+                return (result, _dbg)
+        return result
 
     # Index to avoid scanning all journeys on every live-vehicle match.
     # Keyed by the identity of the merged timetable instance.
@@ -4056,6 +4245,17 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         DEBUG_MATCH = (str(os.environ.get('MATCH_DEBUG') or '') == '1') or (str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'))
     except Exception:
         DEBUG_MATCH = False
+
+    # When provenance/debug is enabled, capture a small per-call count of the
+    # main rejection gates. This makes it much easier to diagnose situations
+    # where all vehicles end up "unmatched".
+    _gate_counts: dict[str, int] = {}
+
+    def _gate_hit(name: str) -> None:
+        try:
+            _gate_counts[name] = int(_gate_counts.get(name, 0)) + 1
+        except Exception:
+            pass
 
     line_q = (line_ref or "").strip()
     dest_q = (dest or "").strip().lower()
@@ -4323,6 +4523,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
 
     # Iterate only journeys for this short line name.
     j_ids_for_line = _journeys_for_line_short(line_q)
+    _dbg_cand_dist('line_index_j_ids', j_ids_for_line)
     origin_atcos_by_j, dest_atcos_by_j, start_dep_by_j, end_arr_by_j = _get_journey_endpoint_cache()
 
     for j_id in j_ids_for_line:
@@ -4476,24 +4677,69 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                         continue
             if nearby_min > MATCH_MAX_TRACK_DIST_M:
                 # route too far from vehicle — skip candidate
+                if _prefilter_dbg is not None:
+                    try:
+                        sdv = int(start_dep) if start_dep is not None else None
+                    except Exception:
+                        sdv = None
+                    try:
+                        _prefilter_dbg['spatial_too_far_total'] = int(_prefilter_dbg.get('spatial_too_far_total', 0)) + 1
+                        if sdv is not None and sdv >= 0:
+                            _prefilter_dbg['spatial_too_far_pos'] = int(_prefilter_dbg.get('spatial_too_far_pos', 0)) + 1
+                        elif sdv is not None and sdv < 0:
+                            _prefilter_dbg['spatial_too_far_neg'] = int(_prefilter_dbg.get('spatial_too_far_neg', 0)) + 1
+                        if len(_prefilter_dbg.get('spatial_too_far_examples') or []) < 3:
+                            _prefilter_dbg['spatial_too_far_examples'].append({
+                                'j_id': int(j_id),
+                                'start_dep': sdv,
+                                'r_int': int(r_int),
+                                'nearby_min_m': float(nearby_min),
+                                'threshold_m': int(MATCH_MAX_TRACK_DIST_M),
+                            })
+                    except Exception:
+                        pass
                 continue
         except Exception:
             # If anything goes wrong with the prefilter, don't block
             # matching — fall back to the original permissive behaviour.
             pass
 
-        # Ensure the vehicle is near a stop that actually belongs to the
-        # candidate journey. This helps avoid matching to a journey whose
-        # geometry happens to pass nearby but does not serve the stop the
-        # vehicle is at.
+        # NOTE: nearest-stop-served prefilter removed.
+        #
+        # Historically we rejected candidates when the vehicle's nearest stop
+        # wasn't served by the journey (using `merged.journey_stop_index`).
+        # Provenance showed this gate was wiping out essentially all "pos-day"
+        # candidates in the AM merged timetable, forcing all matches onto
+        # yesterday-shifted journeys and triggering outside_time_window.
+        #
+        # We keep the debug counters for observability, but we no longer reject
+        # candidates here.
         try:
             nearby = _reachable_stops
             if nearby:
                 nearest_stop_int, walk_secs = nearby[0]
                 jsi = merged.journey_stop_index[j_id] if j_id < len(merged.journey_stop_index) else {}
                 if nearest_stop_int not in jsi:
-                    # vehicle's nearest stop is not served by this journey
-                    continue
+                    if _prefilter_dbg is not None:
+                        try:
+                            sdv = int(start_dep) if start_dep is not None else None
+                        except Exception:
+                            sdv = None
+                        try:
+                            _prefilter_dbg['nearest_stop_not_served_total'] = int(_prefilter_dbg.get('nearest_stop_not_served_total', 0)) + 1
+                            if sdv is not None and sdv >= 0:
+                                _prefilter_dbg['nearest_stop_not_served_pos'] = int(_prefilter_dbg.get('nearest_stop_not_served_pos', 0)) + 1
+                            elif sdv is not None and sdv < 0:
+                                _prefilter_dbg['nearest_stop_not_served_neg'] = int(_prefilter_dbg.get('nearest_stop_not_served_neg', 0)) + 1
+                            if len(_prefilter_dbg.get('nearest_stop_not_served_examples') or []) < 3:
+                                _prefilter_dbg['nearest_stop_not_served_examples'].append({
+                                    'j_id': int(j_id),
+                                    'start_dep': sdv,
+                                    'nearest_stop_int': int(nearest_stop_int),
+                                    'r_int': int(r_int),
+                                })
+                        except Exception:
+                            pass
         except Exception:
             # If walking lookup fails, don't block — fall back to other checks
             pass
@@ -4534,11 +4780,79 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # Record as a line/operator candidate. We'll filter to staged latches below.
         candidates.append((j_id, start_dep, end_arr, r_int))
 
+    _dbg_cand_dist('after_prefilter_candidates', candidates)
+
     # Apply staged filtering requested by user.
     if not candidates:
+        _dbg_gate('no_candidates')
         return None
 
+    # Candidate time distribution sanity snapshot (helps diagnose bad day-offset merges)
+    try:
+        if return_debug:
+            # Merged-wide sanity: does this merged contain any 'today' journeys?
+            # (start_dep in [0, 86400)). If this is zero, then we likely merged the
+            # wrong days or loaded an empty/shifted dataset.
+            try:
+                jt_all = getattr(merged, 'journey_times', []) or []
+                n_tot = len(jt_all)
+                n_pos_day = 0
+                n_neg = 0
+                min_sd = None
+                max_sd = None
+                pos_examples = []
+                # Keep it bounded; sample evenly but cheaply.
+                step = max(1, int(n_tot / 2000))
+                for j_id in range(0, n_tot, step):
+                    try:
+                        jt = jt_all[j_id]
+                        if not jt:
+                            continue
+                        sd = jt[0][2]
+                        if sd is None:
+                            continue
+                        sd = int(sd)
+                    except Exception:
+                        continue
+                    if min_sd is None or sd < min_sd:
+                        min_sd = sd
+                    if max_sd is None or sd > max_sd:
+                        max_sd = sd
+                    if sd < 0:
+                        n_neg += 1
+                    if 0 <= sd < 86400:
+                        n_pos_day += 1
+                        if len(pos_examples) < 3:
+                            pos_examples.append(int(j_id))
+                _dbg['merged_journeys_sampled'] = int(len(range(0, n_tot, step))) if n_tot else 0
+                _dbg['merged_start_dep_min'] = int(min_sd) if min_sd is not None else None
+                _dbg['merged_start_dep_max'] = int(max_sd) if max_sd is not None else None
+                _dbg['merged_start_dep_neg_sampled_n'] = int(n_neg)
+                _dbg['merged_start_dep_posday_sampled_n'] = int(n_pos_day)
+                if pos_examples:
+                    _dbg['merged_posday_example_jids'] = pos_examples
+            except Exception:
+                pass
+
+            _dbg['candidates_n'] = int(len(candidates))
+            s_list = [int(s) for (_j, s, _e, _r) in candidates if s is not None]
+            e_list = [int(e) for (_j, _s, e, _r) in candidates if e is not None]
+            if s_list:
+                _dbg['start_dep_min'] = int(min(s_list))
+                _dbg['start_dep_max'] = int(max(s_list))
+                _dbg['start_dep_neg_n'] = int(sum(1 for v in s_list if v < 0))
+                _dbg['start_dep_pos_n'] = int(sum(1 for v in s_list if v >= 0))
+            if e_list:
+                _dbg['end_arr_min'] = int(min(e_list))
+                _dbg['end_arr_max'] = int(max(e_list))
+                _dbg['end_arr_neg_n'] = int(sum(1 for v in e_list if v < 0))
+                _dbg['end_arr_pos_n'] = int(sum(1 for v in e_list if v >= 0))
+            _dbg['now_seconds'] = int(now_seconds)
+    except Exception:
+        pass
+
     cand_ids = [c[0] for c in candidates]
+    _dbg_cand_dist('cand_ids_before_latch', cand_ids)
     latched = set()
 
     # Stage 2 latch: origin ATCO + origin start time match (preferred).
@@ -4559,12 +4873,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         elif origin_only:
             latched = origin_only
 
+    _dbg_cand_dist('after_stage2_latched', latched if latched else cand_ids)
+
     # Stage 3 latch: destination ATCO (for those not already latched)
     if not latched and feed_destination_atco_n:
         for j_id in cand_ids:
             f = staged_flags.get(j_id) or {}
             if f.get('dest_atco'):
                 latched.add(j_id)
+
+    _dbg_cand_dist('after_stage3_latched', latched if latched else cand_ids)
 
     # Stage 4: for destination-latched candidates, require origin ATCO to
     # exist in the journey and compare origin time against ARRIVAL time at
@@ -4591,6 +4909,8 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 continue
         if refined:
             latched = refined
+
+    _dbg_cand_dist('after_stage4_refined', latched if latched else cand_ids)
 
     # If we latched anything, restrict candidates to latched set.
     if latched:
@@ -4634,13 +4954,13 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # Configurable stricter gating thresholds (seconds/metres). These
     # default to conservative values but can be tuned via env vars.
     try:
-        MATCH_ALLOW_BEFORE_S = int(os.environ.get('MATCH_ALLOW_BEFORE_S', '300'))
+        MATCH_ALLOW_BEFORE_S = int(os.environ.get('MATCH_ALLOW_BEFORE_S', '900'))
     except Exception:
-        MATCH_ALLOW_BEFORE_S = 300
+        MATCH_ALLOW_BEFORE_S = 900
     try:
-        MATCH_ALLOW_AFTER_S = int(os.environ.get('MATCH_ALLOW_AFTER_S', '300'))
+        MATCH_ALLOW_AFTER_S = int(os.environ.get('MATCH_ALLOW_AFTER_S', '900'))
     except Exception:
-        MATCH_ALLOW_AFTER_S = 300
+        MATCH_ALLOW_AFTER_S = 900
     try:
         MATCH_DEST_IGNORE_M = int(os.environ.get('MATCH_DEST_IGNORE_M', '30'))
     except Exception:
@@ -4699,6 +5019,9 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 # Fatal gate: no route/journey track available -> skip this candidate.
                 # Cache the failure to avoid repeated attempts for the same route.
                 _track_cache[r_int] = None
+                if DEBUG_MATCH:
+                    _gate_hit('no_track')
+                _dbg_gate('no_track', route_int=r_int, journey_id=j_id)
                 continue
             cum = _cum_distances(track)
             _track_cache[r_int] = (track, cum)
@@ -4713,7 +5036,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
 
         # Spatial gate: only accept candidates that can be considered
         # "on-track". We use the edge-projection distance plus a small
-        # progress-margin to ensure the vehicle projects sensibly onto the
+        # distance threshold to ensure the vehicle projects sensibly onto the
         # route geometry. This prevents matching to distant routes that
         # merely share a short line name.
         try:
@@ -4721,102 +5044,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             if MATCH_MAX_TRACK_DIST_M is not None and dist_m > MATCH_MAX_TRACK_DIST_M:
                 offtrack = True
 
-            # Require the projected progress to fall near the route segment
-            # (allow a small margin for endpoints). If the vehicle projects
-            # far before the first vertex or beyond the last, consider it
-            # off-track.
-            try:
-                PROGRESS_MARGIN = float(os.environ.get('MATCH_PROGRESS_MARGIN', '0.02'))
-            except Exception:
-                PROGRESS_MARGIN = 0.02
-            if progress < -PROGRESS_MARGIN or progress > (1.0 + PROGRESS_MARGIN):
-                offtrack = True
-
             if offtrack and not allow_offtrack:
                 if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                    logger.info("matcher: candidate j_id=%s rejected for being off-track (dist_m=%.1f prog=%.3f > dist_thresh=%s margin=%s)", j_id, dist_m, progress, MATCH_MAX_TRACK_DIST_M, PROGRESS_MARGIN)
+                    logger.info("matcher: candidate j_id=%s rejected for being off-track (dist_m=%.1f > dist_thresh=%s)", j_id, dist_m, MATCH_MAX_TRACK_DIST_M)
+                if DEBUG_MATCH:
+                    _gate_hit('offtrack')
+                _dbg_gate('offtrack_dist', dist_m=float(dist_m), dist_thresh=float(MATCH_MAX_TRACK_DIST_M or 0), journey_id=j_id, route_int=r_int)
                 continue
         except Exception:
             # On failure of the on-track check, fall back to permissive
             # behaviour so we don't silently drop valid candidates.
-            pass
-
-        # Additional segment-level on-track check: require the vehicle to
-        # be reasonably close to the track at the projected point. This
-        # is a stricter criterion than MATCH_MAX_TRACK_DIST_M and helps
-        # avoid matching to nearby-but-not-served routes. Configurable
-        # via MATCH_SEGMENT_DIST_M (default 50m).
-        try:
-            try:
-                MATCH_SEGMENT_DIST_M = int(os.environ.get('MATCH_SEGMENT_DIST_M', '500'))
-            except Exception:
-                MATCH_SEGMENT_DIST_M = 500
-            if MATCH_SEGMENT_DIST_M is not None and dist_m > MATCH_SEGMENT_DIST_M:
-                if not allow_offtrack:
-                    if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                        logger.info("matcher: candidate j_id=%s rejected by segment-distance (dist_m=%.1f > %d)", j_id, dist_m, MATCH_SEGMENT_DIST_M)
-                    continue
-        except Exception:
-            pass
-
-        # Nearest-stop inclusion check: ensure the vehicle's nearest reachable
-        # stop (by walking module) is actually served by this candidate journey.
-        # This avoids matching to journeys that pass nearby but do not serve the
-        # same boarding stop. Configurable via MATCH_REQUIRE_NEAREST_STOP (default true).
-        try:
-            try:
-                MATCH_REQUIRE_NEAREST_STOP = os.environ.get('MATCH_REQUIRE_NEAREST_STOP', '1')
-                MATCH_REQUIRE_NEAREST_STOP = str(MATCH_REQUIRE_NEAREST_STOP).strip() not in ('0', 'false', 'no')
-            except Exception:
-                MATCH_REQUIRE_NEAREST_STOP = True
-            if MATCH_REQUIRE_NEAREST_STOP and not allow_offtrack:
-                if _reachable_stops:
-                    nearest_stop_int = _reachable_stops[0][0]
-                    # If the nearest reachable stop is physically far away,
-                    # reject this candidate — the vehicle is not plausibly
-                    # at that stop. Threshold configurable via
-                    # MATCH_NEAREST_STOP_MAX_M (default 200m).
-                    try:
-                        try:
-                            MATCH_NEAREST_STOP_MAX_M = int(os.environ.get('MATCH_NEAREST_STOP_MAX_M', '4000'))
-                        except Exception:
-                            MATCH_NEAREST_STOP_MAX_M = 4000
-                        try:
-                            coords = _get_coords(nearest_stop_int)
-                            if not coords:
-                                raise Exception('no_coords')
-                            s_lat, s_lon = coords
-                            nearest_stop_dist_m = _hav(lat_v, lon_v, s_lat, s_lon)
-                        except Exception:
-                            nearest_stop_dist_m = None
-                        if nearest_stop_dist_m is not None and MATCH_NEAREST_STOP_MAX_M is not None and nearest_stop_dist_m > MATCH_NEAREST_STOP_MAX_M:
-                            if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                                logger.info("matcher: candidate j_id=%s rejected because nearest stop is too far (%.1f m > %d m)", j_id, nearest_stop_dist_m, MATCH_NEAREST_STOP_MAX_M)
-                            continue
-                    except Exception:
-                        # If anything goes wrong computing distances, continue permissively
-                        pass
-                    # Require that the journey serves at least one of the
-                    # stops within the precomputed nearby_stops_set. This
-                    # enforces the "only map to journeys that pass through
-                    # stops within X metres" rule.
-                    try:
-                        if nearby_stops_set and not (journey_stop_set & nearby_stops_set):
-                            if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                                logger.info("matcher: candidate j_id=%s rejected because it serves none of the nearby stops", j_id)
-                            continue
-                    except Exception:
-                        pass
-
-                    if nearest_stop_int not in journey_stop_set:
-                        if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                            logger.info("matcher: candidate j_id=%s rejected because nearest_stop %s not in journey stops", j_id, nearest_stop_int)
-                        continue
-                else:
-                    # If walking cannot find any nearby stops, be permissive
-                    # and allow other checks to decide.
-                    pass
-        except Exception:
             pass
 
         # Origin proximity check removed by request: do not reject
@@ -4852,6 +5089,20 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             if not anchored:
                 if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
                     logger.info("matcher: candidate j_id=%s outside_strict_window (start_dep=%d now=%d end_arr=%d allow_before=%d allow_after=%d)", j_id, start_dep, now_seconds, end_arr, MATCH_ALLOW_BEFORE_S, MATCH_ALLOW_AFTER_S)
+                if DEBUG_MATCH:
+                    _gate_hit('outside_strict_window')
+                _dbg_gate(
+                    'outside_time_window',
+                    journey_id=j_id,
+                    route_int=r_int,
+                    now_seconds=int(now_seconds),
+                    start_dep=int(start_dep),
+                    end_arr=int(end_arr),
+                    allow_before_s=int(MATCH_ALLOW_BEFORE_S),
+                    allow_after_s=int(MATCH_ALLOW_AFTER_S),
+                    early_by_s=int((start_dep - MATCH_ALLOW_BEFORE_S) - now_seconds) if now_seconds < start_dep - MATCH_ALLOW_BEFORE_S else 0,
+                    late_by_s=int(now_seconds - (end_arr + MATCH_ALLOW_AFTER_S)) if now_seconds > end_arr + MATCH_ALLOW_AFTER_S else 0,
+                )
                 # Fatal: skip candidate
                 continue
             else:
@@ -5034,6 +5285,15 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                         "matcher: candidate j_id=%s abs_delay_too_big -> skipping (delay=%d max_plausible=%d)",
                         j_id, delay, max_plausible,
                     )
+                _dbg_gate(
+                    'abs_delay_clamp',
+                    journey_id=j_id,
+                    route_int=r_int,
+                    delay_s=int(delay),
+                    abs_delay_s=int(abs(delay)),
+                    max_plausible_s=int(max_plausible),
+                    journey_dur_s=int(journey_dur),
+                )
                 continue
 
     # ── deterministic, time-stable scoring ──
@@ -5066,12 +5326,21 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             best_jid = j_id
             best_start_dep = start_dep
 
+    # If we never found a candidate that passed gates/scoring, return no match.
+    if best_jid is None:
+        _dbg_gate('no_candidate_survived')
+        return _log_gate_summary((None, None) if return_jid else None)
+
     # If the chosen journey's scheduled start time is more than 30 minutes in the future,
     # reject the bus entirely (it likely mapped incorrectly or shouldn't be tracked yet).
     if best_start_dep is not None and best_start_dep - now_seconds > 1800:
         if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-            logger.info("matcher: rejecting matched bus for journey %s because its start_dep %d is > 30 mins in future", best_jid, best_start_dep)
-    return (None, None) if return_jid else None
+            logger.info(
+                "matcher: rejecting matched bus for journey %s because its start_dep %d is > 30 mins in future",
+                best_jid,
+                best_start_dep,
+            )
+        return _log_gate_summary((None, None) if return_jid else None)
 
     # Clamp negative delays to zero at the source of computation so
     # callers don't have to special-case early/negative values.
@@ -5084,10 +5353,10 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 r_int = merged.journey_to_route[best_jid] if best_jid is not None else -1
             except Exception:
                 r_int = -1
-            return (best_delay, r_int)
+            return _log_gate_summary((best_delay, r_int))
         except Exception:
-            return (best_delay, -1)
-    return best_delay
+            return _log_gate_summary((best_delay, -1))
+    return _log_gate_summary(best_delay)
 
 
 def _stage_filter_journeys_for_live_bus(
@@ -5102,6 +5371,7 @@ def _stage_filter_journeys_for_live_bus(
     origin_dep_secs: int | None = None,
     origin_tz_offset_secs: int = 0,
     strict_tol: int = 600,
+    return_debug: bool = False,
 ):
     """Return candidate journey ids after applying the staged ATCO/time latch.
 
@@ -5142,6 +5412,74 @@ def _stage_filter_journeys_for_live_bus(
             stop_name_map.setdefault(str(sname).strip().lower(), []).append(si)
     except Exception:
         stop_name_map = {}
+
+    def _journey_start_dep_seconds(j_id: int) -> int | None:
+        """Best-effort start departure seconds for a journey.
+
+        We intentionally treat negative values as yesterday-shifted and
+        positive values as today-shifted (in the AM merged timetable).
+        """
+        try:
+            jt = merged.journey_times[j_id]
+            if not jt:
+                return None
+            # Each entry is (stop_int, arr_t, dep_t)
+            _, arr_t, dep_t = jt[0]
+            t0 = dep_t if dep_t is not None else arr_t
+            return int(t0) if t0 is not None else None
+        except Exception:
+            return None
+
+    def _dist_snapshot(j_ids: list[int] | set[int], *, label: str, max_examples: int = 5) -> dict:
+        neg: list[int] = []
+        pos: list[int] = []
+        unknown: list[int] = []
+        for jid in j_ids:
+            sd = _journey_start_dep_seconds(jid)
+            if sd is None:
+                unknown.append(jid)
+            elif sd < 0:
+                neg.append(jid)
+            else:
+                pos.append(jid)
+        # Keep examples tiny but deterministic.
+        neg_ex = sorted(neg)[:max_examples]
+        pos_ex = sorted(pos)[:max_examples]
+        unk_ex = sorted(unknown)[:max_examples]
+        snap = {
+            'label': label,
+            'n': len(list(j_ids)),
+            'neg_n': len(neg),
+            'pos_n': len(pos),
+            'unknown_n': len(unknown),
+            'neg_examples': neg_ex,
+            'pos_examples': pos_ex,
+            'unknown_examples': unk_ex,
+        }
+        # Include basic range if available.
+        try:
+            times = [t for t in (_journey_start_dep_seconds(jid) for jid in j_ids) if t is not None]
+            if times:
+                snap['start_dep_min'] = int(min(times))
+                snap['start_dep_max'] = int(max(times))
+        except Exception:
+            pass
+        return snap
+
+    debug = None
+    if return_debug:
+        debug = {
+            'line_ref': line_ref,
+            'operator_ref': operator_ref,
+            'dest_q': (dest or ''),
+            'feed_origin_atco': feed_origin_atco,
+            'feed_destination_atco': feed_destination_atco,
+            'origin_dep_secs': origin_dep_secs,
+            'origin_tz_offset_secs': origin_tz_offset_secs,
+            'od_adj': od_adj,
+            'strict_tol': strict_tol,
+            'stages': [],
+        }
 
     candidates: list[int] = []
     staged_flags: dict[int, dict] = {}
@@ -5234,7 +5572,13 @@ def _stage_filter_journeys_for_live_bus(
         candidates.append(j_id)
 
     if not candidates:
+        if return_debug:
+            debug['stages'].append({'label': 'after_scan', 'n': 0})
+            return ([], debug)
         return []
+
+    if return_debug:
+        debug['stages'].append(_dist_snapshot(candidates, label='after_scan'))
 
     latched: set[int] = set()
 
@@ -5248,6 +5592,9 @@ def _stage_filter_journeys_for_live_bus(
                 origin_only.add(j_id)
                 if f.get('origin_time_aligned'):
                     aligned.add(j_id)
+        if return_debug:
+            debug['stages'].append(_dist_snapshot(origin_only, label='stage2_origin_only'))
+            debug['stages'].append(_dist_snapshot(aligned, label='stage2_aligned'))
         # If we have any aligned origin matches, they win outright.
         if aligned:
             latched = aligned
@@ -5255,12 +5602,18 @@ def _stage_filter_journeys_for_live_bus(
         elif origin_only:
             latched = origin_only
 
+    if return_debug:
+        debug['stages'].append(_dist_snapshot(latched if latched else candidates, label='after_stage2_latch_effective'))
+
     # Stage 3 latch: destination ATCO (for those not already latched)
     if not latched and feed_destination_atco_n:
         for j_id in candidates:
             f = staged_flags.get(j_id) or {}
             if f.get('dest_atco'):
                 latched.add(j_id)
+
+    if return_debug:
+        debug['stages'].append(_dist_snapshot(latched if latched else candidates, label='after_stage3_latch_effective'))
 
     # Stage 4: for destination-latched candidates, require origin ATCO to exist
     # and compare origin time against the arrival/departure time at that stop.
@@ -5290,7 +5643,13 @@ def _stage_filter_journeys_for_live_bus(
         if refined:
             latched = refined
 
-    return sorted(latched) if latched else sorted(candidates)
+    if return_debug:
+        debug['stages'].append(_dist_snapshot(latched if latched else candidates, label='after_stage4_refine_effective'))
+
+    result = sorted(latched) if latched else sorted(candidates)
+    if return_debug:
+        return (result, debug)
+    return result
 
 
 def _diagnose_match_failure(line_ref, dest, lat_v, lon_v, origin_dep_secs=None, operator_ref=None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0):
@@ -5589,8 +5948,8 @@ async def bus_live_operator(
     operator: str,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
-    latTol: float = 0.0003,
-    lonTol: float = 0.0003,
+    latTol: float = 0.07,
+    lonTol: float = 0.07,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
@@ -5697,6 +6056,7 @@ async def bus_live_operator(
         # Diagnostic fields only computed when bus_provenance is enabled
         reject_reasons = None
         match_reason = None
+        matcher_dbg = None
 
         # Always attempt timetable matching so we can attach stable journey/route
         # mapping fields (route_int + match_reason) even when the feed already
@@ -5711,6 +6071,7 @@ async def bus_live_operator(
                     op_for_match = str(op_for_match).strip()
             except Exception:
                 pass
+
             matched = _compute_delay_from_timetable(
                 line_ref, dest, lat_v, lon_v,
                 return_jid=True,
@@ -5720,7 +6081,11 @@ async def bus_live_operator(
                 strict_tol=600,
                 feed_origin_atco=(meta.get('origin_atco') if meta and isinstance(meta, dict) else None),
                 feed_destination_atco=(meta.get('destination_atco') if meta and isinstance(meta, dict) else None),
+                return_debug=bus_provenance,
             )
+            if bus_provenance and isinstance(matched, (list, tuple)) and len(matched) == 2 and isinstance(matched[1], dict):
+                matched, matcher_dbg = matched
+
             if matched:
                 # matched is expected to be a (delay_s, route_int) tuple when return_jid=True.
                 computed, matched_route_int = matched
@@ -5864,12 +6229,17 @@ async def bus_live_operator(
                 entry['route_int'] = int(matched_route_int)
             except Exception:
                 entry['route_int'] = matched_route_int
-        # We intentionally do NOT expose logged_journey_id anymore; the
-        # frontend doesn't need it (route_int is enough to render tracks).
-        # Expose diagnostic fields only when provenance mode is enabled
+        # Route mapping signal: route_int is the authoritative indicator that a
+        # vehicle was matched to a timetable journey for *this refresh*.
+        #
+        # Provenance/diagnostic fields (enabled by BUS_LIVE_PROVENANCE) are
+        # used for debugging why matching fails.
         if bus_provenance:
             entry['match_reason'] = match_reason or ('matched' if matched_route_int is not None else 'unmatched')
             entry['reject_reasons'] = reject_reasons or []
+            # Always include gate summary if available (even when unmatched)
+            if matcher_dbg is not None:
+                entry['matcher_gates'] = matcher_dbg
             try:
                 if meta and isinstance(meta, dict) and meta.get('_match_contract_debug'):
                     entry['_match_contract_debug'] = meta.get('_match_contract_debug')
@@ -5940,8 +6310,8 @@ async def debug_live_match_contract(
     operator: str = 'SCCU',
     lat: float = 54.0466,
     lon: float = -2.8007,
-    latTol: float = 0.25,
-    lonTol: float = 0.25,
+    latTol: float = 0.15,
+    lonTol: float = 0.15,
     sample: int = 25,
     limit: int = 50,
 ):
