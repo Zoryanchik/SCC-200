@@ -515,8 +515,29 @@ class MergedData:
                 loader = getattr(self, 'bus_loader', None)
                 meta = self.route_metadata[route_id_int] if route_id_int < len(self.route_metadata) else None
                 rid = meta.get('route_id') if isinstance(meta, dict) else None
+                trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
+                if trace:
+                    try:
+                        print('[link_tracks] build_start', {
+                            'route_int': int(route_id_int),
+                            'route_id': rid,
+                            'has_bus_loader': bool(loader),
+                            'cached_empty': True,
+                        })
+                    except Exception:
+                        pass
                 if loader and rid:
                     raw = loader.get_route_link_tracks_for_route(rid)
+                    if trace:
+                        try:
+                            print('[link_tracks] db_fetch', {
+                                'route_int': int(route_id_int),
+                                'route_id': rid,
+                                'raw_is_none': raw is None,
+                                'raw_len': (len(raw) if raw else 0),
+                            })
+                        except Exception:
+                            pass
                     if raw:
                         # Build ATCO->stop_int map within this route.
                         route_stops = self.route_stops[route_id_int] if route_id_int < len(self.route_stops) else []
@@ -542,7 +563,23 @@ class MergedData:
                 built = None
 
             if built is None:
+                if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                    try:
+                        print('[link_tracks] fallback_build_from_track', {
+                            'route_int': int(route_id_int),
+                            'have_route_tracks': bool(self.route_tracks[route_id_int]) if route_id_int < len(self.route_tracks) else False,
+                        })
+                    except Exception:
+                        pass
                 built = self._build_route_link_tracks_from_track(route_id_int)
+            if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                try:
+                    print('[link_tracks] built', {
+                        'route_int': int(route_id_int),
+                        'built_len': (len(built) if built else 0),
+                    })
+                except Exception:
+                    pass
             # Store even empty dict so we don't repeatedly attempt.
             self.route_link_tracks[route_id_int] = built
             return built

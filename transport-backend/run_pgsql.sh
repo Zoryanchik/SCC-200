@@ -37,6 +37,58 @@ mkdir -p "${DATA_DIR}"
 
 echo "Using ${ENGINE} to start Postgres container '${CONTAINER_NAME}' (host port ${HOST_PORT})"
 
+# --- Port cleanup (prefer stopping containers over killing host PIDs) ---
+stop_containers_on_port() {
+    local port="$1"
+
+    local ids
+    ids=$(${ENGINE} ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk -v p=":${port}->" '$0 ~ p {print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+    if [ -n "${ids}" ]; then
+        echo "Host port ${port} is published by container(s): ${ids}"
+        for id in ${ids}; do
+            echo "Stopping container ${id} to free port ${port}..."
+            ${ENGINE} stop "${id}" >/dev/null 2>&1 || true
+            ${ENGINE} rm "${id}" >/dev/null 2>&1 || true
+        done
+    fi
+}
+
+kill_host_listeners() {
+    local port="$1"
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        echo "Warning: lsof not found; cannot auto-stop host listeners on port ${port}." >&2
+        return 0
+    fi
+
+
+    local pids
+    pids=$(lsof -ti tcp:"${port}" -sTCP:LISTEN || true)
+    if [ -z "${pids}" ]; then
+        return 0
+    fi
+
+    echo "Host port ${port} is in use by PID(s): ${pids}"
+    # shellcheck disable=SC2086
+    kill -TERM ${pids} >/dev/null 2>&1 || true
+
+    local waited=0
+    while [ ${waited} -lt 5 ]; do
+        sleep 1
+        waited=$((waited + 1))
+        pids=$(lsof -ti tcp:"${port}" -sTCP:LISTEN || true)
+        [ -z "${pids}" ] && return 0
+    done
+
+    echo "Host port ${port} still busy; sending SIGKILL to PID(s): ${pids}"
+    # shellcheck disable=SC2086
+    kill -KILL ${pids} >/dev/null 2>&1 || true
+}
+
+stop_containers_on_port "${HOST_PORT}"
+kill_host_listeners "${HOST_PORT}"
+
 # Check if container already exists
 if ${ENGINE} ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
     echo "Container ${CONTAINER_NAME} already exists — starting it"
@@ -51,6 +103,15 @@ else
         VOLUME_ARG="-v transport-postgres-data:/var/lib/postgresql/data"
     else
         VOLUME_ARG="-v \"${DATA_DIR}\":/var/lib/postgresql/data"
+    fi
+
+    # Init scripts: created once when the data directory is first initialized.
+    # We include pg_trgm so functions like similarity(text,text) exist.
+        INIT_DIR="${_script_dir}/pgsql-init"
+        INIT_MOUNT=()
+        if [ -d "${INIT_DIR}" ]; then
+            # Use a bind mount for init scripts (read-only).
+            INIT_MOUNT=(-v "${INIT_DIR}:/docker-entrypoint-initdb.d:ro")
     fi
     # Start postgres with an overridden port so the server listens on
     # the container port we expose (default 5011). We pass -c 'port=...' to
@@ -70,6 +131,7 @@ else
     ${ENGINE} run -d --name "${CONTAINER_NAME}" --network "${NETWORK_NAME}" -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
         -e POSTGRES_USER="${PG_USER}" -e POSTGRES_PASSWORD="${PG_PASS}" -e POSTGRES_DB="${PG_DB}" \
         ${VOLUME_ARG} \
+            "${INIT_MOUNT[@]}" \
         --restart unless-stopped "${IMAGE}" postgres -c "port=${CONTAINER_PORT}"
 fi
 

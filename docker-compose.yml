@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -10,34 +8,54 @@ services:
       - "5050:5050"
     environment:
       PYTHONUNBUFFERED: "1"
-      BUS_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
-      TRAIN_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
-      WALK_DB_DSN: "postgresql://pguser:pgpass@transport-postgres-edillocnon:5011/transport"
+      # Enable with: ROUTE_GEOM_TRACE=1 (or set to "1" here temporarily)
+      ROUTE_GEOM_TRACE: "${ROUTE_GEOM_TRACE:-0}"
+      BUS_DB_DSN: "postgresql://pguser:pgpass@postgres:5011/transport"
+      TRAIN_DB_DSN: "postgresql://pguser:pgpass@postgres:5011/transport"
+      WALK_DB_DSN: "postgresql://pguser:pgpass@postgres:5011/transport"
       OSRM_URL: "http://transport-osrm-edillocnon:5012"
     volumes:
       - ./transport-backend/cache:/app/cache
     depends_on:
       - osrm
+      - postgres
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5050/health\").read()'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
     networks:
       - scc200-net-edillocnon
 
 
   frontend:
-    build:
-      context: ./transport-frontend
-      dockerfile: Dockerfile
+    image: node:20-alpine
+    container_name: transport-frontend-edillocnon
     ports:
       - "5075:5075"
     environment:
-      - VITE_API_BASE_URL=http://backend:5050
+      - VITE_API_BASE_URL=http://localhost:5050
+      - VITE_OSRM_BASE=http://transport-osrm-edillocnon:5012
+      - NODE_OPTIONS=--max-old-space-size=4096
+      - CYPRESS_INSTALL_BINARY=0
+    mem_limit: 6g
     volumes:
       - ./transport-frontend:/app:delegated
-    command: ["sh", "-c", "npm run dev -- --host 0.0.0.0 --port 5075"]
+      - transport-frontend-node_modules:/app/node_modules
+    working_dir: /app
+    command: ["sh", "-c", "npm ci --legacy-peer-deps && npm run dev -- --host 0.0.0.0 --port 5075"]
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:5075/ >/dev/null 2>&1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
     networks:
       - scc200-net-edillocnon
 
   osrm:
-    image: osrm/osrm-backend:5.26
+    # Tag 5.26 is not available on docker.io/osrm/osrm-backend (manifest unknown).
+    # Use a stable tag to keep dev compose working.
+    image: osrm/osrm-backend:latest
     # Note: This is a helpful dev stub but requires a preprocessed .osrm dataset to be useful.
     # For production you should run an OSRM instance with an extracted dataset or remove this service.
     restart: unless-stopped
@@ -45,10 +63,10 @@ services:
       - "5012:5012"
     container_name: transport-osrm-edillocnon
     environment:
-      OSRM_DATA_PATH: /data/nw-england.osrm
+      OSRM_DATA_PATH: ${OSRM_DATA_PATH:-/data/nw-england.osrm}
     volumes:
       - ./osrm/data:/data
-    command: ["sh", "-c", "osrm-routed --algorithm mld -p 5012 ${OSRM_DATA_PATH}"]
+    command: ["sh", "-c", "osrm-routed --algorithm mld -p 5012 $OSRM_DATA_PATH"]
     networks:
       - scc200-net-edillocnon
   
@@ -60,10 +78,15 @@ services:
       POSTGRES_PASSWORD: pgpass
       POSTGRES_DB: transport
     ports:
-      - "127.0.0.1:5011:5011"
+      - "5011:5011"
     volumes:
       - transport-postgres-data:/var/lib/postgresql/data
     command: ["postgres", "-c", "port=5011"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pguser -d transport -p 5011"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     networks:
       - scc200-net-edillocnon
 
@@ -73,3 +96,4 @@ networks:
 
 volumes:
   transport-postgres-data:
+  transport-frontend-node_modules:

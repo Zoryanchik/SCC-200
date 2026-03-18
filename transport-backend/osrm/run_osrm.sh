@@ -49,6 +49,54 @@ fi
 
 echo "Using container runtime: $RUNTIME"
 
+# --- Port cleanup (prefer stopping containers over killing host PIDs) ---
+stop_containers_on_port() {
+  local port="$1"
+
+  local ids
+  ids=$($RUNTIME ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk -v p=":${port}->" '$0 ~ p {print $1}' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+  if [ -n "$ids" ]; then
+    echo "Port $port is published by container(s): $ids"
+    for id in $ids; do
+      echo "Stopping container $id to free port $port..."
+      $RUNTIME stop "$id" >/dev/null 2>&1 || true
+      $RUNTIME rm "$id" >/dev/null 2>&1 || true
+    done
+  fi
+}
+
+kill_host_listeners() {
+  local port="$1"
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "Warning: lsof not found; cannot auto-stop host listeners on port $port." >&2
+    return 0
+  fi
+
+  local pids
+  pids=$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+
+  echo "Port $port is in use by host PID(s): $pids"
+  # shellcheck disable=SC2086
+  kill -TERM $pids >/dev/null 2>&1 || true
+  local waited=0
+  while [ $waited -lt 5 ]; do
+    sleep 1
+    waited=$((waited + 1))
+    pids=$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)
+    [ -z "$pids" ] && return 0
+  done
+  echo "Port $port still busy; sending SIGKILL to PID(s): $pids"
+  # shellcheck disable=SC2086
+  kill -KILL $pids >/dev/null 2>&1 || true
+}
+
+stop_containers_on_port "$PORT"
+kill_host_listeners "$PORT"
+
 mkdir -p "$DATA_DIR"
 
 # Derive base names

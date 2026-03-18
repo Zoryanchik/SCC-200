@@ -2312,6 +2312,9 @@ function HoverWinnerController({
 																						const val = raw != null ? String(raw) : null;
 																						if (!val) continue;
 																						try { console.debug('[map] trying leg-geometry candidate (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
+																					// NOTE: This leg-geometry call is for *live/cached vehicle* overlays.
+																					// Do NOT pass historical `date` / `departure_time` here; live tracks are
+																					// intentionally today-only.
 																					let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																					url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
 																					url += `&mode=driving`;

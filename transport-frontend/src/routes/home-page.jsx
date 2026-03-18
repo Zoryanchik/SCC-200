@@ -283,8 +283,15 @@ const normalizeCoords = (raw) => {
  *
  * Falls back to a straight [from, to] line for any leg where OSRM fails.
  */
-const fetchGeometryForLegs = async (legs) => {
+const fetchGeometryForLegs = async (legs, opts = {}) => {
   if (!Array.isArray(legs) || legs.length === 0) return [];
+
+  // Optional journey context (used only for routed-journey geometry so the backend
+  // can pick the correct day/bucket merged timetable when returning stored route_tracks).
+  // Expected shapes:
+  //   { date: 'YYYY-MM-DD', departure_time: 'HH:MM[:SS]' }
+  const ctxDate = opts && (opts.date || opts.journeyDate || opts.service_date || opts.serviceDate) ? (opts.date || opts.journeyDate || opts.service_date || opts.serviceDate) : null;
+  const ctxDepartureTime = opts && (opts.departure_time || opts.departureTime || opts.depart_time || opts.time) ? (opts.departure_time || opts.departureTime || opts.depart_time || opts.time) : null;
 
   // Some planners expose a plan-level identifier that should be threaded through
   // so /route/leg-geometry can fetch stored track subsegments.
@@ -393,6 +400,11 @@ const fetchGeometryForLegs = async (legs) => {
       // stop ids) which is tied to the journey's canonical route_id.
 
   let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(fromLat)}&from_lon=${encodeURIComponent(fromLon)}&to_lat=${encodeURIComponent(toLat)}&to_lon=${encodeURIComponent(toLon)}&mode=${encodeURIComponent(requestMode)}`;
+
+      // Routed-journey correction: pass the selected date + departure_time so the
+      // backend can resolve tracks from the correct day's merged data.
+      if (ctxDate) url += `&date=${encodeURIComponent(ctxDate)}`;
+      if (ctxDepartureTime) url += `&departure_time=${encodeURIComponent(ctxDepartureTime)}`;
       // Prefer route_int for in-memory track lookup, fall back to route_id for older backends.
       if (routeInt != null && routeInt !== '') {
         url += `&route_int=${encodeURIComponent(routeInt)}`;
@@ -1821,7 +1833,10 @@ export default function HomePage() {
                 setIsSearching(false);
                 return;
               }
-              const segments = await fetchGeometryForLegs(planLegs);
+              const segments = await fetchGeometryForLegs(planLegs, {
+                date: plan?.date || plan?.journey_date || plan?.service_date || null,
+                departure_time: plan?.departure_time || plan?.departureTime || null,
+              });
               if (Array.isArray(segments) && segments.length > 0) {
                 const newOptions = sortedArr.slice();
                 newOptions[0] = { ...newOptions[0], routeGeometries: segments };
@@ -1956,7 +1971,10 @@ export default function HomePage() {
         if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) {
           setSelectedRouteIdx(null);
         } else {
-          const segments = await fetchGeometryForLegs(planLegs);
+          const segments = await fetchGeometryForLegs(planLegs, {
+            date: plan?.date || plan?.journey_date || plan?.service_date || null,
+            departure_time: plan?.departure_time || plan?.departureTime || null,
+          });
           if (segments.length > 0) {
             const newOptions = sortedOptions.slice();
             newOptions[0] = { ...newOptions[0], routeGeometries: segments };
@@ -1988,7 +2006,10 @@ export default function HomePage() {
             } catch (e) {}
             if (!planLegs || !Array.isArray(planLegs) || planLegs.length === 0) return;
             try {
-              const segments = await fetchGeometryForLegs(planLegs);
+              const segments = await fetchGeometryForLegs(planLegs, {
+                date: plan?.date || plan?.journey_date || plan?.service_date || null,
+                departure_time: plan?.departure_time || plan?.departureTime || null,
+              });
               if (segments.length === 0) return;
               setRouteOptions((prev) => {
                 if (!Array.isArray(prev)) return prev;
@@ -2078,7 +2099,10 @@ export default function HomePage() {
     }
 
     try {
-      const segments = await fetchGeometryForLegs(planLegs);
+      const segments = await fetchGeometryForLegs(planLegs, {
+        date: plan?.date || plan?.journey_date || plan?.service_date || null,
+        departure_time: plan?.departure_time || plan?.departureTime || null,
+      });
       if (segments.length > 0) {
         const newOptions = routeOptions.slice();
         newOptions[idx] = { ...newOptions[idx], routeGeometries: segments };

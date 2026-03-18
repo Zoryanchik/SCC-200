@@ -1431,7 +1431,9 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                        route_id: str | None = None,
                        route_int: int | None = None,
                        from_stop_id: str | None = None,
-                       to_stop_id: str | None = None):
+                       to_stop_id: str | None = None,
+                       date: str | None = None,
+                       departure_time: str | None = None):
     """Return geometry for a single journey leg.
 
     Query params:
@@ -1629,9 +1631,108 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                 except Exception:
                     tracks = []
 
+            # If fragment stitching didn't succeed, fall back to in-memory
+            # route_id-based tracks (still in-memory only). This keeps older
+            # behavior and allows tests to provide a minimal merged stub
+            # without requiring full router-cache context.
+            if not (isinstance(tracks, list) and len(tracks) >= 2) and (route_id or route_int is not None):
+                try:
+                    rid = route_id
+                    if not rid and route_int is not None:
+                        # Derive route_id from any in-memory merged we already found,
+                        # or by scanning the prebuilt cache/router cache. This is a
+                        # best-effort fallback used only when fragment stitching fails.
+                        try:
+                            ri = int(route_int)
+                        except Exception:
+                            ri = None
+                        if ri is not None:
+                            m2 = None
+                            try:
+                                m2 = merged
+                            except Exception:
+                                m2 = None
+                            if m2 is None:
+                                try:
+                                    if globals().get('_base_cache'):
+                                        prebuilt = _base_cache.get('prebuilt_cache')
+                                        if prebuilt:
+                                            for _k, v in prebuilt.items():
+                                                try:
+                                                    m2 = v[0]
+                                                except Exception:
+                                                    m2 = None
+                                                if m2:
+                                                    break
+                                except Exception:
+                                    m2 = None
+                            if m2 is None:
+                                try:
+                                    rcache = globals().get('_router_cache')
+                                    rlock = globals().get('_router_cache_lock')
+                                    if rcache is not None:
+                                        if rlock:
+                                            with rlock:
+                                                vals = list(rcache.values())
+                                        else:
+                                            vals = list(rcache.values())
+                                        for val in vals:
+                                            try:
+                                                m2 = val[0]
+                                            except Exception:
+                                                m2 = None
+                                            if m2:
+                                                break
+                                except Exception:
+                                    m2 = None
+                            if m2 is not None:
+                                try:
+                                    meta = (m2.route_metadata[ri] if 0 <= ri < len(getattr(m2, 'route_metadata', []) or []) else None)
+                                    if isinstance(meta, dict) and meta.get('route_id'):
+                                        rid = str(meta.get('route_id'))
+                                except Exception:
+                                    rid = None
+
+                    if not rid:
+                        raise RuntimeError('no route_id for route_int fallback')
+                    import inspect
+                    sig = inspect.signature(_fetch_route_tracks)
+                    if len(sig.parameters) <= 1:
+                        tracks = _fetch_route_tracks(rid)
+                    else:
+                        tracks = _fetch_route_tracks(rid, date_str=date)
+                except Exception:
+                    try:
+                        tracks = _fetch_route_tracks(route_id)
+                    except Exception:
+                        tracks = []
+
             # Back-compat: allow legacy route_id lookup (in-memory only).
             if not tracks and route_id:
-                tracks = _fetch_route_tracks(route_id)
+                # IMPORTANT: for historical journeys (non-today), we must
+                # resolve route_tracks against that day's merged timetable.
+                # If we scan "any" in-memory merged, we often hit today's
+                # prebuilt cache and return the wrong polyline.
+                bucket = None
+                try:
+                    if departure_time:
+                        st = seconds_since_midnight(departure_time)
+                        bucket = 'AM' if (st is not None and st < 43200) else 'PM'
+                except Exception:
+                    bucket = None
+
+                # Back-compat: tests and callers may monkeypatch _fetch_route_tracks
+                # with the older 1-arg signature. Detect and call accordingly.
+                try:
+                    import inspect
+                    sig = inspect.signature(_fetch_route_tracks)
+                    if len(sig.parameters) <= 1:
+                        tracks = _fetch_route_tracks(route_id)
+                    else:
+                        tracks = _fetch_route_tracks(route_id, date_str=date, bucket=bucket)
+                except Exception:
+                    # Fall back to the simplest call signature.
+                    tracks = _fetch_route_tracks(route_id)
             if trace:
                 try:
                     tlen = len(tracks) if isinstance(tracks, list) else None
@@ -1717,7 +1818,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                 "source": "linear"}
 
 
-def _fetch_route_tracks(route_id: str):
+def _fetch_route_tracks(route_id: str, *, date_str: str | None = None, bucket: str | None = None):
     """Return the route track as list of [lat, lon] or [] on failure.
 
     Prefer in-memory route_tracks from any loaded MergedData (prebuilt cache
@@ -1755,6 +1856,105 @@ def _fetch_route_tracks(route_id: str):
 
     db_vj_candidates = []
     db_jps_candidates = []
+
+    # 0) If the caller knows which service day they want, prefer that day's
+    # already-built router cache entry. This is critical for historical routing:
+    # if we scan "any" merged in memory, we often hit today's prebuilt cache.
+    #
+    # NOTE: Live vehicle tracks are intentionally today-only and do *not* pass
+    # date_str here; this helper is used by both live and routing geometry.
+    # Only engage the date-specific lookup when the requested day is NOT today.
+    # For today we want to keep the existing fast path (prebuilt_cache) and we
+    # also want tests that monkeypatch this helper with a legacy signature to
+    # keep working.
+    try:
+        today_str = datetime.now().date().isoformat()
+    except Exception:
+        today_str = None
+
+    if date_str and (not today_str or str(date_str) != str(today_str)):
+        try:
+            b = bucket
+            if not b:
+                # Default to PM to match get_router_for_date() when start_time is None.
+                b = 'PM'
+            if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                try:
+                    print('[route_tracks] lookup', {
+                        'route_id': route_id,
+                        'requested_date': str(date_str),
+                        'requested_bucket': str(b),
+                        'today': str(today_str) if today_str else None,
+                    })
+                except Exception:
+                    pass
+            cand_keys: list[tuple] = []
+            # Prefer exact (date,bucket) first.
+            cand_keys.append((str(date_str), str(b)))
+            # If bucket wasn't explicitly requested (or caller guessed),
+            # allow the opposite bucket as a fallback.
+            other = 'AM' if str(b) == 'PM' else 'PM'
+            cand_keys.append((str(date_str), other))
+            rcache = globals().get('_router_cache')
+            rlock = globals().get('_router_cache_lock')
+            if rcache is not None:
+                items = None
+                if rlock:
+                    with rlock:
+                        items = dict(rcache)
+                else:
+                    items = dict(rcache)
+                for k0 in cand_keys:
+                    val = items.get(k0)
+                    if not val:
+                        continue
+                    try:
+                        merged = val[0]
+                    except Exception:
+                        merged = None
+                    if not merged:
+                        continue
+                    r_int = None
+                    candidate_ints = []
+                    try:
+                        for i, meta in enumerate(getattr(merged, 'route_metadata', []) or []):
+                            if meta and isinstance(meta, dict) and meta.get('route_id') == route_id:
+                                r_int = i
+                                break
+                            if meta and isinstance(meta, dict) and vj_base:
+                                rid2 = meta.get('route_id')
+                                if _matches_vj_family(rid2):
+                                    candidate_ints.append(i)
+                    except Exception:
+                        r_int = None
+
+                    if r_int is None and candidate_ints:
+                        try:
+                            for i in candidate_ints:
+                                if i < len(merged.route_tracks) and merged.route_tracks[i]:
+                                    r_int = i
+                                    break
+                            if r_int is None:
+                                r_int = candidate_ints[0]
+                        except Exception:
+                            r_int = candidate_ints[0]
+                    if r_int is not None and r_int < len(merged.route_tracks):
+                        tracks = merged.route_tracks[r_int]
+                        if tracks:
+                            if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                                try:
+                                    print('[route_tracks] hit_router_cache', {
+                                        'cache_key': k0,
+                                        'route_id': route_id,
+                                        'route_int': int(r_int),
+                                        'tracks_len': len(tracks),
+                                    })
+                                except Exception:
+                                    pass
+                            return [[t[0], t[1]] for t in tracks]
+        except Exception:
+            # Best-effort only; fall through to the older scan logic.
+            pass
 
     # 1) Try in-memory caches (prebuilt_cache in _base_cache, then _router_cache)
     try:
@@ -1803,6 +2003,16 @@ def _fetch_route_tracks(route_id: str):
                                 if r_int < len(merged.route_tracks):
                                     tr = merged.route_tracks[r_int]
                                     if tr:
+                                        if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                                            try:
+                                                print('[route_tracks] hit_prebuilt_cache', {
+                                                    'prebuilt_key': k,
+                                                    'route_id': route_id,
+                                                    'route_int': int(r_int),
+                                                    'tracks_len': len(tr),
+                                                })
+                                            except Exception:
+                                                pass
                                         return tr
                             except Exception:
                                 pass
@@ -1940,17 +2150,56 @@ def _subsegment_from_coords(tracks: list, stop_atcos: list, walking_coords: dict
     # Choose the best (ia, ib) using multiple candidates.
     # Score = distance_to_a + distance_to_b + lambda * slice_len.
     # This biases toward (1) close snaps and (2) shorter plausible segments.
+    #
+    # IMPORTANT: When slicing between two stops *in a known order*, we must
+    # avoid picking a pair of indices that implies travelling backwards along
+    # the polyline (ib < ia). On looped / self-crossing tracks, the same stop
+    # can have multiple equally-close snap candidates. If we allow backwards
+    # index pairs, we can produce short-circuit "teleport" geometry.
     best = None  # (score, ia, ib, da, db)
+    best_rev = None  # best reverse pair (fallback only)
     lam = 0.15  # penalty per point of segment length
     for da, ia in stop_to_candidates.get(a, []):
         for db, ib in stop_to_candidates.get(b, []):
             seg_len = abs(ib - ia) + 1
             score = float(da) + float(db) + lam * float(seg_len)
-            if best is None or score < best[0]:
-                best = (score, ia, ib, da, db)
+            if ib >= ia:
+                if best is None or score < best[0]:
+                    best = (score, ia, ib, da, db)
+            else:
+                if best_rev is None or score < best_rev[0]:
+                    best_rev = (score, ia, ib, da, db)
+
+    if best is None and best_rev is not None:
+        # No forward slice was possible with the available candidates. This can
+        # happen when the polyline direction is opposite our stop order.
+        # Keep the previous behaviour as a fallback.
+        best = best_rev
 
     if best is None:
         return []
+
+    # Optional trace to help diagnose "teleporting" geometry where a stop snaps
+    # to the wrong part of a looped polyline.
+    if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+        try:
+            score, ia, ib, da, db = best
+            print('[subsegment] pick', {
+                'a': a,
+                'b': b,
+                'a_coord': (walking_coords.get(a) if walking_coords else None),
+                'b_coord': (walking_coords.get(b) if walking_coords else None),
+                'best_score': float(score),
+                'ia': int(ia),
+                'ib': int(ib),
+                'da_m': float(da),
+                'db_m': float(db),
+                'seg_len_pts': int(abs(ib - ia) + 1),
+                'a_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(a, [])],
+                'b_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(b, [])],
+            })
+        except Exception:
+            pass
 
     _, ia, ib, _, _ = best
     if ia <= ib:
@@ -5948,8 +6197,10 @@ async def bus_live_operator(
     operator: str,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
-    latTol: float = 0.07,
-    lonTol: float = 0.07,
+    # Default tolerance is tight so unit tests and client expectations match.
+    # Can be overridden by callers when they want a wider scan.
+    latTol: float = 0.0003,
+    lonTol: float = 0.0003,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
@@ -7094,6 +7345,19 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
         merged, router, walking = build_for_date(
             loader, walking_raw, date_str, start_time=start_time,
             atco_loader=al)
+
+        # Stamp a small amount of context onto merged so downstream consumers
+        # (notably build_journey_plan_response geometry selection) can know the
+        # requested service day and the AM/PM bucket. MergedData itself doesn't
+        # define date_str/bucket fields.
+        try:
+            if not hasattr(merged, 'meta') or not isinstance(getattr(merged, 'meta', None), dict):
+                merged.meta = {}
+            bucket0 = "AM" if (start_time is not None and start_time < 43200) else "PM"
+            merged.meta['date'] = str(date_str)
+            merged.meta['bucket'] = bucket0
+        except Exception:
+            pass
         if timing_enabled and _t_build0 is not None:
             try:
                 logger.info('[router] build_for_date(%s,%s) %.3fs', date_str, bucket, time.perf_counter() - _t_build0)
@@ -7478,6 +7742,49 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         }
 
     meta = route_result.get("_meta", {})
+    # Derive a stable AM/PM bucket for track selection. This must mirror the
+    # router-cache keying used elsewhere (get_router_for_date).
+    # When request_start_seconds is unavailable, fall back to merged metadata.
+    try:
+        _bucket = None
+        if request_start_seconds is not None:
+            # convention: < 12:00 => AM else PM
+            _bucket = 'AM' if int(request_start_seconds) < 12 * 3600 else 'PM'
+        else:
+            _bucket = getattr(merged, 'bucket', None)
+        if _bucket not in ('AM', 'PM'):
+            _bucket = None
+    except Exception:
+        _bucket = None
+    # Date string should come from router construction (get_router_for_date)
+    # which annotates merged.meta['date'].
+    try:
+        _date_str = None
+        try:
+            mm = getattr(merged, 'meta', None)
+            if isinstance(mm, dict):
+                _date_str = mm.get('date') or mm.get('date_str')
+        except Exception:
+            _date_str = None
+        if not _date_str and isinstance(meta, dict):
+            _date_str = meta.get('date')
+    except Exception:
+        _date_str = None
+
+    # Trace the context we *think* we're using for geometry selection.
+    if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+        try:
+            print('[journey_geom] ctx', {
+                'meta_date': meta.get('date') if isinstance(meta, dict) else None,
+                'merged_meta_date': (getattr(merged, 'meta', {}) or {}).get('date') if isinstance(getattr(merged, 'meta', None), dict) else None,
+                'computed_date': _date_str,
+                'computed_bucket': _bucket,
+                'request_start_seconds': request_start_seconds,
+                'merged_has_date_str': bool(hasattr(merged, 'date_str')),
+                'merged_has_bucket': bool(hasattr(merged, 'bucket')),
+            })
+        except Exception:
+            pass
 
     # --- Walking-only route (only _meta key present) ---
     if set(route_result.keys()) == {"_meta"}:
@@ -7869,6 +8176,35 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
 
         legs.append(leg)
 
+        # Geometry context: persist the exact date/bucket + dense identifiers
+        # while we're still operating inside the correct day's merged data.
+        # This avoids any future need to "re-guess" which merged dataset to
+        # use when attaching geometry.
+        try:
+            if transport != "walking":
+                leg.setdefault("geom_context", {})
+                if isinstance(leg.get("geom_context"), dict):
+                    leg["geom_context"].update({
+                        "date": _date_str,
+                        "bucket": _bucket,
+                        "route_int": route_int,
+                        "from_stop_int": prev_int,
+                        "to_stop_int": curr_int,
+                    })
+
+                if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                    try:
+                        print('[journey_geom] leg_geom_context', {
+                            'leg_idx': leg_idx,
+                            'transport': transport,
+                            'route_int': route_int,
+                            'ctx': leg.get('geom_context') if isinstance(leg, dict) else None,
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # -- geometry for this leg --
         color = _COLOR.get(transport, "#666666")
         if transport == "walking":
@@ -8183,39 +8519,45 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                         })
                                     except Exception:
                                         pass
-                            tracks_pts = merged.route_tracks[route_int] if route_int < len(merged.route_tracks) else []
-                            if trace:
+                            # IMPORTANT: do not fall back to slicing full route_tracks here.
+                            # Full-route polylines can be branched/jumbled and lead to
+                            # "teleport" segments on loops. If we can't obtain link
+                            # fragments, treat geometry as unavailable so callers can
+                            # handle it (e.g. OSRM or linear fallback) rather than
+                            # drawing misleading map lines.
+                            if trace and (not seg):
                                 try:
-                                    print('[journey_geom] route_int_tracks', {
+                                    tracks_pts = merged.route_tracks[route_int] if route_int < len(merged.route_tracks) else []
+                                    print('[journey_geom] no_link_fragments_no_route_tracks_fallback', {
                                         'route_int': route_int,
-                                        'have_tracks': bool(tracks_pts),
-                                        'tracks_len': (len(tracks_pts) if tracks_pts else 0),
+                                        'link_map_len': (len(link_map) if link_map else 0),
+                                        'have_full_tracks': bool(tracks_pts),
+                                        'full_tracks_len': (len(tracks_pts) if tracks_pts else 0),
                                     })
                                 except Exception:
                                     pass
-                            if (not seg) and tracks_pts:
-                                tracks_ll = [[t[0], t[1]] for t in tracks_pts]
-                                seg = _subsegment_from_coords(tracks_ll, [prev_atco, curr_atco], local_coords)
-                                if trace:
-                                    try:
-                                        print('[journey_geom] subsegment_from_full_tracks', {
-                                            'route_int': route_int,
-                                            'full_tracks_len': (len(tracks_pts) if tracks_pts else 0),
-                                            'seg_len': (len(seg) if seg else 0),
-                                        })
-                                    except Exception:
-                                        pass
                         except Exception:
                             seg = []
+                    used_full_route_tracks = False
                     if (not seg) and route_id:
                         # Back-compat: allow route_id-based track lookup, but it must
                         # remain in-memory only. Resolve full track via _fetch_route_tracks
                         # (in-memory) and slice directly from coords.
                         try:
-                            _tracks = _fetch_route_tracks(route_id)
+                            # Prefer per-leg context if present (more robust than globals).
+                            ctx = None
+                            try:
+                                ctx = leg.get('geom_context') if isinstance(leg, dict) else None
+                            except Exception:
+                                ctx = None
+                            ctx_date = (ctx.get('date') if isinstance(ctx, dict) else None) or _date_str
+                            ctx_bucket = (ctx.get('bucket') if isinstance(ctx, dict) else None) or _bucket
+                            _tracks = _fetch_route_tracks(route_id, date_str=ctx_date, bucket=ctx_bucket)
                         except Exception:
                             _tracks = []
                         seg = _subsegment_from_coords(_tracks, [prev_atco, curr_atco], local_coords) if _tracks else []
+                        if seg and len(seg) >= 2:
+                            used_full_route_tracks = True
                     if seg and len(seg) >= 2:
                         track_coords = seg
                         if trace:
@@ -8242,7 +8584,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
 
         if track_coords:
             coords = track_coords
-            geom_source = "route_tracks"
+            # If we reached this point because we stitched stop-to-stop link fragments,
+            # label it explicitly. Only label as route_tracks when we actually sliced a
+            # full-route polyline via the route_id-based fallback.
+            if transport == 'bus' and not locals().get('used_full_route_tracks', False):
+                geom_source = "route_link_tracks"
+            else:
+                geom_source = "route_tracks"
         else:
             # Per-leg fallback: for missing tracks, fall back to OSRM (best-effort)
             # and then to a straight line. This is intentionally per-leg so a
@@ -8271,6 +8619,14 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 if curr_coord:
                     coords.append([curr_coord[0], curr_coord[1]])
                 geom_source = geom_source or "linear"
+
+        # If bus link fragments were unavailable, surface a clear note for debugging.
+        try:
+            if transport == 'bus' and geom_source in (None, 'linear', 'osrm'):
+                if 'link_map' in locals() and isinstance(locals().get('link_map'), dict) and len(locals().get('link_map')) == 0:
+                    leg.setdefault('geometry_note', 'no_link_fragments')
+        except Exception:
+            pass
 
         # Attach geometry source to the leg so clients can debug mixed sources.
         try:

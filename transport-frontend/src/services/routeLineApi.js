@@ -5,7 +5,7 @@
  * user clicks a line chip inside a bus-stop popup.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5050';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || 'http://localhost:5050';
 
 // ── Mock route data (Lancaster / NW England area) ───────────────────
 //

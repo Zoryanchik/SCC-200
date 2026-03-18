@@ -17,6 +17,11 @@ export default defineConfig({
   server: {
     // Default dev server port for this project
     port: 5075,
+    // Under heavy load (VM/container + big rebuilds) browsers can report
+    // "connection dropped" due to HMR timing out. Allow longer time here.
+    hmr: {
+      timeout: 60000,
+    },
     // Note: do not bind to all interfaces by default here. Leaving
     // `host` unset ensures Vite prints the standard network hint
     // ("➜  Network: use --host to expose") and developers can opt-in

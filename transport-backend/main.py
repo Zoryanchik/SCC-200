@@ -148,6 +148,7 @@ def initialize_base():
     import urllib.request as _ur
     import urllib.error as _ue
 
+
     # Allow the OSRM endpoint to be overridden by env var so containers
     # can address an OSRM sidecar by name (e.g. http://osrm:5012).
     OSRM_URL = os.environ.get("OSRM_URL", "http://localhost:5012")
@@ -576,6 +577,13 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
         atco_loader=atco_loader,
         stop_name_fn=loader.get_stop_names_bulk,
     )
+    # Ensure the merged instance can lazy-load DB-backed link fragments.
+    # This is critical for historical dates where we still want route_link_tracks
+    # to be available (and avoid falling back to full route_tracks slicing).
+    try:
+        merged.bus_loader = loader
+    except Exception:
+        pass
     if timing_enabled and _t_merge0 is not None:
         print(f"    [dayload] merge: {_time.perf_counter() - _t_merge0:.3f}s")
 

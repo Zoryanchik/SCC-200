@@ -85,7 +85,7 @@ class WalkingLoader:
     def precompute_walking_transfers(self, coords, osrm_base="http://localhost:5012",
                                       max_walk_seconds=600,
                                       bbox_margin=0.012,
-                                      max_workers=50):
+                                      max_workers=15):
         """Precompute walking transfers between nearby stops using OSRM.
 
         Parameters
@@ -103,6 +103,9 @@ class WalkingLoader:
         # Mark progress state
         self.precomputing = True
         self.precompute_use_fallback = False
+
+        # Hard cap concurrency to avoid saturating CPU / OSRM / network.
+        max_workers = max(1, min(int(max_workers or 1), 15))
 
         conn = self._connect(self.db_path)
         cur = conn.cursor()
