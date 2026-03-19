@@ -375,6 +375,97 @@ const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
 	}
 };
 
+// OSRM /match snapping for huge traces (best-effort, segmented)
+//
+// Why: OSRM match can be slow/timeout on very long GPS traces. Splitting into
+// chunks keeps each request bounded and allows progressive rendering.
+//
+// Contract:
+// - Input coords are [lat, lon]
+// - Returns best-effort snapped coords (may be partially snapped)
+// - If provided, onProgress is called with (partialCoords, { doneSegments, totalSegments })
+//   as each segment finishes.
+const osrmMatchCoordsLatLonSegmented = async (
+	coordsLatLon,
+	{
+		profile = 'driving',
+		timeoutMs = 6000,
+		segmentSize = 180,
+		overlap = 6,
+		onProgress = null,
+		isCancelled = null,
+	} = {},
+) => {
+	try {
+		if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
+		const norm = [];
+		for (const pt of coordsLatLon) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const lat = Number(pt[0]);
+			const lon = Number(pt[1]);
+			if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+			norm.push([lat, lon]);
+		}
+		if (norm.length < 2) return coordsLatLon;
+
+		// Small traces: keep single-shot behavior.
+		if (norm.length <= segmentSize) {
+			const out = await osrmMatchCoordsLatLon(norm, { profile, timeoutMs });
+			if (typeof onProgress === 'function') {
+				try { onProgress(out, { doneSegments: 1, totalSegments: 1 }); } catch (e) { /* ignore */ }
+			}
+			return out;
+		}
+
+		const segSize = Math.max(20, Math.floor(segmentSize));
+		const ov = Math.max(0, Math.min(20, Math.floor(overlap)));
+		const step = Math.max(2, segSize - ov);
+
+		const segments = [];
+		for (let start = 0; start < norm.length - 1; start += step) {
+			const end = Math.min(norm.length, start + segSize);
+			const seg = norm.slice(start, end);
+			if (seg.length >= 2) segments.push({ start, end, seg });
+			if (end >= norm.length) break;
+		}
+		const totalSegments = segments.length;
+		let doneSegments = 0;
+
+		// We'll build output progressively. Each segment contributes its snapped coords;
+		// for non-first segments, drop the first few coords to reduce overlap duplication.
+		let outAll = [];
+		for (let i = 0; i < segments.length; i++) {
+			if (typeof isCancelled === 'function' && isCancelled()) return outAll.length >= 2 ? outAll : coordsLatLon;
+			const { seg } = segments[i];
+			let snapped = seg;
+			try {
+				snapped = await osrmMatchCoordsLatLon(seg, { profile, timeoutMs });
+			} catch (e) {
+				snapped = seg;
+			}
+			if (!Array.isArray(snapped) || snapped.length < 2) snapped = seg;
+
+			// De-overlap: for subsequent segments, drop a few points.
+			let contrib = snapped;
+			if (i > 0 && contrib.length > ov) contrib = contrib.slice(ov);
+			// Avoid duplicate consecutive points at join boundaries.
+			for (const p of contrib) {
+				const last = outAll[outAll.length - 1];
+				if (!last || last[0] !== p[0] || last[1] !== p[1]) outAll.push(p);
+			}
+
+			doneSegments++;
+			if (typeof onProgress === 'function') {
+				try { onProgress(outAll, { doneSegments, totalSegments }); } catch (e) { /* ignore */ }
+			}
+		}
+
+		return outAll.length >= 2 ? outAll : coordsLatLon;
+	} catch (e) {
+		return coordsLatLon;
+	}
+};
+
 // Utility: project point P onto segment AB and return nearest point on segment
 const _projectPointOntoSegment = (px, py, ax, ay, bx, by) => {
 	const vx = bx - ax;
@@ -2534,14 +2625,24 @@ function HoverWinnerController({
 																			const quick = marker && (marker.track_coords || marker.meta?.track_coords);
 																			if (Array.isArray(quick) && quick.length >= 2) {
 																				setSelectedVehicleTrack({ id: marker.id, coords: quick, color, stops: [], label: null });
-																				// Smooth/snaps live track geometry via OSRM (best-effort).
+																				// Smooth/snaps live track geometry via OSRM /match (best-effort).
 																				// Only applies to track_coords (not stop-based fallbacks).
+																				// For huge traces, do it in segments and progressively update the UI.
 																				try {
 																					const tokenAtStart = selectionToken;
-																					const snapped = await osrmMatchCoordsLatLon(quick, { profile: 'driving', timeoutMs: 6000 });
-																					if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
-																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
-																					}
+																					await osrmMatchCoordsLatLonSegmented(quick, {
+																						profile: 'driving',
+																						timeoutMs: 6000,
+																						segmentSize: 180,
+																						overlap: 6,
+																						isCancelled: () => selectedVehicleReqTokenRef.current !== tokenAtStart,
+																						onProgress: (partial) => {
+																							if (selectedVehicleReqTokenRef.current !== tokenAtStart) return;
+																							if (Array.isArray(partial) && partial.length >= 2) {
+																								setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: partial, color } : prev);
+																							}
+																						},
+																					});
 																				} catch (e) { /* ignore */ }
 																				try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																				return;

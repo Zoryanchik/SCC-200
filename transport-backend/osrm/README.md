@@ -37,6 +37,22 @@ Override the PBF URL, data directory and port (positional args):
 ./transport-backend/osrm/run_osrm.sh "https://download.geofabrik.de/.../myregion-latest.osm.pbf" ./mydata 5012
 ```
 
+Performance: give OSRM more RAM
+
+OSRM can get extremely slow if it's paging/swapping. By default `run_osrm.sh`
+starts `osrm-routed` with a 10g memory + swap limit. You can override the
+limits using env vars:
+
+```bash
+OSRM_MEMORY=8g ./transport-backend/osrm/run_osrm.sh
+```
+
+Optionally set an explicit swap limit too:
+
+```bash
+OSRM_MEMORY=12g OSRM_MEMORY_SWAP=12g ./transport-backend/osrm/run_osrm.sh
+```
+
 API example
 
 The router will be available at `http://localhost:5012` by default. Example route query:

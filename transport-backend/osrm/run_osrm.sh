@@ -21,6 +21,19 @@ fi
 
 NETWORK_NAME="${NETWORK_NAME:-scc200-net-edillocnon}"
 
+# Optional memory limits for the OSRM routed container. OSRM becomes extremely
+# slow when it starts paging, so giving the container more RAM is often the
+# biggest performance win.
+#
+# Examples:
+#   OSRM_MEMORY=8g ./transport-backend/osrm/run_osrm.sh
+#   OSRM_MEMORY=12g OSRM_MEMORY_SWAP=12g ./transport-backend/osrm/run_osrm.sh
+#
+# Default: 10g (good baseline for medium/large regional extracts). Override
+# per-run with OSRM_MEMORY/OSRM_MEMORY_SWAP.
+OSRM_MEMORY="${OSRM_MEMORY:-10g}"
+OSRM_MEMORY_SWAP="${OSRM_MEMORY_SWAP:-10g}"
+
 PBF_URL="${1:-$PBF_URL_DEFAULT}"
 DATA_DIR="${2:-$DATA_DIR_DEFAULT}"
 PORT="${3:-$PORT_DEFAULT}"
@@ -28,6 +41,12 @@ PORT="${3:-$PORT_DEFAULT}"
 echo "Using PBF URL: $PBF_URL"
 echo "Data directory: $DATA_DIR"
 echo "Host port: $PORT -> container port 5012"
+if [ -n "$OSRM_MEMORY" ]; then
+  echo "OSRM container memory limit: $OSRM_MEMORY"
+fi
+if [ -n "$OSRM_MEMORY_SWAP" ]; then
+  echo "OSRM container memory swap limit: $OSRM_MEMORY_SWAP"
+fi
 
 # Prefer podman when available and connected; fall back to docker if not.
 RUNTIME=""
@@ -196,9 +215,23 @@ if [ "$DETACH" -eq 1 ]; then
     $RUNTIME stop "$CONTAINER_NAME" || true
     $RUNTIME rm "$CONTAINER_NAME" || true
   fi
-  $RUNTIME run -d --name "$CONTAINER_NAME" --network "$NETWORK_NAME" -p ${PORT}:5012 -v "$DATA_DIR":/data${MOUNT_OPTS} "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5012 /data/"$NAME.osrm"
+  EXTRA_RUN_OPTS=()
+  if [ -n "$OSRM_MEMORY" ]; then
+    EXTRA_RUN_OPTS+=(--memory "$OSRM_MEMORY")
+  fi
+  if [ -n "$OSRM_MEMORY_SWAP" ]; then
+    EXTRA_RUN_OPTS+=(--memory-swap "$OSRM_MEMORY_SWAP")
+  fi
+  $RUNTIME run -d --name "$CONTAINER_NAME" --network "$NETWORK_NAME" "${EXTRA_RUN_OPTS[@]}" -p ${PORT}:5012 -v "$DATA_DIR":/data${MOUNT_OPTS} "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5012 /data/"$NAME.osrm"
   echo "Detached OSRM container started."
 else
   echo "Starting interactive OSRM (will attach to network $NETWORK_NAME). Press Ctrl-C to stop."
-  $RUNTIME run --rm --name "$CONTAINER_NAME" --network "$NETWORK_NAME" -p ${PORT}:5012 -v "$DATA_DIR":/data${MOUNT_OPTS} "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5012 /data/"$NAME.osrm"
+  EXTRA_RUN_OPTS=()
+  if [ -n "$OSRM_MEMORY" ]; then
+    EXTRA_RUN_OPTS+=(--memory "$OSRM_MEMORY")
+  fi
+  if [ -n "$OSRM_MEMORY_SWAP" ]; then
+    EXTRA_RUN_OPTS+=(--memory-swap "$OSRM_MEMORY_SWAP")
+  fi
+  $RUNTIME run --rm --name "$CONTAINER_NAME" --network "$NETWORK_NAME" "${EXTRA_RUN_OPTS[@]}" -p ${PORT}:5012 -v "$DATA_DIR":/data${MOUNT_OPTS} "$DOCKER_IMAGE" osrm-routed --algorithm mld -p 5012 /data/"$NAME.osrm"
 fi
