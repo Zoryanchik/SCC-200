@@ -181,6 +181,22 @@ const createEndpointIcon = (color, letter) => {
 export const highlightEndpoints = (map, start, end) => {
 	if (!map) return [];
 	const created = [];
+	// Hardening: ensure the endpoint pane exists and is on top.
+	// Why: stop-popup clicks or other flows can call highlightEndpoints before
+	// MapController's mount effect has created panes, which can cause markers
+	// to fall back to Leaflet's default markerPane and render beneath other
+	// overlays (e.g. CircleMarkers).
+	try {
+		if (!map.getPane('endpointPane')) {
+			map.createPane('endpointPane');
+		}
+		const pane = map.getPane('endpointPane');
+		if (pane && pane.style) {
+			pane.style.zIndex = 1200;
+		}
+	} catch (e) {
+		// best-effort only
+	}
 	try {
                 // Ensure arrays have at least 2 valid numbers
 		if (start && Array.isArray(start) && start.length >= 2 && Number.isFinite(start[0])) {

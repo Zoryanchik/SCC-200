@@ -18,6 +18,13 @@ import { render, fireEvent, waitFor } from '@testing-library/react';
 vi.mock('react-leaflet', () => {
   const React = require('react');
 
+  // Allow tests to inspect Leaflet pane z-indices created by MapViewMap.
+  // MapViewMap uses imperative Leaflet calls even when react-leaflet is stubbed.
+  const paneStyles = {};
+  if (global && global.window) {
+    global.window.__paneStyles = paneStyles;
+  }
+
   return {
     // Minimal Map container; just render children.
     MapContainer: ({ children }) => <div data-testid="map">{children}</div>,
@@ -46,8 +53,14 @@ vi.mock('react-leaflet', () => {
     Pane: ({ children }) => <div data-testid="pane">{children}</div>,
     useMap: () => ({
       // MapController calls createPane/getPane in some versions; be permissive.
-      createPane: () => ({ style: {} }),
-      getPane: () => ({ style: {} }),
+      createPane: (name) => {
+        if (!paneStyles[name]) paneStyles[name] = {};
+        return { style: paneStyles[name] };
+      },
+      getPane: (name) => {
+        if (!name) return { style: {} };
+        return paneStyles[name] ? { style: paneStyles[name] } : null;
+      },
       getCenter: () => ({ lat: 54.0, lng: -2.8 }),
       fitBounds: () => {},
       on: () => {},
@@ -258,6 +271,39 @@ describe('MapViewMap vehicle track selection', () => {
 
     // Sanity: confirm we didn't render the legacy React-based vehicle-track elements.
     expect(queryAllByTestId('vehicle-track')).toHaveLength(0);
+  });
+
+  it('ensures endpointPane exists and is above transferPane', async () => {
+    // Render MapViewMap with a selected journey route so it calls highlightEndpoints.
+    // We don't need real map drawing; we only assert pane z-indexes were set.
+    const { rerender } = render(
+      <MapViewMap
+        filteredMarkers={[]}
+        busStops={[]}
+        selectedStop={null}
+        activeRoutes={new Map()}
+        toggleRoute={() => {}}
+        selectedJourneyRoute={{
+          0: { coords: [[54.0, -2.8], [54.1, -2.7]], _from: [54.0, -2.8], _to: [54.1, -2.7], _normKey: 'k0' },
+          _start: [54.0, -2.8],
+          _end: [54.1, -2.7],
+          length: 1,
+        }}
+      />
+    );
+
+    // Wait a tick for MapController effect.
+    await waitFor(() => {
+      expect(global.window.__paneStyles).toBeTruthy();
+    });
+    const panes = global.window.__paneStyles || {};
+    // transferPane is created by MapController; endpointPane is now also created
+    // defensively by highlightEndpoints.
+    const transferZ = Number(panes.transferPane && panes.transferPane.zIndex);
+    const endpointZ = Number(panes.endpointPane && panes.endpointPane.zIndex);
+    // We specifically require endpoints to be on top so S/D markers aren't hidden
+    // behind black CircleMarkers.
+    expect(endpointZ).toBeGreaterThan(transferZ);
   });
 
   it('attempts extra route_id geometry fetches when route_int succeeds but label contains multiple route_ids (circular stitch)', async () => {
