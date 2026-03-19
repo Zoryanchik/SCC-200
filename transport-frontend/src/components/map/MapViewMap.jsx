@@ -326,6 +326,55 @@ const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
 	}
 };
 
+// OSRM /match snapping (best-effort)
+// Input/Output coords are [lat, lon]. Uses backend POST proxy to avoid URL limits.
+// If OSRM isn't reachable or returns an error, falls back to original coords.
+const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 6000 } = {}) => {
+	try {
+		if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
+		const norm = [];
+		for (const pt of coordsLatLon) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const lat = Number(pt[0]);
+			const lon = Number(pt[1]);
+			if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+			norm.push([lat, lon]);
+		}
+		if (norm.length < 2) return coordsLatLon;
+
+		const matchUrl = `${API_BASE.replace(/\/$/, '')}/osrm/match`;
+		const controller = new AbortController();
+		const t = setTimeout(() => controller.abort(), timeoutMs);
+		let resp;
+		try {
+			resp = await fetch(matchUrl, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ coords: norm, profile }),
+				signal: controller.signal,
+			});
+		} finally {
+			clearTimeout(t);
+		}
+		if (!resp || !resp.ok) return coordsLatLon;
+		const data = await resp.json();
+		const osrmCoords = data && data.matchings && data.matchings[0] && data.matchings[0].geometry && data.matchings[0].geometry.coordinates;
+		if (!Array.isArray(osrmCoords) || osrmCoords.length < 2) return coordsLatLon;
+		// OSRM returns [lon, lat]
+		const out = [];
+		for (const pt of osrmCoords) {
+			if (!Array.isArray(pt) || pt.length < 2) continue;
+			const lon = Number(pt[0]);
+			const lat = Number(pt[1]);
+			if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+			out.push([lat, lon]);
+		}
+		return out.length >= 2 ? out : coordsLatLon;
+	} catch (e) {
+		return coordsLatLon;
+	}
+};
+
 // Utility: project point P onto segment AB and return nearest point on segment
 const _projectPointOntoSegment = (px, py, ax, ay, bx, by) => {
 	const vx = bx - ax;
@@ -2435,7 +2484,7 @@ function HoverWinnerController({
 																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																						if (shouldSnapTrack) {
 																							try {
-																								const snapped = await osrmRouteCoordsLatLon(norm);
+																								const snapped = await osrmMatchCoordsLatLon(norm, { profile: 'driving', timeoutMs: 6000 });
 																								if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
 																									setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
 																								}
@@ -2485,6 +2534,15 @@ function HoverWinnerController({
 																			const quick = marker && (marker.track_coords || marker.meta?.track_coords);
 																			if (Array.isArray(quick) && quick.length >= 2) {
 																				setSelectedVehicleTrack({ id: marker.id, coords: quick, color, stops: [], label: null });
+																				// Smooth/snaps live track geometry via OSRM (best-effort).
+																				// Only applies to track_coords (not stop-based fallbacks).
+																				try {
+																					const tokenAtStart = selectionToken;
+																					const snapped = await osrmMatchCoordsLatLon(quick, { profile: 'driving', timeoutMs: 6000 });
+																					if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
+																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
+																					}
+																				} catch (e) { /* ignore */ }
 																				try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																				return;
 																			}
@@ -3274,7 +3332,7 @@ function HoverWinnerController({
 																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
 																		if (shouldSnapTrack) {
 																			try {
-																				const snapped = await osrmRouteCoordsLatLon(norm);
+																			const snapped = await osrmMatchCoordsLatLon(norm);
 																				if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
 																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
 																				}

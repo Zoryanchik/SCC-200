@@ -171,9 +171,34 @@ describe('MapViewMap vehicle track selection', () => {
 			variants: [],
 		});
 
-    // Mock global fetch for /route/leg-geometry.
-    global.fetch = vi.fn(async (url) => {
+    // Mock global fetch for /route/leg-geometry and for OSRM match snapping.
+    global.fetch = vi.fn(async (url, init) => {
       const u = String(url);
+
+      // We expect snapping to use /osrm/match (POST) and never /osrm/route.
+      if (u.includes('/osrm/route')) throw new Error('Unexpected OSRM /route call');
+      if (u.includes('/osrm/match')) {
+        const method = init && init.method ? String(init.method).toUpperCase() : 'GET';
+        if (method !== 'POST') throw new Error('Expected POST for /osrm/match');
+        // Return a minimally valid OSRM match response.
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            matchings: [
+              {
+                geometry: {
+                  // OSRM returns [lon, lat]
+                  coordinates: [[-2.8, 54.0], [-2.75, 54.05], [-2.7, 54.1]],
+                },
+              },
+            ],
+          }),
+          text: async () => '',
+        };
+      }
+
       if (!u.includes('/route/leg-geometry')) {
         return {
           ok: false,
@@ -182,10 +207,6 @@ describe('MapViewMap vehicle track selection', () => {
           json: async () => ({}),
           text: async () => 'not found',
         };
-      }
-
-      if (u.includes('/osrm/route')) {
-        throw new Error('Unexpected OSRM call');
       }
 
       // RID1 returns linear (should be ignored in strict mode)
