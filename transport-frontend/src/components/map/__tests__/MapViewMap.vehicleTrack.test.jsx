@@ -171,6 +171,10 @@ describe('MapViewMap vehicle track selection', () => {
         };
       }
 
+      if (u.includes('/osrm/route')) {
+        throw new Error('Unexpected OSRM call');
+      }
+
       // RID1 returns linear (should be ignored in strict mode)
       if (u.includes('route_int=RID1') || u.includes('route_id=RID1')) {
         return {
@@ -184,11 +188,12 @@ describe('MapViewMap vehicle track selection', () => {
 
   // RID2 returns non-linear geometry (should be selected)
       if (u.includes('route_int=RID2') || u.includes('route_id=RID2')) {
+        const shortTrack = [[54.0, -2.8], [54.05, -2.75], [54.1, -2.7]];
         return {
           ok: true,
           status: 200,
           headers: { get: () => 'application/json' },
-          json: async () => ({ source: 'route_link_tracks', coords: [[54.0, -2.8], [54.05, -2.75], [54.1, -2.7]] }),
+          json: async () => ({ source: 'route_link_tracks', coords: shortTrack }),
           text: async () => '',
         };
       }

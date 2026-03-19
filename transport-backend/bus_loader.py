@@ -1328,7 +1328,18 @@ class BusLoader:
             bd.add_route_journeys(current_route, journeys_buf)
 
         # --- 3. load journey_times: journey_id -> list of (atco_code, arrival) ---
-        cursor.execute("SELECT journey_id, atco_code, arrival_time FROM bus_journey_times ORDER BY journey_id, arrival_time")
+        # IMPORTANT: preserve the route's stop order for journey stop sequences.
+        # Ordering solely by arrival_time can scramble stops when timestamps are
+        # duplicated/missing (ties) or otherwise noisy.
+        cursor.execute(
+            """
+            SELECT t.journey_id, t.atco_code, t.arrival_time
+            FROM bus_journey_times t
+            LEFT JOIN bus_journey_routes jr ON jr.journey_id = t.journey_id
+            LEFT JOIN bus_route_stops rs ON rs.route_id = jr.route_id AND rs.atco_code = t.atco_code
+            ORDER BY t.journey_id, COALESCE(rs.stop_order, 1000000), t.atco_code
+            """
+        )
         current_journey = None
         times_buf = []
         for journey_id, atco_code, arrival_time in cursor.fetchall():

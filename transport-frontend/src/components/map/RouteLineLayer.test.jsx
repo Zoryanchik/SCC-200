@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
-import { act, render } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 
 // Mock react-leaflet components
 vi.mock('react-leaflet', () => ({
@@ -46,6 +46,7 @@ const MOCK_ROUTE_WITH_GEOMETRY = {
   variants: [
     {
       route_id: 1,
+      geometry_source: 'route_link_tracks',
       stops: [
         { name: 'Stop A', lat: 54.0, lon: -2.8, atco_code: 'A' },
         { name: 'Stop B', lat: 54.05, lon: -2.79, atco_code: 'B' },
@@ -203,14 +204,60 @@ describe('SingleRouteLine', () => {
   // Underlay + main polyline.
   expect(polylines).toHaveLength(2);
   const positions = JSON.parse(polylines[1].dataset.positions);
-    // When geometry is provided, the component inserts projected stop points
-    // and applies smoothing, so the rendered polyline has *more* points than
-    // the raw 3-stop fallback.
-    expect(positions.length).toBeGreaterThan(3);
+    // When valid track geometry is provided, render the geometry as-is.
+    expect(positions).toHaveLength(MOCK_ROUTE_WITH_GEOMETRY.variants[0].geometry.length);
     // Keep endpoint assertions — the path should still begin/end at the
     // original geometry endpoints.
     expect(positions[0]).toEqual([54.0, -2.8]);
     expect(positions[positions.length - 1]).toEqual([54.1, -2.7]);
+  });
+
+  test('when geometry is present and OSRM returns a match, uses snapped positions', async () => {
+    const snapped = {
+      matchings: [
+        {
+          geometry: {
+            // OSRM geojson coords are [lon, lat]
+            coordinates: [
+              [-2.8, 54.0],
+              [-2.795, 54.02],
+              [-2.75, 54.07],
+              [-2.7, 54.1],
+            ],
+          },
+        },
+      ],
+    };
+
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => snapped,
+    });
+
+    try {
+      const { getAllByTestId } = render(
+        <SingleRouteLine routeData={MOCK_ROUTE_WITH_GEOMETRY} />,
+      );
+
+      await waitFor(() => {
+        expect(fetchSpy).toHaveBeenCalled();
+      });
+
+      // After OSRM returns, the component should render snapped coords.
+      const polylines = getAllByTestId('polyline');
+      const positions = JSON.parse(polylines[1].dataset.positions);
+      expect(positions[0]).toEqual([54.0, -2.8]);
+      expect(positions[positions.length - 1]).toEqual([54.1, -2.7]);
+      // And it should match the snapped path exactly (4 points).
+      expect(positions).toEqual([
+        [54.0, -2.8],
+        [54.02, -2.795],
+        [54.07, -2.75],
+        [54.1, -2.7],
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('falls back to stop positions when geometry is absent', () => {
@@ -224,5 +271,80 @@ describe('SingleRouteLine', () => {
     // No geometry → uses 3 stop coordinates
     expect(positions).toHaveLength(3);
     expect(positions[0]).toEqual([54.0, -2.8]);
+  });
+  
+  test('falls back to stop coords when geometry missing and still tries OSRM snapping', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    });
+
+    try {
+      const data = {
+        line: 'X1',
+        variants: [
+          {
+            route_id: 'RID-X1',
+            // No geometry available
+            geometry: [],
+            // And no track source, so OSRM must never be called.
+            geometry_source: null,
+            stops: [
+              { name: 'A', lat: 54.0, lon: -2.8, atco_code: 'A' },
+              { name: 'B', lat: 54.01, lon: -2.81, atco_code: 'B' },
+              { name: 'C', lat: 54.02, lon: -2.82, atco_code: 'C' },
+            ],
+          },
+        ],
+      };
+
+      render(<SingleRouteLine routeData={data} />);
+
+       // With no track geometry, we should *not* call OSRM at all.
+      await waitFor(() => {
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test('does not call OSRM when geometry exists but is not marked as track source', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ routes: [] }),
+    });
+
+    try {
+      const data = {
+        line: 'X2',
+        variants: [
+          {
+            route_id: 'RID-X2',
+            // Geometry exists but is not track provenance.
+            geometry_source: 'stops',
+            geometry: [
+              [54.0, -2.8],
+              [54.01, -2.81],
+              [54.02, -2.82],
+            ],
+            stops: [
+              { name: 'A', lat: 54.0, lon: -2.8, atco_code: 'A' },
+              { name: 'B', lat: 54.01, lon: -2.81, atco_code: 'B' },
+              { name: 'C', lat: 54.02, lon: -2.82, atco_code: 'C' },
+            ],
+          },
+        ],
+      };
+
+      render(<SingleRouteLine routeData={data} />);
+
+      await waitFor(() => {
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

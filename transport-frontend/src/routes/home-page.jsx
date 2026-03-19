@@ -272,16 +272,20 @@ const normalizeCoords = (raw) => {
 };
 
 /**
- * Fetch OSRM road-following geometry for every leg of a journey plan
- * **independently** (one request per leg, all in parallel).
+ * Fetch geometry for every leg of a journey plan **independently**
+ * (one request per leg, all in parallel).
  *
- * Walking legs → OSRM foot profile.
- * Transit legs (bus / train) → OSRM driving profile.
+ * IMPORTANT POLICY:
+ * - We only "smooth" when we have an actual *track* to smooth.
+ * - For journey results, that means: use backend-provided stored geometry
+ *   (route_link_tracks) when it's available. Do NOT call OSRM just to
+ *   "make something pretty" from stop coordinates.
  *
  * Returns an array of segment objects ready for `JourneyRouteLayer`:
  *   { id, name, coords, color, mode }
  *
- * Falls back to a straight [from, to] line for any leg where OSRM fails.
+ * Falls back to a straight [from, to] line when no stored track subsegment
+ * is available.
  */
 const fetchGeometryForLegs = async (legs, opts = {}) => {
   if (!Array.isArray(legs) || legs.length === 0) return [];
@@ -322,7 +326,7 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
   const isWalk = rawMode === 'walking';
   const mode = rawMode || (leg.line_name ? 'transit' : 'walking');
 
-    // Build fallback straight-line coords from endpoints
+  // Build fallback straight-line coords from endpoints
     const fallbackCoords = [];
     if (typeof fromLat === 'number' && typeof fromLon === 'number')
       fallbackCoords.push([fromLat, fromLon]);
@@ -337,7 +341,7 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
       mode,
     };
 
-    // Prefer embedded geometry from the journey response when available.
+  // Prefer embedded geometry from the journey response when available.
     // This keeps the map consistent with the planner's stop-to-stop slicing
     // and avoids overriding a correct embedded track with a later per-leg call.
     try {
@@ -354,20 +358,16 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
       // ignore
     }
 
-    // Need both endpoints to request OSRM geometry
+    // Need both endpoints to request backend stored geometry
     if (typeof fromLat !== 'number' || typeof fromLon !== 'number' ||
         typeof toLat !== 'number' || typeof toLon !== 'number') {
       return segment;
     }
 
     try {
-  // Prefer backend-provided mode if present. For transit legs we still
-  // ask the backend for 'bus' so it can prefer stored fragment geometry and
-  // subsegment by stops.
+  // For transit legs we ask the backend for mode=bus so it can prefer stored
+  // stop-to-stop fragments (route_link_tracks) rather than routing via OSRM.
   const isBusLikeLeg = !isWalk && (rawMode === 'bus' || rawMode === 'transit' || !!leg?.line_name);
-  // IMPORTANT: For transit legs, ask the backend for mode=bus so it can
-  // prefer timetable stop-to-stop fragments (route_link_tracks). Using `driving`
-  // can fall back to OSRM road-following geometry, which may look wrong.
   const requestMode = isWalk ? 'walking' : (isBusLikeLeg ? 'bus' : 'driving');
       // If the leg carries an explicit route_id (or metadata with route_id)
       // include it so the backend can return stored track subsegments when
@@ -423,11 +423,37 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
           url += `&from_stop_id=${encodeURIComponent(fromStopId)}`;
           url += `&to_stop_id=${encodeURIComponent(toStopId)}`;
         }
+
+        // If the planner provides the intermediate stop sequence for this leg,
+        // pass it through so the backend can fall back to stop coordinates
+        // (not OSRM) when stored track fragments are unavailable.
+        // Expected values are ATCO codes.
+        const rawStops = (
+          leg?.stops ??
+          leg?.path_stops ??
+          leg?.pathStops ??
+          leg?.intermediate_stops ??
+          leg?.intermediateStops ??
+          leg?.calling_points ??
+          leg?.callingPoints ??
+          null
+        );
+        const stopIds = [];
+        if (Array.isArray(rawStops) && rawStops.length >= 2) {
+          for (const s of rawStops) {
+            if (!s) continue;
+            const sid = (s.id || s.atco_code || s.atco || s.atcoCode || s.stop_id || s.stopId || null);
+            if (sid != null && String(sid).trim() !== '') stopIds.push(String(sid).trim());
+          }
+        }
+        if (stopIds.length >= 2) {
+          url += `&stop_ids=${encodeURIComponent(stopIds.join(','))}`;
+        }
       } catch (_) {
         // ignore
       }
-      const resp = await fetch(url);
-      if (!resp.ok) return segment;
+  const resp = await fetch(url);
+  if (!resp.ok) return segment;
       const data = await resp.json();
       if (data && Array.isArray(data.coords) && data.coords.length >= 2) {
         // Normalize coords — endpoint already returns [lat,lon] but be safe
@@ -453,7 +479,7 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
         }
       }
     } catch (_e) {
-      // OSRM failure — keep fallback straight-line coords
+      // Keep fallback straight-line coords
     }
 
     return segment;

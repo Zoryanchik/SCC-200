@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from urllib.request import Request as UrllibRequest, urlopen
+from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree
 
 # --- Live bus track precompute cache (Option A: embed coords in /bus/live) ---
@@ -328,8 +329,10 @@ import copy
 import threading
 import time
 import psycopg
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 import atexit
+from fastapi.responses import JSONResponse
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -1485,6 +1488,135 @@ def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float
         return {"error": "failed"}
 
 
+@app.get("/osrm/route")
+def osrm_route_proxy(
+    coords: str,
+    profile: str = "driving",
+    overview: str = "full",
+    geometries: str = "geojson",
+):
+    """Proxy OSRM /route via the backend.
+
+    This avoids frontend DNS/CORS issues when OSRM is running inside Docker on a
+    compose-only hostname.
+
+    Query params:
+      coords:   OSRM coordinate string "lon,lat;lon,lat;..." (at least 2 points)
+      profile:  driving|foot|bike...
+      overview: full|simplified|false
+      geometries: geojson|polyline|polyline6
+
+    Response: raw OSRM JSON on success; {"error": "..."} on failure.
+    """
+    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012').rstrip('/')
+    try:
+        if not coords or ';' not in coords:
+            return JSONResponse({"error": "invalid_coords"}, status_code=400)
+
+        safe_profile = (profile or 'driving').strip().lower()
+        # Keep this permissive; OSRM will validate values.
+        qp = urlencode({
+            'overview': overview,
+            'geometries': geometries,
+        })
+        url = f"{osrm_base}/route/v1/{safe_profile}/{coords}?{qp}"
+
+        req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
+        with urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+        return data
+    except HTTPError as e:
+        # OSRM returns useful JSON error bodies (e.g. {code:"NoMatch"}) with
+        # HTTP 4xx. Preserve those so the frontend can decide whether to fall
+        # back to /route.
+        try:
+            body = e.read()
+            data = json.loads(body.decode('utf-8')) if body else {"error": "osrm_http_error"}
+        except Exception:
+            data = {"error": "osrm_http_error"}
+        return JSONResponse(data, status_code=getattr(e, 'code', 502) or 502)
+    except URLError:
+        return JSONResponse({"error": "osrm_unreachable"}, status_code=502)
+    except Exception:
+        return JSONResponse({"error": "osrm_proxy_failed"}, status_code=500)
+
+
+@app.post("/osrm/match")
+async def osrm_match_proxy(payload: dict):
+    """Proxy OSRM /match via the backend using POST JSON.
+
+    The stock OSRM API is GET-based, but using POST here avoids URL length
+    limits when matching dense traces (hundreds of points).
+
+    Expected JSON body:
+      {
+        "coords": [[lat, lon], ...]  OR  ["lon,lat", "lon,lat", ...],
+        "profile": "driving"|"foot"|... (optional, default driving)
+      }
+
+    Response: raw OSRM JSON on success; {"error": "..."} on failure.
+    """
+    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012').rstrip('/')
+    try:
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+        coords_in = payload.get('coords')
+        if not coords_in or not isinstance(coords_in, list) or len(coords_in) < 2:
+            return JSONResponse({"error": "invalid_coords"}, status_code=400)
+
+        coords_lonlat: list[str] = []
+        for item in coords_in:
+            if isinstance(item, str):
+                # Expect "lon,lat"
+                if ',' not in item:
+                    return JSONResponse({"error": "invalid_coords"}, status_code=400)
+                coords_lonlat.append(item)
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                # Expect [lat, lon]
+                lat, lon = item
+                try:
+                    latf = float(lat)
+                    lonf = float(lon)
+                except Exception:
+                    return JSONResponse({"error": "invalid_coords"}, status_code=400)
+                coords_lonlat.append(f"{lonf},{latf}")
+            else:
+                return JSONResponse({"error": "invalid_coords"}, status_code=400)
+
+        safe_profile = (payload.get('profile') or 'driving').strip().lower()
+
+        # Conservative defaults for matching traces.
+        # (Frontend can add more knobs later if needed.)
+        qp = urlencode({
+            'overview': 'full',
+            'geometries': 'geojson',
+            'annotations': 'false',
+            'steps': 'false',
+            # Restrict snapping radius in meters; keeps OSRM from making wild jumps.
+            'radiuses': ';'.join(['25'] * len(coords_lonlat)),
+        })
+
+        coords_str = ';'.join(coords_lonlat)
+        url = f"{osrm_base}/match/v1/{safe_profile}/{coords_str}?{qp}"
+
+        req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
+        with urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+        return data
+    except HTTPError as e:
+        try:
+            body = e.read()
+            data = json.loads(body.decode('utf-8')) if body else {"error": "osrm_http_error"}
+        except Exception:
+            data = {"error": "osrm_http_error"}
+        return JSONResponse(data, status_code=getattr(e, 'code', 502) or 502)
+    except URLError:
+        return JSONResponse({"error": "osrm_unreachable"}, status_code=502)
+    except Exception:
+        return JSONResponse({"error": "osrm_proxy_failed"}, status_code=500)
+
+
 @app.get("/route/leg-geometry")
 def route_leg_geometry(from_lat: float, from_lon: float,
                        to_lat: float, to_lon: float,
@@ -1493,6 +1625,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                        route_int: int | None = None,
                        from_stop_id: str | None = None,
                        to_stop_id: str | None = None,
+                       stop_ids: str | None = None,
                        date: str | None = None,
                        departure_time: str | None = None):
     """Return geometry for a single journey leg.
@@ -1509,7 +1642,12 @@ def route_leg_geometry(from_lat: float, from_lon: float,
     timetable's fragment-stitched geometry when available.
 
     Walking legs use the OSRM *foot* profile; all others use *driving*.
-    Response: {"coords": [[lat, lon], ...], "source": "route_link_tracks"|"osrm"|"linear"} or {"error": "..."}
+        Additional params:
+            stop_ids – optional comma-separated ATCO codes for the full stop sequence
+                                 of this leg (from..to). Used only as a fallback when we don't
+                                 have stored fragment/track geometry.
+
+        Response: {"coords": [[lat, lon], ...], "source": "route_link_tracks"|"stops"|"osrm"|"linear"} or {"error": "..."}
     """
     # Prefer stored timetable tracks when we have enough context.
     #
@@ -1537,6 +1675,36 @@ def route_leg_geometry(from_lat: float, from_lon: float,
         if norm_mode != 'walking':
             tracks = []
             frag_seg = []
+
+            # Optional stop-sequence fallback (ATCO codes) supplied by callers.
+            # This is ONLY used when fragment stitching is unavailable.
+            stop_fallback_coords = []
+            try:
+                raw = (stop_ids or '').strip()
+                if raw:
+                    parts = [p.strip() for p in raw.split(',') if p.strip()]
+                else:
+                    parts = []
+                if len(parts) >= 2:
+                    atco_coords_dict = {}
+                    try:
+                        if globals().get('_base_cache') and _base_cache.get('atco_loader'):
+                            atco_coords_dict = _base_cache['atco_loader'].get_all_stop_coords() or {}
+                    except Exception:
+                        atco_coords_dict = {}
+
+                    # IMPORTANT: stop-sequence fallback must work even when no
+                    # merged/router cache is loaded (e.g. unit tests, minimal
+                    # deployments). So we rely on atco_loader's coordinate map.
+                    try:
+                        for atco in parts:
+                            coord = atco_coords_dict.get(atco)
+                            if coord and len(coord) >= 2:
+                                stop_fallback_coords.append([coord[0], coord[1]])
+                    except Exception:
+                        stop_fallback_coords = []
+            except Exception:
+                stop_fallback_coords = []
             # Prefer dense route_int lookup when provided.
             if route_int is not None:
                 try:
@@ -1694,7 +1862,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                             except Exception:
                                 frag_seg = []
 
-                        # IMPORTANT: do NOT return raw full-route polyline geometry when
+            # IMPORTANT: do NOT return raw full-route polyline geometry when
                         # route_int is provided. If fragment stitching isn't available,
                         # we fall through to OSRM/linear fallback rather than emitting
                         # a potentially messy non-stop-stitched polyline.
@@ -1712,20 +1880,31 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             traceback.print_exc()
         pass
 
-    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
-    profile = 'foot' if norm_mode == 'walking' else 'driving'
+    # Fallback policy:
+    # - walking legs may use OSRM foot routing
+    # - if caller provided a full stop sequence (stop_ids) and we couldn't stitch
+    #   tracks, return those stop coordinates unsmoothed.
+    # - all other non-walking cases return a straight line between endpoints.
+    if norm_mode == 'walking':
+        osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+        try:
+            coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
+            coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
+                                                     profile='foot')
+            if coords and len(coords) >= 2:
+                return {"coords": coords, "source": "osrm"}
+        except Exception:
+            pass
+
     try:
-        coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
-        coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
-                                                 profile=profile)
-        if coords and len(coords) >= 2:
-            return {"coords": coords, "source": "osrm"}
-        # Fall back to a straight line between the two points
-        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
-                "source": "linear"}
+        # Only use the provided stop sequence if it looks valid.
+        if 'stop_fallback_coords' in locals() and isinstance(stop_fallback_coords, list) and len(stop_fallback_coords) >= 2:
+            return {"coords": stop_fallback_coords, "source": "stops"}
     except Exception:
-        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
-                "source": "linear"}
+        pass
+
+    return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
+            "source": "linear"}
 
 
 def _fetch_legacy_route_polyline(route_id: str, *, date_str: str | None = None, bucket: str | None = None):
@@ -3549,6 +3728,7 @@ async def routes_for_stop(atco: str):
 async def routes_for_line_at_stop(
     atco: str,
     line: str,
+    limit: int = 10,
 ):
     """Return route variants for a line *restricted to routes serving a stop*.
 
@@ -3626,9 +3806,15 @@ async def routes_for_line_at_stop(
             coord_map = {}
 
     def _route_stops_variant(r_int: int) -> list[dict]:
-        stops: list[dict] = []
+        """Build ordered stop dicts from merged.route_stops[r_int].
+
+        Important: we *always* preserve the underlying route stop order. If a
+        stop is missing NaPTAN coordinates we skip it for rendering, but we
+        never re-order the remaining stops based on partial lookups.
+        """
+        stops_with_pos: list[tuple[int, dict]] = []
         route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
-        for s_int in route_stops or []:
+        for pos, s_int in enumerate(route_stops or []):
             try:
                 code = merged.get_atco_code(s_int)
             except Exception:
@@ -3640,13 +3826,18 @@ async def routes_for_line_at_stop(
                 continue
             lat0, lon0 = coords
             name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
-            stops.append({
-                "name": name or code,
-                "lat": float(lat0),
-                "lon": float(lon0),
-                "atco_code": str(code),
-            })
-        return stops
+            stops_with_pos.append((
+                pos,
+                {
+                    "name": name or code,
+                    "lat": float(lat0),
+                    "lon": float(lon0),
+                    "atco_code": str(code),
+                },
+            ))
+
+        stops_with_pos.sort(key=lambda x: x[0])
+        return [d for _, d in stops_with_pos]
 
     import math
     def _mean_gap(stops: list[dict]) -> float:
@@ -3682,7 +3873,19 @@ async def routes_for_line_at_stop(
             seen_sigs.add(sig)
             unique.append(v)
     unique.sort(key=lambda v: len(v.get("stops") or []), reverse=True)
-    unique = unique[:3]
+    # Historically we returned only a few variants to keep payloads small.
+    # For stop-popup line overlays we often want to browse more variants,
+    # so make this cap configurable.
+    try:
+        lim = int(limit) if limit is not None else 10
+    except Exception:
+        lim = 10
+    # Keep it sane to avoid returning huge payloads.
+    if lim < 1:
+        lim = 1
+    if lim > 25:
+        lim = 25
+    unique = unique[:lim]
 
     # Apply the same mean/max gap heuristics as /routes/line
     if unique:
@@ -6123,6 +6326,64 @@ async def bus_live_operator(
                 entry['route_int'] = int(matched_route_int)
             except Exception:
                 entry['route_int'] = matched_route_int
+
+        # Best-effort: attach the full stop sequence for this route so clients
+        # can fall back to stop-coordinate polylines when track fragments are
+        # unavailable. This MUST NOT be OSRM-smoothed client-side.
+        try:
+            ri_for_stops = entry.get('route_int')
+            if ri_for_stops is not None:
+                ri_for_stops = int(ri_for_stops)
+            merged = None
+            try:
+                if globals().get('_base_cache'):
+                    prebuilt = _base_cache.get('prebuilt_cache')
+                    if prebuilt:
+                        for _k, v in prebuilt.items():
+                            try:
+                                merged = v[0]
+                            except Exception:
+                                merged = None
+                            if merged:
+                                break
+                if merged is None:
+                    rcache = globals().get('_router_cache')
+                    rlock = globals().get('_router_cache_lock')
+                    if rcache is not None:
+                        if rlock:
+                            with rlock:
+                                items = list(rcache.values())
+                        else:
+                            items = list(rcache.values())
+                        for val in items:
+                            try:
+                                merged = val[0]
+                            except Exception:
+                                merged = None
+                            if merged:
+                                break
+            except Exception:
+                merged = None
+
+            if merged is not None and ri_for_stops is not None:
+                route_stops = None
+                try:
+                    route_stops = merged.route_stops[ri_for_stops] if ri_for_stops < len(getattr(merged, 'route_stops', []) or []) else None
+                except Exception:
+                    route_stops = None
+                if route_stops:
+                    stop_ids = []
+                    for s_int in route_stops:
+                        try:
+                            code = merged.get_atco_code(s_int)
+                        except Exception:
+                            code = None
+                        if code:
+                            stop_ids.append(str(code).strip())
+                    if len(stop_ids) >= 2:
+                        entry['stop_ids'] = stop_ids
+        except Exception:
+            pass
         # Route mapping signal: route_int is the authoritative indicator that a
         # vehicle was matched to a timetable journey for *this refresh*.
         #
@@ -8217,6 +8478,44 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             try:
                 if prev_coord and curr_coord:
                     mode_hint = "walking" if transport == "walking" else "driving"
+
+                    # If this is a transit leg (bus/train) and we know the route's
+                    # stop sequence, pass it through so /route/leg-geometry can
+                    # fall back to stop-derived geometry (all intermediate stops)
+                    # instead of a misleading 2-point linear segment.
+                    stop_seq_atcos = None
+                    try:
+                        if transport != "walking" and route_int is not None:
+                            # Slice only the stop sub-sequence between the leg
+                            # endpoints (hop-on -> hop-off) so we don't draw the
+                            # entire route as the fallback geometry.
+                            rs = merged.route_stops[route_int] if route_int < len(getattr(merged, 'route_stops', []) or []) else []
+                            if rs and len(rs) >= 2:
+                                # prev_int/curr_int are the merged stop_ints for this leg
+                                if prev_int in rs and curr_int in rs and prev_int != curr_int:
+                                    i0 = rs.index(prev_int)
+                                    i1 = rs.index(curr_int)
+                                    if i1 >= i0:
+                                        sub = rs[i0:i1 + 1]
+                                    else:
+                                        # Reverse travel along stop order
+                                        sub = list(reversed(rs[i1:i0 + 1]))
+                                else:
+                                    sub = rs
+
+                                atcos = []
+                                for s_int in sub:
+                                    try:
+                                        c = merged.get_atco_code(s_int)
+                                    except Exception:
+                                        c = None
+                                    if c:
+                                        atcos.append(str(c).strip())
+                                if len(atcos) >= 2:
+                                    stop_seq_atcos = ",".join(atcos)
+                    except Exception:
+                        stop_seq_atcos = None
+
                     lg = route_leg_geometry(
                         prev_coord[0], prev_coord[1],
                         curr_coord[0], curr_coord[1],
@@ -8225,6 +8524,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                         route_int=route_int,
                         from_stop_id=prev_atco if 'prev_atco' in locals() else None,
                         to_stop_id=curr_atco if 'curr_atco' in locals() else None,
+                        stop_ids=stop_seq_atcos,
                     )
                     if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
                         coords = lg.get("coords")

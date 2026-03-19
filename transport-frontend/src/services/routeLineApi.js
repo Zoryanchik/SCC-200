@@ -106,7 +106,9 @@ export async function fetchRouteLine(line, opts = {}) {
 export async function fetchRouteLineAtStop(atcoCode, line) {
   const atcoKey = String(atcoCode || '').trim();
   if (!atcoKey) throw new Error('Missing atcoCode');
-  const url = `${API_BASE}/routes/line_at_stop/${encodeURIComponent(atcoKey)}/${encodeURIComponent(line)}`;
+  // Ask for more variants in the stop-popup flow so users can browse
+  // inbound/outbound and alternate patterns.
+  const url = `${API_BASE}/routes/line_at_stop/${encodeURIComponent(atcoKey)}/${encodeURIComponent(line)}?limit=10`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch route line "${line}" at stop "${atcoKey}": ${res.status}`);

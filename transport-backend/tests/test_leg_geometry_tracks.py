@@ -130,7 +130,56 @@ def test_leg_geometry_bus_uses_only_non_legacy_sources(monkeypatch):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("source") in {"route_link_tracks", "osrm", "linear"}
+    assert data.get("source") in {"route_link_tracks", "linear"}
+
+
+def test_leg_geometry_stop_sequence_fallback(monkeypatch):
+    """If no track exists, return the full stop sequence coords (unsmoothed).
+
+    This covers the routing-results expectation: when the planner provides
+    stop_ids (from..to including intermediates) and route_link_tracks can't be
+    stitched, we should return *all* stop coordinates and never call OSRM.
+    """
+
+    # Block any accidental OSRM calls.
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("OSRM should not be called for stop-sequence fallback")
+
+    monkeypatch.setattr(api, "_query_osrm_for_coords_profile", _boom)
+
+    # Provide a tiny stop coord map via _base_cache['atco_loader'].
+    stops = {
+        "A": (54.0, -2.0),
+        "B": (54.1, -2.1),
+        "C": (54.2, -2.2),
+    }
+
+    class _AtcoStub:
+        def get_all_stop_coords(self):
+            return stops
+
+    api._base_cache = {"atco_loader": _AtcoStub()}
+
+    client = TestClient(api.app, raise_server_exceptions=True)
+    resp = client.get(
+        "/route/leg-geometry",
+        params={
+            "from_lat": 54.0,
+            "from_lon": -2.0,
+            "to_lat": 54.2,
+            "to_lon": -2.2,
+            "mode": "bus",
+            "stop_ids": "A,B,C",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source"] == "stops"
+    assert data["coords"] == [
+        [stops["A"][0], stops["A"][1]],
+        [stops["B"][0], stops["B"][1]],
+        [stops["C"][0], stops["C"][1]],
+    ]
 
 
 def test_leg_geometry_driving_uses_only_non_legacy_sources(monkeypatch):
@@ -155,7 +204,7 @@ def test_leg_geometry_driving_uses_only_non_legacy_sources(monkeypatch):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("source") in {"route_link_tracks", "osrm", "linear"}
+    assert data.get("source") in {"route_link_tracks", "linear"}
 
 
 def test_subsegment_prefers_forward_slice_on_ambiguous_loop_candidates():

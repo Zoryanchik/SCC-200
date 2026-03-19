@@ -4,14 +4,22 @@ import { stopsToLatLngs } from '../../services/routeLineApi';
 
 // Best-effort OSRM snapping for route overlays.
 // Input/Output coords are [lat, lon].
+//
+// By default we call the backend proxy to avoid DNS/CORS issues when OSRM is
+// running on a docker-compose hostname (not resolvable from the browser).
+// Advanced: override VITE_OSRM_BASE to hit OSRM directly.
 const OSRM_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OSRM_BASE)
   ? String(import.meta.env.VITE_OSRM_BASE)
-  : 'http://127.0.0.1:5012';
+  : null;
 
-const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 2500, maxWaypoints = 90 } = {}) => {
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
+  ? String(import.meta.env.VITE_API_BASE_URL)
+  : '';
+
+const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 6000 } = {}) => {
   try {
     if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
-    const norm = [];
+    const norm = []; 
     for (const pt of coordsLatLon) {
       if (!Array.isArray(pt) || pt.length < 2) continue;
       const lat = Number(pt[0]);
@@ -21,37 +29,25 @@ const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
     }
     if (norm.length < 2) return coordsLatLon;
 
-    let sampled = norm;
-    if (norm.length > maxWaypoints) {
-      const step = (norm.length - 1) / (maxWaypoints - 1);
-      sampled = [];
-      for (let i = 0; i < maxWaypoints; i++) {
-        const idx = Math.round(i * step);
-        sampled.push(norm[Math.min(norm.length - 1, Math.max(0, idx))]);
-      }
-      const dedup = [];
-      for (const p of sampled) {
-        const last = dedup[dedup.length - 1];
-        if (!last || last[0] !== p[0] || last[1] !== p[1]) dedup.push(p);
-      }
-      sampled = dedup;
-      if (sampled.length < 2) return coordsLatLon;
-    }
+    const matchUrl = `${API_BASE.replace(/\/$/, '')}/osrm/match`;
 
-    const coordStr = sampled.map(([lat, lon]) => `${lon},${lat}`).join(';');
-    const url = `${OSRM_BASE.replace(/\/$/, '')}/route/v1/${encodeURIComponent(profile)}/${coordStr}?overview=full&geometries=geojson`;
-
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeoutMs);
+    // Match snapping via backend POST (avoids URL length limits for dense traces).
+    const controller2 = new AbortController();
+    const t2 = setTimeout(() => controller2.abort(), timeoutMs);
     let resp;
     try {
-      resp = await fetch(url, { signal: controller.signal });
+      resp = await fetch(matchUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ coords: norm, profile }),
+        signal: controller2.signal,
+      });
     } finally {
-      clearTimeout(t);
+      clearTimeout(t2);
     }
     if (!resp || !resp.ok) return coordsLatLon;
     const data = await resp.json();
-    const osrmCoords = data && data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+    const osrmCoords = data && data.matchings && data.matchings[0] && data.matchings[0].geometry && data.matchings[0].geometry.coordinates;
     if (!Array.isArray(osrmCoords) || osrmCoords.length < 2) return coordsLatLon;
     const out = [];
     for (const pt of osrmCoords) {
@@ -189,109 +185,66 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
   return (
     <>
       {routeData.variants.map((variant, idx) => {
-        // Prefer OSRM / stored route geometry when available;
-        // fall back to straight stop-to-stop lines. When geometry is
-        // available we also merge explicit stop coordinates into the
-        // geometry so stops are guaranteed to lie on the rendered line
-        // and then do a light Chaikin smoothing pass for a nicer visual.
+        // Prefer stored route geometry when available; fall back to straight
+        // stop-to-stop lines.
+        // IMPORTANT:
+        // - Only apply OSRM snapping to *real track* geometry returned by the backend
+        //   (geometry_source === 'route_link_tracks').
+        // - Never OSRM-snap stop-derived fallback geometry.
+        // - Do not inject/force stops onto the track; render track exactly as returned.
         const stopPositions = stopsToLatLngs(variant.stops);
-        // Project a point onto a segment (a->b) returning the nearest point
-        const projectPointToSegment = (p, a, b) => {
-          // treat coordinates as (lat, lon) pairs in degrees — good enough for short distances
-          const vx = b[0] - a[0];
-          const vy = b[1] - a[1];
-          const wx = p[0] - a[0];
-          const wy = p[1] - a[1];
-          const denom = vx * vx + vy * vy || 1e-12;
-          let t = (wx * vx + wy * vy) / denom;
-          if (t < 0) t = 0;
-          if (t > 1) t = 1;
-          return [a[0] + t * vx, a[1] + t * vy];
-        };
-
-        // Insert each stop projected onto the nearest geometry segment so the
-        // route follows the main road rather than kink towards the raw stop coords.
-        const insertStopsIntoGeometry = (geom, stops) => {
-          if (!Array.isArray(geom) || geom.length < 2) return stops || [];
-          const out = geom.slice();
-
-          for (const stop of (stops || [])) {
-            let bestSegIdx = 0;
-            let bestD = Infinity;
-            let bestProj = null;
-            // Find nearest segment and projected point
-            for (let i = 0; i < out.length - 1; i++) {
-              const a = out[i];
-              const b = out[i + 1];
-              const proj = projectPointToSegment(stop, a, b);
-              const dlat = proj[0] - stop[0];
-              const dlon = proj[1] - stop[1];
-              const d2 = dlat * dlat + dlon * dlon;
-              if (d2 < bestD) {
-                bestD = d2;
-                bestSegIdx = i;
-                bestProj = proj;
-              }
-            }
-
-            if (bestProj) {
-              // Insert the projected point after the segment's start vertex so
-              // the stop lies on the polyline but the geometry shape remains road-following.
-              // Avoid inserting duplicates next to identical points.
-              const nextIdx = bestSegIdx + 1;
-              const existing = out[nextIdx];
-              if (!existing || existing[0] !== bestProj[0] || existing[1] !== bestProj[1]) {
-                out.splice(nextIdx, 0, bestProj);
-              }
-            }
-          }
-
-          return out;
-        };
-
-        const chaikinSmooth = (coords, iterations = 1) => {
-          if (!Array.isArray(coords) || coords.length < 3) return coords;
-          let pts = coords.slice();
-          for (let it = 0; it < iterations; it++) {
-            const next = [];
-            next.push(pts[0]);
-            for (let i = 0; i < pts.length - 1; i++) {
-              const [x0, y0] = pts[i];
-              const [x1, y1] = pts[i + 1];
-              const Q = [0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1];
-              const R = [0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1];
-              next.push(Q);
-              next.push(R);
-            }
-            next.push(pts[pts.length - 1]);
-            pts = next;
-          }
-          return pts;
-        };
-
-        const hasSaneGeom = Boolean(variant.geometry && isGeometrySane(variant.geometry, stopPositions));
+        // If the backend returns no variant geometry, fall back to stop-to-stop.
+        // This is important for "line clicked from stop" flows where we may
+        // only have stop coordinates.
+        const geomSource = (variant && variant.geometry_source != null) ? String(variant.geometry_source).toLowerCase() : null;
+        const isTrackGeom = geomSource === 'route_link_tracks';
+        const hasSaneGeom = Boolean(
+          isTrackGeom &&
+          Array.isArray(variant.geometry) &&
+          variant.geometry.length >= 2 &&
+          isGeometrySane(variant.geometry, stopPositions)
+        );
         const basePositions = hasSaneGeom
-          ? chaikinSmooth(insertStopsIntoGeometry(variant.geometry, stopPositions), 1)
+          ? variant.geometry
           : stopPositions;
 
-        // Always try OSRM snapping when available; fall back silently.
+        // Only snap when we have a real track polyline.
+        // If we only have stop-to-stop coords, keep it as a straight line.
         // Cache by a small key so we don't spam OSRM on re-renders.
+        //
+        // NOTE: We key the snapping effect by a sampled signature of the polyline.
+        // In practice, route data can update without a length change (e.g. refreshed
+        // geometry points), so we must not depend only on `length`.
         const [snapped, setSnapped] = useState(null);
-        const snapKey = useMemo(
-          () => buildSnapKey(basePositions),
-          // eslint-disable-next-line react-hooks/exhaustive-deps
-          [variant && variant.route_id, basePositions && basePositions.length, hasSaneGeom],
-        );
+        const snapKey = useMemo(() => buildSnapKey(basePositions), [basePositions]);
+
+        const osrmProfile = useMemo(() => {
+          const raw = (
+            variant?.mode ??
+            variant?.access_mode ??
+            variant?.travel_mode ??
+            routeData?.mode ??
+            routeData?.access_mode ??
+            routeData?.travel_mode ??
+            null
+          );
+          const m = raw == null ? '' : String(raw).toLowerCase();
+          return (m === 'walking' || m === 'walk' || m === 'foot') ? 'foot' : 'driving';
+        }, [variant, routeData]);
 
         useEffect(() => {
           let cancelled = false;
+          if (!hasSaneGeom) {
+            setSnapped(null);
+            return () => { cancelled = true; };
+          }
           if (!snapKey || !Array.isArray(basePositions) || basePositions.length < 2) {
             setSnapped(null);
             return () => { cancelled = true; };
           }
           (async () => {
             try {
-              const out = await osrmRouteCoordsLatLon(basePositions);
+              const out = await osrmMatchCoordsLatLon(basePositions, { profile: osrmProfile });
               if (cancelled) return;
               setSnapped((Array.isArray(out) && out.length >= 2) ? out : null);
             } catch (e) {
@@ -301,7 +254,7 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
           })();
           return () => { cancelled = true; };
           // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [snapKey]);
+  }, [hasSaneGeom, snapKey, basePositions.length, osrmProfile]);
 
         const positions = (Array.isArray(snapped) && snapped.length >= 2) ? snapped : basePositions;
         

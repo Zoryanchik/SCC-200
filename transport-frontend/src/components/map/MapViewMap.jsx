@@ -239,7 +239,11 @@ const USER_ICON = createUserIcon();
 // reachable or returns an error, we fall back to the original coords.
 const OSRM_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OSRM_BASE)
 	? String(import.meta.env.VITE_OSRM_BASE)
-	: 'http://127.0.0.1:5012';
+	: null;
+
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
+	? String(import.meta.env.VITE_API_BASE_URL)
+	: '';
 
 const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 2500, maxWaypoints = 90 } = {}) => {
 	try {
@@ -275,7 +279,9 @@ const osrmRouteCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
 		}
 
 		const coordStr = sampled.map(([lat, lon]) => `${lon},${lat}`).join(';');
-		const url = `${OSRM_BASE.replace(/\/$/, '')}/route/v1/${encodeURIComponent(profile)}/${coordStr}?overview=full&geometries=geojson`;
+		const url = OSRM_BASE
+			? `${OSRM_BASE.replace(/\/$/, '')}/route/v1/${encodeURIComponent(profile)}/${coordStr}?overview=full&geometries=geojson`
+			: `${API_BASE.replace(/\/$/, '')}/osrm/route?profile=${encodeURIComponent(profile)}&coords=${encodeURIComponent(coordStr)}&overview=full&geometries=geojson`;
 
 		const controller = new AbortController();
 		const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -771,6 +777,11 @@ const JourneyRouteLayer = ({ segments }) => {
 					const resp = await fetch(url);
 					if (!resp.ok) continue;
 					const data = await resp.json();
+						// IMPORTANT POLICY: only smooth/OSRM-snap real track geometry.
+						// This overlay fills in missing journey polylines; we must not start
+						// drawing stop-coordinate fallbacks that just *look* like tracks.
+						const isTrackSource = !!(data && data.source && String(data.source).toLowerCase() === 'route_link_tracks');
+						if (!isTrackSource) continue;
 					const norm = normalizeCoords(data.coords);
 					if (norm && norm.length >= 2) {
 						if (mounted) updates[seg._normKey] = norm;
@@ -976,7 +987,10 @@ const MapController = ({ onReady, onMoveEnd, selectedVehicleTrack, onClearSelect
 			}
 			if (!map.getPane('endpointPane')) {
 				map.createPane('endpointPane');
-				map.getPane('endpointPane').style.zIndex = 700;
+				// Keep endpoints above all polylines and small stop markers.
+				// Leaflet defaults: markerPane=600, tooltipPane=650, popupPane=700.
+				// We can safely go higher to ensure S/D markers never get hidden.
+				map.getPane('endpointPane').style.zIndex = 1200;
 			}
 		} catch (e) {
 			// ignore if map not ready
@@ -2227,24 +2241,7 @@ function HoverWinnerController({
 									} catch (e) { /* ignore */ }
 
 									if (marker.type === 'bus') {
-										// Throttle clicks for THIS bus for 1 second after a handled click.
-										// This prevents overlapping async selection for double-clicks,
-										// without blocking clicks on other buses.
-										try {
-											const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-											const idKey = marker && marker.id != null ? String(marker.id) : null;
-											if (idKey) {
-												const until = busClickCooldownByIdRef.current.get(idKey) || 0;
-												if (now < until) {
-													if (debugTrackClickFlow) console.debug('[trackClick] dropped by cooldown', { id: idKey, remainingMs: Math.max(0, Math.round(until - now)) });
-												return;
-											}
-												busClickCooldownByIdRef.current.set(idKey, now + 1000);
-											}
-										} catch (e) {
-											// If anything goes wrong with timing APIs, don't block clicks.
-										}
-											// If the bus is unmatched (grey), do nothing on click.
+										// If the bus is unmatched (grey), do nothing on click.
 											// This avoids falling back to route tracks/mock geometry for
 											// vehicles that aren't mapped to a timetable journey.
 											try {
@@ -2256,6 +2253,24 @@ function HoverWinnerController({
 										const line = marker.routeNumber || marker.route || null;
 									
 										if (!line) return;
+
+										// Throttle clicks for THIS bus for 1 second after a click we can handle.
+										// This prevents overlapping async selection for double-clicks,
+										// without blocking clicks on other buses.
+										try {
+											const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+											const idKey = marker && marker.id != null ? String(marker.id) : null;
+											if (idKey) {
+												const until = busClickCooldownByIdRef.current.get(idKey) || 0;
+												if (now < until) {
+													if (debugTrackClickFlow) console.debug('[trackClick] dropped by cooldown', { id: idKey, remainingMs: Math.max(0, Math.round(until - now)) });
+												return;
+												}
+												busClickCooldownByIdRef.current.set(idKey, now + 1000);
+											}
+										} catch (e) {
+											// If anything goes wrong with timing APIs, don't block clicks.
+										}
 
 											// Increment selection token; only the latest click may update selection state.
 											const selectionToken = ++selectedVehicleReqTokenRef.current;
@@ -2358,7 +2373,30 @@ function HoverWinnerController({
 																						norm = safeNormalizeCoords(data && data.coords);
 																						if (!norm || norm.length < 2) {
 																							try { console.debug('[map] leg-geometry returned empty coords (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
-																							// No track returned: DO NOT fall back to stops/linear geometry.
+																							// No geometry returned: try a stop-sequence fallback for live buses.
+																							// This must remain UNSMOOTHED (no OSRM) because it's stop-derived.
+																							try {
+																								const stopIds = (marker && (marker.stop_ids || marker.stopIds || marker.stops || marker.meta?.stop_ids || marker.meta?.stopIds || marker.meta?.stops)) || null;
+																								const stopList = Array.isArray(stopIds) ? stopIds : (typeof stopIds === 'string' ? stopIds.split(',') : null);
+																								const cleaned = Array.isArray(stopList) ? stopList.map((s) => (s == null ? null : String(s).trim())).filter((s) => s) : [];
+																								if (cleaned.length >= 2) {
+																									let url2 = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
+																									url2 += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
+																									url2 += `&mode=driving`;
+																									url2 += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																									url2 += `&stop_ids=${encodeURIComponent(cleaned.join(','))}`;
+																									const resp2 = await fetch(url2);
+																									if (resp2 && resp2.ok) {
+																										const data2 = await resp2.json();
+																										const norm2 = safeNormalizeCoords(data2 && data2.coords);
+																										if (Array.isArray(norm2) && norm2.length >= 2 && data2 && String(data2.source || '').toLowerCase() === 'stops') {
+																											const color2 = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
+																											setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm2, color: color2 } : { id: marker.id, coords: norm2, color: color2, stops: [], label: null });
+																											break;
+																										}
+																									}
+																								}
+																							} catch (e) { /* ignore */ }
 																							continue;
 																						}
 																						if (data && data.source === 'linear') {
@@ -2367,15 +2405,26 @@ function HoverWinnerController({
 																						}
 																						try { console.debug('[map] leg-geometry selected non-linear geometry (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																						const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																						// If OSRM is up, snap the provided geometry to roads.
-																						// Best-effort only — fall back immediately to the raw coords.
+																						// IMPORTANT POLICY: for live tracks, never smooth/OSRM-snap stop-coordinate
+																						// fallbacks. Only snap when we have real *track geometry*.
+																						// We key this off the backend's declared geometry source, not off point count,
+																						// because a stop list can contain many points.
+																						// Only OSRM-snap when the backend confirms we're using stored track geometry.
+																						// Anything else (including stop-based polylines) must not be smoothed.
+																						const isTrackSource = !!(data && data.source && String(data.source).toLowerCase() === 'route_link_tracks');
+																						// Extra guard: even if backend says it's track geometry, a very short
+																						// polyline is often effectively "stop coords" (or too coarse) and
+																						// shouldn't be OSRM-snapped.
+																						const shouldSnapTrack = isTrackSource && Array.isArray(norm);
 																						setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																						try {
-																							const snapped = await osrmRouteCoordsLatLon(norm);
-																							if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
-																								setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
-																							}
-																						} catch (e) { /* ignore */ }
+																						if (shouldSnapTrack) {
+																							try {
+																								const snapped = await osrmRouteCoordsLatLon(norm);
+																								if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
+																									setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
+																								}
+																							} catch (e) { /* ignore */ }
+																						}
 																						break;
 																				} catch (je) {
 																					let txt = null;
@@ -2694,13 +2743,7 @@ function HoverWinnerController({
 														const norm = geom.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 														// Label will be attached asynchronously when/if the fetch completes.
-																setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
-																try {
-																	const snapped = await osrmRouteCoordsLatLon(norm);
-																	if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
-																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
-																	}
-																} catch (e) { /* ignore */ }
+																		setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
 														try { 
 															// Notify parent of the popup open and its signature (optional)
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
@@ -2711,13 +2754,7 @@ function HoverWinnerController({
 													if (stops.length >= 2) {
 														const norm = stops.map((pt) => ([Number(pt[0]), Number(pt[1])]));
 														const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
-																try {
-																	const snapped = await osrmRouteCoordsLatLon(norm);
-																	if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
-																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
-																	}
-																} catch (e) { /* ignore */ }
+																				setSelectedVehicleTrack({ id: marker.id, coords: norm, color, stops: [], label: null });
 														try { 
 															try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																																																																																																						// Intentionally not opening click popup (hover tooltips only).
@@ -2756,13 +2793,7 @@ function HoverWinnerController({
 
 											const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 											const stops = Array.isArray(best.variant && best.variant.stops) ? stopsToLatLngs(best.variant.stops) : [];
-															setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
-															try {
-																const snapped = await osrmRouteCoordsLatLon(best.norm);
-																if (selectedVehicleReqTokenRef.current === selectionToken && Array.isArray(snapped) && snapped.length >= 2) {
-																	setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped } : prev);
-																}
-															} catch (e) { /* ignore */ }
+																				setSelectedVehicleTrack({ id: marker.id, coords: best.norm, color, stops, label: null });
 											try { 
 												try { if (onOpenPopupSignature) onOpenPopupSignature(makeMarkerSignature(marker)); } catch (ee) { /* ignore */ }
 																																																																																																						// Intentionally not opening click popup (hover tooltips only).
@@ -3216,15 +3247,23 @@ function HoverWinnerController({
 																		if (!Array.isArray(norm) || norm.length < 2) continue;
 																		if (data && data.source === 'linear') continue;
 																		const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																		// If OSRM is up, snap the provided geometry to roads.
-																		// Best-effort only — fall back immediately to the raw coords.
+																		// IMPORTANT POLICY: for live tracks, never smooth/OSRM-snap stop-coordinate
+																		// fallbacks. Only snap when we have real *track geometry*.
+																		// Only OSRM-snap when the backend confirms we're using stored track geometry.
+																		const isTrackSource = !!(data && data.source && String(data.source).toLowerCase() === 'route_link_tracks');
+																		// Extra guard: even if backend says it's track geometry, a very short
+																		// polyline is often effectively "stop coords" (or too coarse) and
+																		// shouldn't be OSRM-snapped.
+																		const shouldSnapTrack = isTrackSource && Array.isArray(norm);
 																		setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																		try {
-																			const snapped = await osrmRouteCoordsLatLon(norm);
-																			if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
-																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
-																			}
-																		} catch (e) { /* ignore */ }
+																		if (shouldSnapTrack) {
+																			try {
+																				const snapped = await osrmRouteCoordsLatLon(norm);
+																				if (selectedVehicleReqTokenRef.current === tokenAtStart && Array.isArray(snapped) && snapped.length >= 2) {
+																					setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: snapped, color } : prev);
+																				}
+																			} catch (e) { /* ignore */ }
+																		}
 																	break;
 																	} catch (_je) {
 																		continue;

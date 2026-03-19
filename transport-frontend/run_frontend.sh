@@ -145,8 +145,14 @@ fi
 # If you are running a setup where the browser can resolve the container DNS
 # (rare; usually requires a proxy), you can override this env var.
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://localhost:5050}"
-# OSRM base for client-side snapping (optional)
-VITE_OSRM_BASE="${VITE_OSRM_BASE:-http://transport-osrm-edillocnon:5012}"
+# OSRM base for *direct* client-side snapping (optional).
+#
+# Default behaviour: leave this UNSET so the frontend uses the backend's
+# /osrm/route proxy endpoint (avoids docker-only DNS names and CORS issues).
+#
+# If you *really* want the browser to call OSRM directly, set e.g.:
+#   export VITE_OSRM_BASE=http://127.0.0.1:5012
+VITE_OSRM_BASE="${VITE_OSRM_BASE:-}"
 
 # Memory tuning
 # - NODE_OPTIONS sets the V8 heap limit (in MB) for the dev server process.
@@ -158,7 +164,11 @@ echo "Starting container $CONTAINER (host:$PORT -> container:$PORT)"
 
 echo "Frontend will use: VITE_API_BASE_URL=$VITE_API_BASE_URL"
 
-echo "(Optional) Frontend OSRM base: VITE_OSRM_BASE=$VITE_OSRM_BASE"
+if [ -n "$VITE_OSRM_BASE" ]; then
+  echo "(Optional) Frontend OSRM base (direct): VITE_OSRM_BASE=$VITE_OSRM_BASE"
+else
+  echo "Frontend OSRM: using backend proxy (VITE_OSRM_BASE is unset)"
+fi
 
 # On SELinux systems with podman, :Z might be required. (No-op elsewhere.)
 MOUNT_OPTS=""
@@ -185,7 +195,7 @@ $RUNTIME run -d \
   "${EXTRA_RUN_ARGS[@]}" \
   -p "$PORT:$PORT" \
   -e "VITE_API_BASE_URL=$VITE_API_BASE_URL" \
-  -e "VITE_OSRM_BASE=$VITE_OSRM_BASE" \
+  $( [ -n "$VITE_OSRM_BASE" ] && printf '%s' "-e VITE_OSRM_BASE=$VITE_OSRM_BASE" ) \
   -e "NODE_OPTIONS=--max-old-space-size=$NODE_MAX_OLD_SPACE_MB" \
   -e "CYPRESS_INSTALL_BINARY=0" \
   -v "$HERE":/app${MOUNT_OPTS} \

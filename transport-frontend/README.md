@@ -45,10 +45,14 @@ Notes:
 
 - The script will free host port **5075** if it’s already in use.
 - The container joins the same network as the backend (default: `scc200-net-edillocnon`).
-- By default it points the frontend at the backend container name:
-	- `VITE_API_BASE_URL=http://transport-backend-edillocnon:5050`
-- If OSRM is running on the same network, it also sets:
-	- `VITE_OSRM_BASE=http://transport-osrm-edillocnon:5012`
+- By default it points the frontend at a host-reachable backend URL:
+	- `VITE_API_BASE_URL=http://localhost:5050`
+- OSRM road-snapping is performed via the backend proxy endpoint by default:
+	- the frontend calls `GET /osrm/route` on the backend
+	- the backend forwards to its configured `OSRM_URL` (can be a docker-only hostname)
+
+If you *really* want the browser to call OSRM directly, you can set:
+	- `VITE_OSRM_BASE=http://127.0.0.1:5012`
 
 You can override any of these with environment variables:
 
