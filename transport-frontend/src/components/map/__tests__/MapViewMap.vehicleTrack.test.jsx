@@ -330,7 +330,7 @@ describe('MapViewMap vehicle track selection', () => {
     expect(endpointZ).toBeGreaterThan(transferZ);
   });
 
-  it('attempts extra route_id geometry fetches when route_int succeeds but label contains multiple route_ids (circular stitch)', async () => {
+  it('does not attempt route_id geometry fetches (route_int-only contract)', async () => {
     fetchRouteLabelMock.mockResolvedValue({
       line: '6B',
       variant_count: 2,
@@ -413,8 +413,8 @@ describe('MapViewMap vehicle track selection', () => {
       const calledUrls = global.fetch.mock.calls.map((c) => String(c[0]));
       // We should have fetched the base route_int geometry...
       expect(calledUrls.some((u) => u.includes('route_int=RID2'))).toBe(true);
-      // ...and then tried at least one route_id extra segment.
-      expect(calledUrls.some((u) => u.includes('route_id=RID'))).toBe(true);
+      // ...and we should NOT fall back to route_id stitching.
+      expect(calledUrls.some((u) => u.includes('route_id=RID'))).toBe(false);
     });
   });
 

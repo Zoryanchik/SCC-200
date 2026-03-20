@@ -667,6 +667,10 @@ def debug_route_link_tracks(route_id: str, sample: int = 5, suggest: int = 10):
     except Exception:
         merged = None
 
+    # This debug endpoint historically took a timetable route_id. The frontend
+    # sometimes hands us a numeric route_int instead. Accept either:
+    # - If `route_id` matches a route_metadata.route_id, use its route_int.
+    # - Else if `route_id` looks like an int, treat it as route_int directly.
     meta = None
     try:
         metas = getattr(merged, 'route_metadata', None) or []
@@ -681,8 +685,33 @@ def debug_route_link_tracks(route_id: str, sample: int = 5, suggest: int = 10):
     try:
         if isinstance(meta, dict) and meta.get('route_int') is not None:
             route_int = int(meta.get('route_int'))
+        else:
+            route_int = int(str(route_id).strip())
     except Exception:
         route_int = None
+
+    # Extra diagnostics: why would fragments be missing?
+    diag: dict[str, Any] = {
+        'input': route_id,
+        'route_int': route_int,
+    }
+    try:
+        diag['merged_route_count'] = len(getattr(merged, 'route_metadata', None) or [])
+    except Exception:
+        diag['merged_route_count'] = None
+    try:
+        if route_int is not None and merged is not None:
+            if route_int < 0 or route_int >= len(getattr(merged, 'route_metadata', None) or []):
+                diag['route_int_in_range'] = False
+            else:
+                diag['route_int_in_range'] = True
+                m = (getattr(merged, 'route_metadata', None) or [None])[route_int]
+                diag['meta_is_dict'] = isinstance(m, dict)
+                if isinstance(m, dict):
+                    diag['meta_route_id'] = m.get('route_id')
+                    diag['meta_line'] = m.get('line') or m.get('line_name')
+    except Exception:
+        pass
 
     link_map = None
     try:
@@ -690,6 +719,12 @@ def debug_route_link_tracks(route_id: str, sample: int = 5, suggest: int = 10):
             link_map = merged.get_route_link_tracks(route_int)
     except Exception:
         link_map = None
+
+    try:
+        diag['link_map_is_dict'] = isinstance(link_map, dict)
+        diag['link_map_len'] = len(link_map) if isinstance(link_map, dict) else None
+    except Exception:
+        pass
 
     link_count = len(link_map) if isinstance(link_map, dict) else 0
     sample_links: list[list[str]] = []
@@ -728,6 +763,7 @@ def debug_route_link_tracks(route_id: str, sample: int = 5, suggest: int = 10):
         'sample_fragment': sample_fragment,
         'suggestions': [],
         'route_int': route_int,
+        'diag': diag,
     }
 
     if not resp['found'] and int(suggest or 0) > 0:
@@ -1126,8 +1162,8 @@ async def debug_match_explain(
         out = []
         try:
             n = min(max(0, 3 + int(ENDPOINT_SHIFT_STOPS)), len(jt))
-            for i in range(1, n + 1):
-                atco = merged.get_atco_code(jt[-i][0])
+            for i in range(n):
+                atco = merged.get_atco_code(jt[-1 - i][0])
                 if atco:
                     out.append(str(atco).strip())
         except Exception:
@@ -1622,7 +1658,8 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                        to_lat: float, to_lon: float,
                        mode: str = "driving",
                        route_id: str | None = None,
-                       route_int: int | None = None,
+                       route_int: int | str | None = None,
+                       merged_key: str | None = None,
                        from_stop_id: str | None = None,
                        to_stop_id: str | None = None,
                        stop_ids: str | None = None,
@@ -1651,6 +1688,10 @@ def route_leg_geometry(from_lat: float, from_lon: float,
     """
     # Prefer stored timetable tracks when we have enough context.
     #
+    # IMPORTANT: route_int is only meaningful within a specific MergedData.
+    # For live vehicle overlays we must always use *today's* MergedData so
+    # the route_int index matches the live feed's mapping.
+    #
     # IMPORTANT: The frontend often calls this endpoint with mode=driving
     # even for bus legs (it uses the driving OSRM profile for road snapping).
     # When a canonical route_id is provided, we still want to prefer the
@@ -1673,8 +1714,26 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             norm_mode = 'walking'
 
         if norm_mode != 'walking':
-            tracks = []
+            tracks = {}
             frag_seg = []
+
+            # Resolve the merged instance used to interpret route_int.
+            # NOTE: route_int is only meaningful within the exact merged build
+            # that produced it (AM/PM noon split). Live overlays must therefore
+            # pass `merged_key` from /bus/live so we use the same build.
+            merged_today = None
+            try:
+                if merged_key:
+                    merged_today, _router_today, _walking_today = _get_router_for_merged_key(merged_key, apply_delay=False)
+                else:
+                    today_str = datetime.now().date().isoformat()
+                    merged_today, _router_today, _walking_today = get_router_for_date(
+                        today_str,
+                        start_time=None,
+                        apply_delay=False,
+                    )
+            except Exception:
+                merged_today = None
 
             # Optional stop-sequence fallback (ATCO codes) supplied by callers.
             # This is ONLY used when fragment stitching is unavailable.
@@ -1708,35 +1767,39 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             # Prefer dense route_int lookup when provided.
             if route_int is not None:
                 try:
-                    merged = None
-                    if globals().get('_base_cache'):
-                        prebuilt = _base_cache.get('prebuilt_cache')
-                        if prebuilt:
-                            for _k, v in prebuilt.items():
-                                try:
-                                    merged = v[0]
-                                except Exception:
-                                    merged = None
-                                if merged:
-                                    break
+                    try:
+                        route_int = int(str(route_int).strip())
+                    except Exception:
+                        route_int = None
+                    if route_int is None:
+                        raise ValueError('invalid route_int')
+                    merged = merged_today
                     if merged is None:
-                        rcache = globals().get('_router_cache')
-                        rlock = globals().get('_router_cache_lock')
-                        if rcache is not None:
-                            if rlock:
-                                with rlock:
-                                    items = list(rcache.values())
-                            else:
-                                items = list(rcache.values())
-                            for val in items:
-                                try:
-                                    merged = val[0]
-                                except Exception:
-                                    merged = None
-                                if merged:
-                                    break
+                        # Safety fallback only: if today's router wasn't available,
+                        # fall back to whatever is in base cache.
+                        if globals().get('_base_cache'):
+                            try:
+                                merged = _base_cache.get('merged')
+                            except Exception:
+                                merged = None
                     if merged is not None:
                         ri = int(route_int)
+
+                        # If route_int doesn't fit this merged, treat it as a
+                        # mismatch (do NOT degrade to linear for bus geometry).
+                        try:
+                            meta_len = len(getattr(merged, 'route_metadata', None) or [])
+                        except Exception:
+                            meta_len = None
+                        if meta_len is not None and (ri < 0 or ri >= meta_len):
+                            return {
+                                "error": "route_int_out_of_range",
+                                "diag": {
+                                    "route_int": ri,
+                                    "merged_key": merged_key,
+                                    "merged_route_count": meta_len,
+                                },
+                            }
                         # If caller didn't provide stop ids, derive endpoints from this
                         # route's stop list (first/last) so we stitch the *whole* route.
                         # This avoids returning raw full-route polyline geometry
@@ -3354,14 +3417,6 @@ async def routes_for_line(
         """Mean consecutive distance in metres (cheap Euclidean approx)."""
         if len(stops) < 2:
             return 0.0
-        total = 0.0
-        cos_lat = math.cos(math.radians(stops[0]["lat"]))
-        for i in range(len(stops) - 1):
-            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
-            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
-            total += math.sqrt(dlat * dlat + dlon * dlon)
-        return total / (len(stops) - 1)
-
     variants = []
     for r_idx in matching_routes:
         s = _route_stops_variant(r_idx)
@@ -6320,6 +6375,17 @@ async def bus_live_operator(
             "bearing": bearing,
         }
 
+        # Attach the merged_key for which `route_int` (if present) is valid.
+        # This lets clients request geometry using route_int without ambiguity
+        # across the noon (AM/PM) merged split.
+        try:
+            from datetime import datetime as _dt
+            now_dt = _dt.now()
+            now_secs = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
+            entry['merged_key'] = _merged_key_for_date_and_start_time(now_dt.date().isoformat(), now_secs)
+        except Exception:
+            pass
+
         # Expose matched route_int so clients can render tracks instantly.
         if matched_route_int is not None:
             try:
@@ -7004,6 +7070,30 @@ def _delay_updater_loop(stop_event: threading.Event):
             if stop_event.is_set():
                 break
             time.sleep(1)
+
+
+def _merged_key_for_date_and_start_time(date_str: str, start_time: int | None) -> str:
+    """Return a stable key identifying which merged build a route_int belongs to.
+
+    IMPORTANT: `route_int` is an index into a particular merged build, and is
+    only meaningful when interpreted against the same (date,bucket) merged.
+
+    We mirror `get_router_for_date` bucketing exactly (noon split / 43200s).
+    """
+    bucket = "AM" if (start_time is not None and int(start_time) < 43200) else "PM"
+    return f"{date_str}|{bucket}"
+
+
+def _get_router_for_merged_key(merged_key: str, apply_delay: bool = False):
+    """Resolve a merged_key back to (merged, router, walking)."""
+    try:
+        date_str, bucket = str(merged_key).split('|', 1)
+    except Exception:
+        date_str, bucket = (datetime.now().date().isoformat(), 'AM')
+
+    # Pick representative start_time values that map to the intended bucket.
+    start_time = 8 * 3600 if str(bucket).upper() == 'AM' else 18 * 3600
+    return get_router_for_date(date_str, start_time=start_time, apply_delay=apply_delay)
 
 def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
     """Return (merged, router, walking) for a given date and time bucket.

@@ -2465,19 +2465,16 @@ function HoverWinnerController({
 																		// try to fetch fragment-based leg geometry and render it.
 																	try {
 																					const routeIntDirect = marker && (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) ? (marker.route_int ?? marker.routeInt ?? marker.meta?.route_int ?? marker.meta?.routeInt) : null;
+																					const mergedKeyDirect = marker && (marker.merged_key ?? marker.mergedKey ?? marker.meta?.merged_key ?? marker.meta?.mergedKey) ? (marker.merged_key ?? marker.mergedKey ?? marker.meta?.merged_key ?? marker.meta?.mergedKey) : null;
 																					const routeIntsFromLabel = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
 																					const routeInts = [routeIntDirect, ...routeIntsFromLabel].filter((v, i, a) => v != null && a.indexOf(v) === i);
-																					const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 																		const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-																			try { console.debug('[map] label route_ints/route_ids (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-																			if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
+																					try { console.debug('[map] label route_ints (cached)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10) }); } catch (e) { /* ignore */ }
+																					if ((routeInts && routeInts.length) && pos && pos.length === 2) {
 																			// Provide a tiny non-zero segment so the endpoint has from/to coords,
 																				// but rely on route_int/route_id to return non-linear geometry.
 																			const eps = 0.0001;
-																					const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
-																					if (!candidates.length && routeIds && routeIds.length) {
-																						candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
-																					}
+																					const candidates = routeInts.map((v) => ({ kind: 'route_int', value: v }));
 																					for (const cand of candidates) {
 																						const raw = cand && cand.value != null ? cand.value : null;
 																						const val = raw != null ? String(raw) : null;
@@ -2489,7 +2486,10 @@ function HoverWinnerController({
 																					let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																					url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
 																					url += `&mode=driving`;
-																					url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																					url += `&route_int=${encodeURIComponent(val)}`;
+																					if (mergedKeyDirect) {
+																							url += `&merged_key=${encodeURIComponent(String(mergedKeyDirect))}`;
+																						}
 																					try { console.debug('[map] leg-geometry request (cached)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																				// IMPORTANT: Don't use a short AbortController timeout here.
 																				// In practice, other selection interactions can abort pending
@@ -2528,7 +2528,7 @@ function HoverWinnerController({
 																					};
 																						norm = safeNormalizeCoords(data && data.coords);
 																						if (!norm || norm.length < 2) {
-																							try { console.debug('[map] leg-geometry returned empty coords (cached)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																							try { console.debug('[map] leg-geometry returned empty coords (cached)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																							// No geometry returned: try a stop-sequence fallback for live buses.
 																							// This must remain UNSMOOTHED (no OSRM) because it's stop-derived.
 																							try {
@@ -2539,7 +2539,10 @@ function HoverWinnerController({
 																									let url2 = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																									url2 += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
 																									url2 += `&mode=driving`;
-																									url2 += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																									url2 += `&route_int=${encodeURIComponent(val)}`;
+																									if (mergedKeyDirect) {
+																											url2 += `&merged_key=${encodeURIComponent(String(mergedKeyDirect))}`;
+																									}
 																									url2 += `&stop_ids=${encodeURIComponent(cleaned.join(','))}`;
 																									const resp2 = await fetch(url2);
 																									if (resp2 && resp2.ok) {
@@ -2555,11 +2558,12 @@ function HoverWinnerController({
 																							} catch (e) { /* ignore */ }
 																							continue;
 																						}
-																						if (data && data.source === 'linear') {
-																								try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																								continue;
-																						}
-																						try { console.debug('[map] leg-geometry selected non-linear geometry (cached)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																								if (data && String(data.source || '').toLowerCase() === 'linear') {
+																										// Strict policy: don't render degenerate linear fallback tracks.
+																										try { console.debug('[map] leg-geometry returned linear (cached) — skipping', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																										continue;
+																								}
+																								try { console.debug('[map] leg-geometry selected non-linear geometry (cached)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
 																						const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 																						// IMPORTANT POLICY: for live tracks, never smooth/OSRM-snap stop-coordinate
 																						// fallbacks. Only snap when we have real *track geometry*.
@@ -2596,10 +2600,8 @@ function HoverWinnerController({
 																					} catch (e) { /* ignore */ }
 																					continue;
 																				}
-																				if (data && data.source === 'linear') {
-																					try { console.debug('[map] leg-geometry returned linear (cached)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
-																					continue;
-																				}
+																				// Note: post-parse, we intentionally do NOT skip linear geometry here.
+																				// Linear is a valid fallback track for live overlays.
 																			}
 																		}
 																	} catch (ee) {
@@ -2687,16 +2689,13 @@ function HoverWinnerController({
 																					// Best-effort: if backend provides canonical route_ints for this line,
 																					// try to fetch fragment-based leg geometry and render it.
 														try {
+																						const mergedKeyDirect = marker && (marker.merged_key ?? marker.mergedKey ?? marker.meta?.merged_key ?? marker.meta?.mergedKey) ? (marker.merged_key ?? marker.mergedKey ?? marker.meta?.merged_key ?? marker.meta?.mergedKey) : null;
 																						const routeInts = labelData && Array.isArray(labelData.route_ints) ? labelData.route_ints : [];
-																						const routeIds = labelData && Array.isArray(labelData.route_ids) ? labelData.route_ids : [];
 															const pos = marker && Array.isArray(marker.position) ? marker.position : null;
-																					try { console.debug('[map] label route_ints/route_ids (post-route)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10), routeIdsLen: routeIds.length, routeIds: routeIds.slice(0, 10) }); } catch (e) { /* ignore */ }
-																					if (((routeInts && routeInts.length) || (routeIds && routeIds.length)) && pos && pos.length === 2) {
+																						try { console.debug('[map] label route_ints (post-route)', { line: String(line), routeIntsLen: routeInts.length, routeInts: routeInts.slice(0, 10) }); } catch (e) { /* ignore */ }
+																						if ((routeInts && routeInts.length) && pos && pos.length === 2) {
 																const eps = 0.0001;
-																						const candidates = (routeInts && routeInts.length) ? routeInts.map((v) => ({ kind: 'route_int', value: v })) : [];
-																						if (!candidates.length && routeIds && routeIds.length) {
-																							candidates.push(...routeIds.map((v) => ({ kind: 'route_id', value: v })));
-																						}
+																						const candidates = routeInts.map((v) => ({ kind: 'route_int', value: v }));
 																						for (const cand of candidates) {
 																							const raw = cand && cand.value != null ? cand.value : null;
 																							const val = raw != null ? String(raw) : null;
@@ -2705,21 +2704,24 @@ function HoverWinnerController({
 																							let url = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
 																							url += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
 																							url += `&mode=driving`;
-																							url += cand.kind === 'route_int' ? `&route_int=${encodeURIComponent(val)}` : `&route_id=${encodeURIComponent(val)}`;
+																							url += `&route_int=${encodeURIComponent(val)}`;
+																							if (mergedKeyDirect) {
+																								url += `&merged_key=${encodeURIComponent(String(mergedKeyDirect))}`;
+																							}
 																							try { console.debug('[map] leg-geometry request (post-route)', { line: String(line), kind: cand.kind, val, url }); } catch (e) { /* ignore */ }
 																	const controllerGeom = new AbortController();
 																	const tgeom = setTimeout(() => controllerGeom.abort(), 5000);
 																	const resp = await fetch(url, { signal: controllerGeom.signal });
 																	clearTimeout(tgeom);
 																	if (selectedVehicleReqTokenRef.current !== tokenAtStart) {
-																		try { console.debug('[map] token mismatch after fetch (post-route) — stopping', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																							try { console.debug('[map] token mismatch after fetch (post-route) — stopping', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																		break;
 																	}
-																	if (!resp) {
-																		try { console.debug('[map] leg-geometry no response (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																						if (!resp) {
+																							try { console.debug('[map] leg-geometry no response (post-route)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																		continue;
 																	}
-																	try { console.debug('[map] leg-geometry status (post-route)', { line: String(line), rid, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
+																						try { console.debug('[map] leg-geometry status (post-route)', { line: String(line), kind: cand.kind, val, ok: resp.ok, status: resp.status }); } catch (e) { /* ignore */ }
 																	if (!resp.ok) continue;
 																	let data = null;
 																	let norm = null;
@@ -2738,93 +2740,18 @@ function HoverWinnerController({
 																			}
 																			return out;
 																		};
-																				norm = safeNormalizeCoords(data && data.coords);
-																				if (!norm || norm.length < 2) {
-																					try { console.debug('[map] leg-geometry returned empty coords (post-route)', { line: String(line), rid }); } catch (e) { /* ignore */ }
+																								norm = safeNormalizeCoords(data && data.coords);
+																								if (!norm || norm.length < 2) {
+																									try { console.debug('[map] leg-geometry returned empty coords (post-route)', { line: String(line), kind: cand.kind, val }); } catch (e) { /* ignore */ }
 																					// No track returned: do NOT fall back to stops/linear geometry.
 																					continue;
 																				}
-																				if (data && data.source === 'linear') {
-																						try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																						continue;
-																				}
-																				try { console.debug('[map] leg-geometry selected non-linear geometry (post-route)', { line: String(line), rid, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																				// Hacky circular-route workaround:
-																				// Some circular lines (e.g. 6B) effectively have the same start/end stop.
-																				// The backend may return only one variant/arc per route_id, so stitch
-																				// multiple route_ids together when available.
-																				let stitched = norm;
-																				try {
-																					if (Array.isArray(routeIds) && routeIds.length >= 2 && pos && pos.length === 2) {
-																						const primaryRid = (cand.kind === 'route_id') ? val : (routeIds && routeIds.length ? String(routeIds[0]) : null);
-																						if (primaryRid) {
-																							// Cap extra fetches so a pathological label doesn't spam requests.
-																							const maxExtras = 4;
-																							const extras = routeIds
-																								.map((v) => String(v))
-																								.filter((v) => v && v !== primaryRid)
-																								.slice(0, maxExtras);
-
-																							const safeNormalizeCoords2 = (raw) => {
-																									if (typeof normalizeCoords === 'function') return normalizeCoords(raw);
-																									if (!Array.isArray(raw)) return [];
-																									const out = [];
-																									for (const pt of raw) {
-																										if (!Array.isArray(pt) || pt.length < 2) continue;
-																										const a = Number(pt[0]);
-																										const b = Number(pt[1]);
-																										if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
-																										out.push([a, b]);
-																									}
-																								return out;
-																							};
-
-																							const joinIfClose = (aIn, bIn) => {
-																								const a = Array.isArray(aIn) ? aIn : [];
-																								const b = Array.isArray(bIn) ? bIn : [];
-																								if (a.length < 2 || b.length < 2) return null;
-																								const lastA = a[a.length - 1];
-																								const firstB = b[0];
-																								const drop = lastA && firstB && lastA[0] === firstB[0] && lastA[1] === firstB[1];
-																								return drop ? a.concat(b.slice(1)) : a.concat(b);
-																							};
-
-																							for (const other of extras) {
-																								let url2 = `${API_BASE}/route/leg-geometry?from_lat=${encodeURIComponent(pos[0])}&from_lon=${encodeURIComponent(pos[1])}`;
-																								url2 += `&to_lat=${encodeURIComponent(pos[0] + eps)}&to_lon=${encodeURIComponent(pos[1] + eps)}`;
-																								url2 += `&mode=driving&route_id=${encodeURIComponent(other)}`;
-																								const resp2 = await fetch(url2);
-																								if (!resp2 || !resp2.ok) continue;
-																								const data2 = await resp2.json();
-																								const norm2 = safeNormalizeCoords2(data2 && data2.coords);
-																									// Accept any non-linear geometry source; full route polylines are removed.
-																									if (!(data2 && data2.source !== 'linear' && Array.isArray(norm2) && norm2.length >= 2)) continue;
-
-																								// Choose orientation that best connects: append norm2, or append reversed norm2.
-																								const a = stitched;
-																								const b = norm2;
-																								const bRev = b.slice().reverse();
-																								const joinedFwd = joinIfClose(a, b);
-																								const joinedRev = joinIfClose(a, bRev);
-																								// If both possible, prefer the one that yields a longer path (usually means better continuity).
-																								if (joinedFwd && joinedRev) {
-																									stitched = joinedRev.length > joinedFwd.length ? joinedRev : joinedFwd;
-																								} else if (joinedFwd) {
-																									stitched = joinedFwd;
-																								} else if (joinedRev) {
-																									stitched = joinedRev;
-																								} else {
-																									// Last resort: just concatenate (better than dropping a segment).
-																									stitched = a.concat(b);
+																								if (data && String(data.source || '').toLowerCase() === 'linear') {
+																									try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																								continue;
 																								}
-
-																								try { console.debug('[map] circular stitch applied (post-route)', { line: String(line), route_id_a: primaryRid, route_id_b: other, coordsLen: stitched.length }); } catch (e) { /* ignore */ }
-																							}
-																						}
-																				}
-																			} catch (e) {
-																			/* ignore */
-																		}
+																								try { console.debug('[map] leg-geometry selected non-linear geometry (post-route)', { line: String(line), kind: cand.kind, val, coordsLen: norm.length }); } catch (e) { /* ignore */ }
+																								let stitched = norm;
 																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
 																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: stitched, color } : { id: marker.id, coords: stitched, color, stops: [], label: null });
 																				break;
@@ -2834,7 +2761,8 @@ function HoverWinnerController({
 																		try {
 																			console.debug('[map] leg-geometry parse/process failed (post-route)', {
 																				line: String(line),
-																				rid,
+																							kind: cand.kind,
+																							val,
 																				error: je && je.message ? je.message : String(je),
 																				contentType: resp.headers ? resp.headers.get('content-type') : null,
 																				textSample: txt ? String(txt).slice(0, 300) : null,
@@ -2842,16 +2770,6 @@ function HoverWinnerController({
 																		} catch (e) { /* ignore */ }
 																		continue;
 																	}
-																	if (data && data.source === 'linear') {
-																		try { console.debug('[map] leg-geometry returned linear (post-route)', { line: String(line), rid, coordsLen: norm ? norm.length : 0 }); } catch (e) { /* ignore */ }
-																		continue;
-																	}
-																			if (data && data.source !== 'linear' && norm && norm.length >= 2) {
-																				try { console.debug('[map] leg-geometry selected geometry (post-route)', { line: String(line), rid, source: data && data.source, coordsLen: norm.length }); } catch (e) { /* ignore */ }
-																				const color = busIconColor(marker.delayMinutes, isBusMappedLocal(marker));
-																				setSelectedVehicleTrack((prev) => (prev && prev.id === marker.id) ? { ...prev, coords: norm, color } : { id: marker.id, coords: norm, color, stops: [], label: null });
-																				break;
-																			}
 																}
 															}
 														} catch (ee) {
