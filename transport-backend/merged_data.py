@@ -22,6 +22,20 @@ import time
 import threading
 
 
+def _shift_journey_times_row_inplace(jt_row, stop_offset: int, time_offset: int):
+    """Fast path for shifting a single journey time row.
+
+    Keeps the external representation identical (list of (sid, atime, dtime)),
+    but avoids some Python overhead in the tight merge loop by using locals.
+    """
+    out = [None] * len(jt_row)
+    so = int(stop_offset)
+    to = int(time_offset)
+    for i, (sid, atime, dtime) in enumerate(jt_row):
+        out[i] = (sid + so, atime + to, dtime + to)
+    return out
+
+
 def _shift_journey_times_row(args):
     """Worker for MERGE_PARALLEL_SHIFT.
 
@@ -139,11 +153,17 @@ class MergedData:
             # --- journey_times: remap stop ids + shift times ---
             # This can dominate runtime due to tuple allocations.
             if not parallel_shift:
+                # Local aliases for speed in the tight loop.
+                jt_append = journey_times_local.append
+                so = int(stop_offset)
+                to = int(time_offset)
                 for jt in data.journey_times:
+                    # Inline shifting (same representation), but minimize
+                    # repeated global/name lookups.
                     out = [None] * len(jt)
                     for i, (sid, atime, dtime) in enumerate(jt):
-                        out[i] = (sid + stop_offset, atime + time_offset, dtime + time_offset)
-                    journey_times_local.append(out)
+                        out[i] = (sid + so, atime + to, dtime + to)
+                    jt_append(out)
             else:
                 # Parallel path: shift each journey in workers.
                 # Note: this pickles each journey list; enable only when beneficial.
@@ -183,7 +203,10 @@ class MergedData:
                     continue
                 out = {}
                 for (fs, ts), pts in r_links.items():
-                    out[(fs + stop_offset, ts + stop_offset)] = list(pts)
+                    # Important: we only need to remap stop ids on the key.
+                    # The point list itself is immutable for our purposes here.
+                    # Avoid copying potentially-large `pts` lists during merge.
+                    out[(fs + stop_offset, ts + stop_offset)] = pts
                 route_link_tracks_local.append(out)
 
             # Record the transport mode for every journey in this group
