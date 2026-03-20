@@ -26,4 +26,19 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+
+  // Test files (Vitest/JSDOM): allow test globals and common Node globals.
+  {
+    files: [
+      '**/*.test.{js,jsx}',
+      '**/__tests__/**/*.{js,jsx}',
+    ],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+        ...globals.vitest,
+      },
+    },
+  },
 ])

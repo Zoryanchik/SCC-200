@@ -8811,8 +8811,8 @@ async def compare_routers(request: JourneyPlanRequest):
                 get_router_for_date, date_str, start_time=start_seconds
             )
 
-            # Lazily construct optional routers (eco, cosy, lazy, greedy).
-            # optional routers: eco, cosy, lazy, greedy
+            # Lazily construct optional routers (eco, lazy, greedy).
+            # optional routers: eco, lazy, greedy
             eco_router = None
             computed = None
             lazy_router = None
@@ -8823,11 +8823,6 @@ async def compare_routers(request: JourneyPlanRequest):
             except Exception:
                 eco_router = None
 
-            try:
-                from cosy_router import RaptorRouter as CosyRaptor
-                cosy_router = CosyRaptor(merged)
-            except Exception:
-                cosy_router = None
             try:
                 from lazy_router import RaptorRouter as LazyRaptor
                 lazy_router = LazyRaptor(merged)
@@ -8841,7 +8836,7 @@ async def compare_routers(request: JourneyPlanRequest):
 
             # Debug: record which optional routers were successfully constructed
             available_routers = [name for name, obj in (
-                ("eco", eco_router), ("cosy", cosy_router),
+                ("eco", eco_router),
                 ("lazy", lazy_router), ("greedy", greedy_router)
             ) if obj is not None]
             logger.debug("compare_routers: available optional routers: %s", available_routers)
@@ -8865,8 +8860,6 @@ async def compare_routers(request: JourneyPlanRequest):
             routers = [("main", main_router)]
             if eco_router is not None:
                 routers.append(("eco", eco_router))
-            if cosy_router is not None:
-                routers.append(("cosy", cosy_router))
             if lazy_router is not None:
                 routers.append(("lazy", lazy_router))
             if greedy_router is not None:
@@ -8882,7 +8875,6 @@ async def compare_routers(request: JourneyPlanRequest):
 
             main_res, main_time = router_results.get("main", (None, None))
             eco_res, eco_time = router_results.get("eco", (None, None))
-            cosy_res, cosy_time = router_results.get("cosy", (None, None))
             lazy_res, lazy_time = router_results.get("lazy", (None, None))
             greedy_res, greedy_time = router_results.get("greedy", (None, None))
 
@@ -8892,7 +8884,6 @@ async def compare_routers(request: JourneyPlanRequest):
             include_geom = bool(getattr(request, 'includeGeometry', False))
             main_plan = build_journey_plan_response(main_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if main_res is not None else None
             eco_plan = build_journey_plan_response(eco_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if eco_res is not None else None
-            cosy_plan = build_journey_plan_response(cosy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if cosy_res is not None else None
             lazy_plan = build_journey_plan_response(lazy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if lazy_res is not None else None
             greedy_plan = build_journey_plan_response(greedy_res, merged, stop_coords, request_start_seconds=start_seconds, include_geometry=include_geom) if greedy_res is not None else None
 
@@ -8908,11 +8899,6 @@ async def compare_routers(request: JourneyPlanRequest):
                     "route": eco_plan,
                     "route_text": format_route_text(eco_res, merged) if eco_res is not None else None,
                     "time_seconds": eco_time,
-                },
-                "cosy": {
-                    "route": cosy_plan,
-                    "route_text": format_route_text(cosy_res, merged) if cosy_res is not None else None,
-                    "time_seconds": cosy_time,
                 },
                 "lazy": {
                     "route": lazy_plan,
@@ -8999,7 +8985,7 @@ async def route_by_address(request: AddressRouteRequest):
 
         # Build a JourneyPlanRequest and delegate to the compare endpoint
         # so address-based requests return the same multi-router response
-        # (main, eco, cosy, lazy, greedy) as `/journey/compare`.
+        # (main, eco, lazy, greedy) as `/journey/compare`.
         jreq = JourneyPlanRequest(
             fromStop=StopLocation(lat=start_point[0], lon=start_point[1]),
             toStop=StopLocation(lat=destination[0], lon=destination[1]),

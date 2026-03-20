@@ -120,8 +120,23 @@ class RaptorRouter:
                     pre = reach_stops[stop][0]
                     if pre is None:
                         continue
+                    # Guard: only treat this as an initial walking arrival when
+                    # the pre-stop itself was a pure walking seed from the origin
+                    # (mode == WALKING and prev_stop is None). This avoids
+                    # selecting a final stop where the 'pre' was reached via a
+                    # journey and then converted into a walking arrival in the
+                    # same round, which can produce implausibly long final walks.
+                    try:
+                        if pre not in initial_stops:
+                            continue
+                    except Exception:
+                        continue
                     wal = walking.walking_time_between(
                         walking.get_loc_coords(pre), destination)
+                    # Reject implausibly large final walks (safeguard).
+                    # If the walk exceeds 1 hour, skip this candidate.
+                    if wal is None or wal > 3600:
+                        continue
                     total = reach_stops[pre][1] + wal
                     if total < best_total_arrival:
                         best_total_arrival = total
@@ -308,6 +323,18 @@ class RaptorRouter:
         ordered_switch_a = sorted(switch_a, key=lambda s: prev_arrival[s])
         for stop in ordered_switch_a:
             routes = net.stop_to_routes[stop]
+            # If this stop was seeded from the origin (initial_walk_stops)
+            # but has been improved by a journey in the current round,
+            # do not allow boarding here during round 0. This prevents
+            # a seeded stop that was later reached earlier by vehicle
+            # propagation from being used as a zero-transfer boarding
+            # point within the same round.
+            if (initial_walk_stops is not None
+                    and stop in initial_walk_stops
+                    and n_transfer == 0
+                    and (reach_stops[stop][2] != WALKING or reach_stops[stop][0] is not None)):
+                # skip processing this stop for boarding in round 0
+                continue
             for route in routes:
                 # On the very first round (n_transfer == 0), stops that
                 # were reached by walking from the origin get a relaxed
@@ -316,6 +343,8 @@ class RaptorRouter:
                     initial_walk_stops is not None
                     and stop in initial_walk_stops
                     and n_transfer == 0
+                    and reach_stops[stop][2] == WALKING
+                    and reach_stops[stop][0] is None
                 )
                 self.first_journey(
                     net, route, stop, reach_stops, switch_b,
@@ -328,45 +357,38 @@ class RaptorRouter:
         # considered from the soonest originating stop first.
         ordered_switch_b = sorted(list(switch_b), key=lambda s: reach_stops[s][1])
         for stop in ordered_switch_b:
-            if reach_stops[stop][2] == WALKING:
-                pre = reach_stops[stop][0]
-                if pre is None:
-                    continue
-                walk_stops = walking.inter_walk(stop)
-                for walk_stop, _ in walk_stops.items():
-                    wal_bet = walking.walking_time_between(walking.get_loc_coords(pre), walking.get_loc_coords(walk_stop))
-                    if wal_bet > 300:
-                        continue
-                    walk_arrival = reach_stops[pre][1] + wal_bet
-                    if reach_stops[walk_stop][1] > walk_arrival:
-                        reach_stops[walk_stop][1] = walk_arrival
-                        reach_stops[walk_stop][0] = pre
-                        reach_stops[walk_stop][2] = WALKING
-                        switch_b.add(walk_stop)
-                        # Debug: record walking transfer update
-                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
-                            if not hasattr(self, '_debug_events'):
-                                self._debug_events = []
-                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, pre))        
-            else:
-                walk_stops = walking.inter_walk(stop)
-                for walk_stop, secs in walk_stops.items():
-                    if secs > 300:
-                        continue
-                    walk_arrival = reach_stops[stop][1] + secs
-                    if reach_stops[walk_stop][1] > walk_arrival:
-                        reach_stops[walk_stop][1] = walk_arrival
-                        reach_stops[walk_stop][0] = stop
-                        reach_stops[walk_stop][2] = WALKING
-                        switch_b.add(walk_stop)
-                        # Debug: record walking transfer update
-                        if debug_stop_ids is not None and walk_stop in debug_stop_ids:
-                            if not hasattr(self, '_debug_events'):
-                                self._debug_events = []
-                            self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
+            # Propagate walking transfers from the improved stop itself. Using
+            # the predecessor as the origin produced back-and-forth walking
+            # legs in some cases; using 'stop' avoids that.
+            walk_stops = walking.inter_walk(stop)
+            for walk_stop, secs in walk_stops.items():
+                try:
+                    wsecs = walking.walking_time_between(
+                        walking.get_loc_coords(stop), walking.get_loc_coords(walk_stop))
+                    if wsecs is None:
+                        wsecs = secs
+                except Exception:
+                    wsecs = secs
+                walk_arrival = reach_stops[stop][1] + wsecs
+                if reach_stops[walk_stop][1] > walk_arrival:
+                    reach_stops[walk_stop][1] = walk_arrival
+                    reach_stops[walk_stop][0] = stop
+                    reach_stops[walk_stop][2] = WALKING
+                    # Clear any stale journey/day pointers when a walking
+                    # arrival overwrites a previous journey-based arrival.
+                    reach_stops[walk_stop][3] = None
+                    reach_stops[walk_stop][4] = None
+                    switch_b.add(walk_stop)
+                    if debug_stop_ids is not None and walk_stop in debug_stop_ids:
+                        if not hasattr(self, '_debug_events'):
+                            self._debug_events = []
+                        self._debug_events.append((walk_stop, 'walk_transfer', walk_arrival, stop))
 
         for stop, _ in final_list:
-            if reach_stops[stop][1] < math.inf:
+            # Only early-exit when the final stop was reached by transit
+            # (i.e. not a pure walking arrival). Mirror the greedy router's
+            # behavior to avoid exiting early on walk-only discoveries.
+            if reach_stops[stop][1] < math.inf and reach_stops[stop][2] != WALKING:
                 self.found = True
                 break
 

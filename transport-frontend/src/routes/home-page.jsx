@@ -496,8 +496,7 @@ export default function HomePage() {
     'E·DEP': 'Earliest Departure',
     'FASTEST': 'Smallest Total Time',
     'ECO': 'Prefer Walking',
-    'GREEDY': 'Least Transfers',
-    'COSY': 'No Transfer Within Same Mode',
+    'GREEDY': 'Fewest Transfers',
     'LAZY': 'Shorter Walks — Fewer Transfers',
   };
   // Colour map used for label chips — keep in sync with the chip rendering
@@ -507,7 +506,6 @@ export default function HomePage() {
     'FASTEST': '#87CEEB',
     'ECO': '#C6F6D5',
     'GREEDY': '#FF7F50',
-    'COSY': '#9DC183',
     'LAZY': '#FFF59D',
   };
 
@@ -878,6 +876,67 @@ export default function HomePage() {
             if (destinationPoint) segs._end = [destinationPoint[0], destinationPoint[1]];
           } catch (_e) {
             // ignore
+          }
+          // Ensure any walking legs that only carried embedded per-leg geometry
+          // are included when the backend returned a routeGeometries container
+          // that doesn't align with the leg slice. This is a conservative
+          // UX-fix: prefer visible walking segments rather than hiding them.
+          try {
+            if (Array.isArray(legs) && legs.length > 0) {
+              for (let li = 0; li < legs.length; li++) {
+                const leg = legs[li];
+                const rawMode = (leg?.mode && String(leg.mode).toLowerCase()) || '';
+                const isWalkLeg = rawMode === 'walking' || rawMode === 'walk';
+                if (!isWalkLeg) continue;
+
+                // Check whether we already have a matching segment for this leg.
+                const exists = segs.some((s) => {
+                  if (!s) return false;
+                  if (typeof s.id === 'string' && s.id === `walk-${li}`) return true;
+                  // Fallback: compare explicit endpoints if available
+                  try {
+                    const lf = leg?.from_stop?.coords;
+                    const lt = leg?.to_stop?.coords;
+                    const sf = s?._from;
+                    const st = s?._to;
+                    if (Array.isArray(lf) && Array.isArray(lt) && Array.isArray(sf) && Array.isArray(st)) {
+                      const eps = 1e-5;
+                      if (Math.abs(lf[0] - sf[0]) < eps && Math.abs(lf[1] - sf[1]) < eps && Math.abs(lt[0] - st[0]) < eps && Math.abs(lt[1] - st[1]) < eps) return true;
+                    }
+                  } catch (_e) {
+                    // ignore
+                  }
+                  return false;
+                });
+                if (exists) continue;
+
+                // If the leg carried embedded geometry, add it as a walking segment.
+                const embeddedCoords = leg?.geometry && Array.isArray(leg.geometry.coords) ? leg.geometry.coords : null;
+                if (embeddedCoords && embeddedCoords.length >= 2) {
+                  const norm = normalizeCoords(embeddedCoords);
+                  if (norm && norm.length >= 2) {
+                    segs.push({
+                      id: `walk-${li}`,
+                      name: leg.line_name || 'walking',
+                      coords: norm,
+                      color: '#888888',
+                      mode: 'walking',
+                      isWalk: true,
+                      _from: (leg.from_stop && Array.isArray(leg.from_stop.coords) && leg.from_stop.coords.length >= 2) ? [leg.from_stop.coords[0], leg.from_stop.coords[1]] : null,
+                      _to: (leg.to_stop && Array.isArray(leg.to_stop.coords) && leg.to_stop.coords.length >= 2) ? [leg.to_stop.coords[0], leg.to_stop.coords[1]] : null,
+                    });
+                  }
+                }
+              }
+              // Keep segments ordered by their numeric suffix where possible
+              segs.sort((a, b) => {
+                const ia = (a && typeof a.id === 'string' && a.id.split('-').length > 1) ? Number(a.id.split('-')[1]) : 0;
+                const ib = (b && typeof b.id === 'string' && b.id.split('-').length > 1) ? Number(b.id.split('-')[1]) : 0;
+                return ia - ib;
+              });
+            }
+          } catch (_e) {
+            // best-effort only
           }
           return segs;
         }
@@ -1313,7 +1372,6 @@ export default function HomePage() {
       const routerOrder = [
         { key: 'main', label: 'E·ARR' },
         { key: 'eco', label: 'Eco' },
-        { key: 'cosy', label: 'COSY' },
         { key: 'lazy', label: 'LAZY' },
         { key: 'greedy', label: 'Greedy' },
       ];
@@ -2213,7 +2271,7 @@ export default function HomePage() {
                     {(() => {
                       // enforce requested display order and colours
                       const rawLabels = Array.isArray(opt.labels) ? opt.labels : [opt.label];
-                      const ORDER = ['E·ARR', 'E·DEP', 'FASTEST', 'ECO', 'GREEDY', 'COSY', 'LAZY'];
+                      const ORDER = ['E·ARR', 'E·DEP', 'FASTEST', 'ECO', 'GREEDY', 'LAZY'];
                       const orderKey = (s) => String(s || '').toUpperCase();
                       const ORDER_UP = ORDER.map((o) => o.toUpperCase());
                       const colorMap = {
@@ -2222,8 +2280,6 @@ export default function HomePage() {
                         'FASTEST': '#87CEEB', // sky blue
                         'ECO': '#C6F6D5', // mint (soft)
                         'GREEDY': '#FF7F50', // coral
-                        // COSY: sage colour
-                        'COSY': '#9DC183', // sage
                         'LAZY': '#FFF59D', // lemon (Shorter Walks)
                       };
 

@@ -28,13 +28,15 @@ from main import initialize_base, build_for_date, print_route
 from time_utils import seconds_since_midnight, seconds_to_time
 
 # Example inputs from your report
-DATE_STR = '2026-03-03'
-TIME_STR = '07:25:00'
-START_POINT = (54.01033, -2.78359)
-DEST_POINT = (54.05156, -2.79937)
+DATE_STR = '2026-03-19'
+TIME_STR = '23:07:00'
+# Use InfoLab coords as the origin (InfoLab21 found in merged.stop_metadata)
+START_POINT = (54.005833, -2.78551)
+# Destination will be matched by substring 'heysham' (we'll print matched stops)
+DEST_POINT = (53.48436, -2.96187)  # placeholder; router will use debug_stop_ids found via STOP_NAME_QUERY
 MAX_TRANSFERS = 3
 MODE = 'both'  # or 'bus', 'train'
-STOP_NAME_QUERY = 'Underpass'  # case-insensitive substring to match
+STOP_NAME_QUERY = 'heysham'  # case-insensitive substring to match
 
 
 def find_stop_ids(merged, query):

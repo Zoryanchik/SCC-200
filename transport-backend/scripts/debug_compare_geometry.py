@@ -57,7 +57,7 @@ def main() -> int:
     ap.add_argument("--mode", default="both", choices=["both", "bus", "train"], help="router mode")
     ap.add_argument("--max-transfers", type=int, default=2)
     ap.add_argument("--only-bus", action="store_true", help="print only bus legs + their geometry")
-    ap.add_argument("--router", default="main", help="which compare router result to inspect (main/eco/cosy/lazy/greedy)")
+    ap.add_argument("--router", default="main", help="which compare router result to inspect (main/eco/lazy/greedy)")
     args = ap.parse_args()
 
     if os.environ.get("ROUTE_GEOM_TRACE") != "1":

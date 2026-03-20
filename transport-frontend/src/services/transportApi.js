@@ -359,8 +359,8 @@ export const getJourneyPlans = async (fromStop, toStop, departureTime, options =
 };
 
 /**
- * Compare multiple router implementations (main, eco, cosy, lazy, greedy)
- * Returns an object with keys 'main','eco','cosy','lazy','greedy' each containing
+ * Compare multiple router implementations (main, eco, lazy, greedy)
+ * Returns an object with keys 'main','eco','lazy','greedy' each containing
  * the same journey-plan response shape as /journey/plan.
  */
 export const compareRouters = async (fromStop, toStop, departureTime, options = {}) => {
@@ -386,8 +386,8 @@ export const compareRouters = async (fromStop, toStop, departureTime, options = 
     );
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     const responseJson = await response.json();
-    // The /journey/compare endpoint returns nested journey-plan objects
-    // under keys like main, eco, cosy, lazy, greedy. Ensure each returned
+  // The /journey/compare endpoint returns nested journey-plan objects
+  // under keys like main, eco, lazy, greedy. Ensure each returned
     // plan is augmented with the same user-friendly fields that
     // getJourneyPlans() provides (arrival_time_with_offset, departure_time_with_offset,
     // iso datetimes) so the UI can display day-shifts consistently.
@@ -406,7 +406,6 @@ export const compareRouters = async (fromStop, toStop, departureTime, options = 
       };
       maybeAugment(responseJson.main);
       maybeAugment(responseJson.eco);
-      maybeAugment(responseJson.cosy);
       maybeAugment(responseJson.lazy);
       maybeAugment(responseJson.greedy);
     } catch (e) {
