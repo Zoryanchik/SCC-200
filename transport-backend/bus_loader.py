@@ -285,6 +285,10 @@ class BusLoader:
                 PRIMARY KEY (route_id, section_id, seq)
             );
             CREATE INDEX IF NOT EXISTS idx_section_tracks_route ON bus_route_section_tracks(route_id);
+            -- Supports JOIN _valid_routes + ORDER BY used during day-load geometry build.
+            -- This reduces external sorts and helps avoid scanning/sorting more than necessary.
+            CREATE INDEX IF NOT EXISTS idx_section_tracks_route_order
+                ON bus_route_section_tracks(route_id, section_id, from_atco, to_atco, seq);
             -- Logged journey records (JSONB) captured during routing
             CREATE TABLE IF NOT EXISTS bus_journeys (
                 id          TEXT PRIMARY KEY,
@@ -1474,15 +1478,26 @@ class BusLoader:
         query_date = _date.fromisoformat(date_str)
         dow_bit = 1 << query_date.weekday()       # Mon=0 → bit 1, Sun=6 → bit 64
 
-        timing_enabled = str(_os.environ.get('BUS_DAY_LOAD_TIMING') or '').lower() in ('1', 'true', 'yes')
+        # Timing flag: prefer the global day-load timing knob used by build_for_date,
+        # but keep BUS_DAY_LOAD_TIMING for backwards compatibility.
+        timing_enabled = (
+            str(_os.environ.get('DAY_LOAD_TIMING') or '').lower() in ('1', 'true', 'yes')
+            or str(_os.environ.get('BUS_DAY_LOAD_TIMING') or '').lower() in ('1', 'true', 'yes')
+        )
         _t0_total = _time.perf_counter() if timing_enabled else None
 
         def _log(phase: str, t0: float | None):
             if timing_enabled and t0 is not None:
                 print(f"[bus_dayload] {date_str} {phase}: {_time.perf_counter() - t0:.3f}s")
 
+        def _log_total(label: str):
+            if timing_enabled and _t0_total is not None:
+                print(f"[bus_dayload] {date_str} {label}: {_time.perf_counter() - _t0_total:.3f}s")
+
         conn = self._connect(self.db_path)
         cur = conn.cursor()
+
+        _log_total('connected')
 
         # ── Memoized static-ish reference tables ─────────────────────────
         # These tables are large and (for typical deployments) change only
@@ -1507,7 +1522,7 @@ class BusLoader:
                 service_ranges.setdefault(svc, []).append((_date.fromisoformat(sd), _date.fromisoformat(ed)))
             cache['service_ranges'] = service_ranges
         _log('phase_service_ranges', _t_ranges)
-    # timing log removed
+
 
         # 1b. Load service operating periods (coarse outer boundary)
         _t_periods = _time.perf_counter() if timing_enabled else None
@@ -1596,9 +1611,10 @@ class BusLoader:
 
         _log('phase_operating_profile_filter_py', _t_op_filter)
 
+        _log_total('after_operating_profile')
 
         conn.close()
-    # timing log removed
+
 
         if not valid_journeys:
             # Return an empty BusData
@@ -1609,6 +1625,8 @@ class BusLoader:
         conn = self._connect(self.db_path)
         cur = conn.cursor()
 
+        _log_total('reconnected_for_build')
+
         # Use temp table for valid journey IDs - much faster than IN(...) with thousands of values
         _t_temp_j = _time.perf_counter() if timing_enabled else None
         cur.execute("CREATE TEMP TABLE _valid_journeys (journey_id TEXT PRIMARY KEY) ON COMMIT DROP")
@@ -1616,7 +1634,7 @@ class BusLoader:
             for jid in valid_journeys:
                 copy.write_row((jid,))
         _log('phase_temp_valid_journeys_copy', _t_temp_j)
-    # timing log removed
+
 
         # Figure out which routes are still needed
         _t_valid_routes = _time.perf_counter() if timing_enabled else None
@@ -1626,7 +1644,7 @@ class BusLoader:
         )
         valid_routes = {r[0] for r in cur.fetchall()}
         _log('phase_valid_routes_distinct', _t_valid_routes)
-    # timing log removed
+
 
         # Create temp table for valid routes too
         _t_temp_r = _time.perf_counter() if timing_enabled else None
@@ -1635,14 +1653,14 @@ class BusLoader:
             for rid in valid_routes:
                 copy.write_row((rid,))
         _log('phase_temp_valid_routes_copy', _t_temp_r)
-    # timing log removed
+
 
         # Count for sizing
         num_routes = len(valid_routes)
         num_journeys = len(valid_journeys)
         cur.execute("SELECT COUNT(DISTINCT atco_code) FROM bus_route_stops")
         num_stops = cur.fetchone()[0] or 0
-    # timing log removed
+
 
         bd = BusData(num_routes=num_routes, num_journeys=num_journeys, num_stops=num_stops)
 
@@ -1824,17 +1842,49 @@ class BusLoader:
 
         _t_tracks = _time.perf_counter() if timing_enabled else None
         try:
+            assert_seq = str(_os.environ.get('BUS_TRACKS_ASSERT_SEQ') or '').lower() in ('1', 'true', 'yes')
+
             cur.execute(
                 "SELECT st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
                 "FROM bus_route_section_tracks st "
                 "JOIN _valid_routes vr ON st.route_id = vr.route_id "
                 "ORDER BY st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq"
             )
-            rows = cur.fetchall()
-            for route_id, section_id, from_atco, to_atco, _seq, lat, lon in rows:
-                pt = (lat, lon)
-                # Maintain a stop-to-stop fragment index (required).
-                if build_link_fragments and from_atco and to_atco:
+
+            # Stream rows directly from the cursor (avoid a huge fetchall()) and build
+            # each stop-to-stop fragment as a local list, committing once per group.
+            last_key = None  # (route_id, from_atco, to_atco)
+            last_pts = None  # list[(lat,lon)]
+            last_rint = None
+            last_fs = None
+            last_ts = None
+            last_seq = None
+
+            def _flush_fragment():
+                nonlocal last_key, last_pts, last_rint, last_fs, last_ts, last_seq
+                if last_key is None or not last_pts:
+                    return
+                try:
+                    frag_map = bd.route_link_tracks[last_rint]
+                    frag_map[(last_fs, last_ts)] = last_pts
+                except Exception:
+                    pass
+                last_seq = None
+
+            for route_id, _section_id, from_atco, to_atco, _seq, lat, lon in cur:
+                if not (build_link_fragments and from_atco and to_atco):
+                    continue
+
+                key = (route_id, from_atco, to_atco)
+                if key != last_key:
+                    _flush_fragment()
+                    last_key = key
+                    last_pts = []
+                    last_rint = None
+                    last_fs = None
+                    last_ts = None
+                    last_seq = None
+
                     try:
                         r_int = bd.map_routes.code_to_int.get(route_id)
                         if r_int is None:
@@ -1844,12 +1894,24 @@ class BusLoader:
                         ts = bd.map_stops.get_int(to_atco)
                         bd._ensure_stop_capacity(fs)
                         bd._ensure_stop_capacity(ts)
-                        frag = bd.route_link_tracks[r_int].setdefault((fs, ts), [])
-                        if not frag or pt != frag[-1]:
-                            frag.append(pt)
+                        last_rint, last_fs, last_ts = r_int, fs, ts
                     except Exception:
-                        # Best-effort: missing stop mappings shouldn't break load.
-                        pass
+                        last_key = None
+                        last_pts = None
+                        continue
+
+                pt = (lat, lon)
+                if last_pts and pt == last_pts[-1]:
+                    continue
+
+                if assert_seq and last_seq is not None and _seq < last_seq:
+                    raise ValueError(
+                        f"tracks seq decreased for {route_id} {from_atco}->{to_atco}: {_seq} < {last_seq}"
+                    )
+                last_seq = _seq
+                last_pts.append(pt)
+
+            _flush_fragment()
         except Exception:
             # As per policy A, this is allowed (DB used for ingest/load),
             # but if it fails we still want routing to work (without tracks).
@@ -1859,8 +1921,10 @@ class BusLoader:
 
         _log('phase_geometry', _t_tracks)
 
+        _log_total('done')
+
         conn.commit()  # commit to drop temp tables
-    # timing log removed
+
         conn.close()
         _log('phase_total', _t0_total)
         return bd

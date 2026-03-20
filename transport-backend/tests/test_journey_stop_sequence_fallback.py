@@ -33,6 +33,9 @@ def test_build_journey_plan_response_bus_no_fragments_uses_stop_sequence(monkeyp
         def get_all_stop_coords(self):
             return stops
 
+    # Ensure the test is isolated from any global cache state created by
+    # other tests (this suite shares the `api` module across tests).
+    prev_base_cache = getattr(api, "_base_cache", None)
     api._base_cache = {"atco_loader": _AtcoStub()}
 
     class _Merged:
@@ -75,13 +78,16 @@ def test_build_journey_plan_response_bus_no_fragments_uses_stop_sequence(monkeyp
         0: {"prev_stop": None, "arrival_time": 800, "mode": "walking"},
     }
 
-    out = api.build_journey_plan_response(
-        route_result,
-        merged,
-        stop_coords={},
-        request_start_seconds=700,
-        include_geometry=True,
-    )
+    try:
+        out = api.build_journey_plan_response(
+            route_result,
+            merged,
+            stop_coords={},
+            request_start_seconds=700,
+            include_geometry=True,
+        )
+    finally:
+        api._base_cache = prev_base_cache
 
     bus_legs = [l for l in (out.get("legs") or []) if isinstance(l, dict) and l.get("mode") == "bus"]
     assert bus_legs, "expected at least one bus leg"
@@ -89,6 +95,10 @@ def test_build_journey_plan_response_bus_no_fragments_uses_stop_sequence(monkeyp
     # not include the extra route stop D.
     for bl in bus_legs:
         geom = bl.get("geometry") or {}
+        if geom.get("source") != "stops":
+            # Helpful debugging when this test fails only under full-suite runs.
+            # Pytest will capture this output and show it in the failure.
+            print("unexpected_geometry=", geom)
         assert geom.get("source") == "stops"
         coords = geom.get("coords") or []
         assert len(coords) >= 2

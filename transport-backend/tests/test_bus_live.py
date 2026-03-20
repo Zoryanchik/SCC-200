@@ -81,7 +81,12 @@ class TestBusLiveOperatorEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
-        assert data[0] == {
+        # Response may include additional fields (e.g. merged_key) that clients can use
+        # to resolve route_int against the correct merged build.
+        assert {k: data[0].get(k) for k in [
+            "line", "destination", "lat", "lon", "operator",
+            "delay_minutes", "status", "bearing",
+        ]} == {
             "line": "10",
             "destination": "City Centre",
             "lat": 53.48,

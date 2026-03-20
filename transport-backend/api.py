@@ -1090,6 +1090,118 @@ def route_geometry(route_id: str):
 # accidental fallback to database lookups.
 
 
+@app.get("/debug/leg-geometry-stitch")
+def debug_leg_geometry_stitch(
+    merged_key: str,
+    route_int: int,
+    from_stop_id: str,
+    to_stop_id: str,
+):
+    """Debug helper: explain why route_link_tracks stitching succeeded/failed.
+
+    Enable with ROUTE_GEOM_DIAG=1.
+
+    Returns mapping info (ATCO->stop_int), route stop indices, and which
+    fragment keys are missing along the stop-chain between from/to.
+    """
+    from fastapi import HTTPException
+
+    if str(os.environ.get('ROUTE_GEOM_DIAG') or '').lower() not in ('1', 'true', 'yes'):
+        raise HTTPException(status_code=404, detail='Not Found')
+
+    try:
+        merged, _router, _walking = _get_router_for_merged_key(merged_key, apply_delay=False)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f'bad_merged_key: {exc}')
+
+    try:
+        ri = int(route_int)
+    except Exception:
+        raise HTTPException(status_code=400, detail='invalid_route_int')
+
+    # Bounds check
+    try:
+        meta_len = len(getattr(merged, 'route_metadata', None) or [])
+    except Exception:
+        meta_len = None
+    if meta_len is not None and (ri < 0 or ri >= meta_len):
+        return {
+            'ok': False,
+            'error': 'route_int_out_of_range',
+            'route_int': ri,
+            'merged_key': merged_key,
+            'merged_route_count': meta_len,
+        }
+
+    # Get fragment map
+    try:
+        link_map = merged.get_route_link_tracks(ri) if hasattr(merged, 'get_route_link_tracks') else (getattr(merged, 'route_link_tracks', None) or [None])[ri]
+    except Exception:
+        link_map = None
+
+    # Route stops and ATCO mapping
+    try:
+        route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+    except Exception:
+        route_stops = []
+
+    atco_to_stop: dict[str, int] = {}
+    try:
+        for s in route_stops or []:
+            try:
+                c = merged.get_atco_code(s)
+            except Exception:
+                c = None
+            if c:
+                atco_to_stop.setdefault(str(c).strip(), s)
+    except Exception:
+        atco_to_stop = {}
+
+    fs = atco_to_stop.get(str(from_stop_id).strip())
+    ts = atco_to_stop.get(str(to_stop_id).strip())
+
+    missing_keys: list[list[int]] = []
+    checked_keys: list[list[int]] = []
+    direction = None
+    try:
+        if fs is not None and ts is not None and fs in route_stops and ts in route_stops and fs != ts and isinstance(link_map, dict):
+            i = route_stops.index(fs)
+            j = route_stops.index(ts)
+            step = 1 if j > i else -1
+            direction = 'forward' if step == 1 else 'reverse'
+            k = i
+            while k != j:
+                a = route_stops[k]
+                b = route_stops[k + step]
+                checked_keys.append([int(a), int(b)])
+                seg = link_map.get((a, b))
+                if not seg:
+                    seg = link_map.get((b, a))
+                if not seg:
+                    missing_keys.append([int(a), int(b)])
+                k += step
+    except Exception:
+        pass
+
+    return {
+        'ok': True,
+        'merged_key': merged_key,
+        'route_int': ri,
+        'link_map_is_dict': isinstance(link_map, dict),
+        'link_map_len': (len(link_map) if isinstance(link_map, dict) else None),
+        'route_stops_len': (len(route_stops) if isinstance(route_stops, list) else None),
+        'from_stop_id': str(from_stop_id).strip(),
+        'to_stop_id': str(to_stop_id).strip(),
+        'from_stop_mapped': fs is not None,
+        'to_stop_mapped': ts is not None,
+        'from_stop_int': fs,
+        'to_stop_int': ts,
+        'direction': direction,
+        'checked_pairs': checked_keys[:200],
+        'missing_pairs': missing_keys[:200],
+    }
+
+
 @app.get("/debug/match_explain")
 async def debug_match_explain(
     line: str,
@@ -1660,6 +1772,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                        route_id: str | None = None,
                        route_int: int | str | None = None,
                        merged_key: str | None = None,
+                       merged: Any | None = None,
                        from_stop_id: str | None = None,
                        to_stop_id: str | None = None,
                        stop_ids: str | None = None,
@@ -1686,6 +1799,48 @@ def route_leg_geometry(from_lat: float, from_lon: float,
 
         Response: {"coords": [[lat, lon], ...], "source": "route_link_tracks"|"stops"|"osrm"|"linear"} or {"error": "..."}
     """
+    # If we're called internally with an explicit merged instance (e.g.
+    # build_journey_plan_response), derive merged_key if it wasn't passed.
+    # This keeps diagnostics self-contained and lets us detect merged mismatches.
+    try:
+        if merged_key is None and merged is not None:
+            mk_date = None
+            mk_bucket = None
+            try:
+                mk_date = getattr(getattr(merged, 'meta', None), 'date', None)
+            except Exception:
+                mk_date = None
+            try:
+                mk_bucket = getattr(merged, 'bucket', None)
+            except Exception:
+                mk_bucket = None
+
+            # Fall back to request params if merged doesn't carry date/bucket.
+            if not mk_date:
+                mk_date = (date or '').strip() or None
+            if not mk_bucket:
+                # Try to infer AM/PM from departure_time when present.
+                try:
+                    if departure_time and isinstance(departure_time, str) and ':' in departure_time:
+                        hh = int(departure_time.split(':', 1)[0])
+                        mk_bucket = 'AM' if hh < 12 else 'PM'
+                except Exception:
+                    mk_bucket = None
+
+            if mk_date and mk_bucket in ('AM', 'PM'):
+                merged_key = f"{mk_date}|{mk_bucket}"
+    except Exception:
+        pass
+
+    diag: dict[str, Any] = {
+        'mode': (mode or '').strip().lower(),
+        'route_id': route_id,
+        'route_int_in': route_int,
+        'merged_key': merged_key,
+        'from_stop_id': from_stop_id,
+        'to_stop_id': to_stop_id,
+        'stop_ids_provided': bool(stop_ids),
+    }
     # Prefer stored timetable tracks when we have enough context.
     #
     # IMPORTANT: route_int is only meaningful within a specific MergedData.
@@ -1723,7 +1878,9 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             # pass `merged_key` from /bus/live so we use the same build.
             merged_today = None
             try:
-                if merged_key:
+                if merged is not None:
+                    merged_today = merged
+                elif merged_key:
                     merged_today, _router_today, _walking_today = _get_router_for_merged_key(merged_key, apply_delay=False)
                 else:
                     today_str = datetime.now().date().isoformat()
@@ -1734,17 +1891,31 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                     )
             except Exception:
                 merged_today = None
+            diag['merged_resolved'] = bool(merged_today is not None)
+            try:
+                diag['merged_meta_date'] = getattr(getattr(merged_today, 'meta', None), 'date', None) if merged_today is not None else None
+            except Exception:
+                diag['merged_meta_date'] = None
+            try:
+                diag['merged_bucket'] = getattr(merged_today, 'bucket', None) if merged_today is not None else None
+            except Exception:
+                diag['merged_bucket'] = None
 
             # Optional stop-sequence fallback (ATCO codes) supplied by callers.
             # This is ONLY used when fragment stitching is unavailable.
             stop_fallback_coords = []
             try:
-                raw = (stop_ids or '').strip()
-                if raw:
-                    parts = [p.strip() for p in raw.split(',') if p.strip()]
+                parts: list[str]
+                if isinstance(stop_ids, (list, tuple)):
+                    parts = [str(p).strip() for p in stop_ids if str(p).strip()]
                 else:
-                    parts = []
+                    raw = (stop_ids or '').strip()
+                    if raw:
+                        parts = [p.strip() for p in raw.split(',') if p.strip()]
+                    else:
+                        parts = []
                 if len(parts) >= 2:
+                    diag['stop_ids_count'] = len(parts)
                     atco_coords_dict = {}
                     try:
                         if globals().get('_base_cache') and _base_cache.get('atco_loader'):
@@ -1764,6 +1935,10 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                         stop_fallback_coords = []
             except Exception:
                 stop_fallback_coords = []
+            try:
+                diag['stop_fallback_coords_len'] = len(stop_fallback_coords) if isinstance(stop_fallback_coords, list) else None
+            except Exception:
+                pass
             # Prefer dense route_int lookup when provided.
             if route_int is not None:
                 try:
@@ -1785,13 +1960,33 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                     if merged is not None:
                         ri = int(route_int)
 
+                        diag['route_int'] = ri
+                        try:
+                            diag['merged_route_count'] = len(getattr(merged, 'route_metadata', None) or [])
+                        except Exception:
+                            diag['merged_route_count'] = None
+
+                        # Include the route_int -> (route_id/line_name) metadata for mismatch debugging.
+                        try:
+                            md = getattr(merged, 'route_metadata', None) or []
+                            if 0 <= ri < len(md):
+                                m0 = md[ri] or {}
+                                if isinstance(m0, dict):
+                                    diag['route_int_meta_route_id'] = m0.get('route_id')
+                                    diag['route_int_meta_line_name'] = m0.get('line_name')
+                        except Exception:
+                            pass
+
                         # If route_int doesn't fit this merged, treat it as a
                         # mismatch (do NOT degrade to linear for bus geometry).
                         try:
                             meta_len = len(getattr(merged, 'route_metadata', None) or [])
                         except Exception:
                             meta_len = None
-                        if meta_len is not None and (ri < 0 or ri >= meta_len):
+                        # If a caller provided an explicit merged instance (e.g. unit tests
+                        # or internal callers), it may not carry full route_metadata.
+                        # In that case, allow stop-sequence fallback to proceed.
+                        if merged is None and meta_len is not None and (ri < 0 or ri >= meta_len):
                             return {
                                 "error": "route_int_out_of_range",
                                 "diag": {
@@ -1850,6 +2045,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                         pass
 
                                 if link_map is not None:
+                                    diag['link_map_is_none'] = False
                                     fs = None
                                     ts = None
                                     route_stops = []
@@ -1857,6 +2053,10 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                         route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
                                     except Exception:
                                         route_stops = []
+                                    try:
+                                        diag['route_stops_len'] = len(route_stops) if isinstance(route_stops, list) else None
+                                    except Exception:
+                                        pass
                                     try:
                                         if route_stops and (from_stop_id or to_stop_id):
                                             atco_to_stop = {}
@@ -1866,14 +2066,17 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                                 except Exception:
                                                     c = None
                                                 if c:
-                                                    atco_to_stop.setdefault(c, s)
+                                                    atco_to_stop.setdefault(str(c).strip(), s)
                                             if from_stop_id:
-                                                fs = atco_to_stop.get(from_stop_id)
+                                                fs = atco_to_stop.get(str(from_stop_id).strip())
                                             if to_stop_id:
-                                                ts = atco_to_stop.get(to_stop_id)
+                                                ts = atco_to_stop.get(str(to_stop_id).strip())
                                     except Exception:
                                         fs = None
                                         ts = None
+
+                                    diag['from_stop_mapped'] = bool(fs is not None)
+                                    diag['to_stop_mapped'] = bool(ts is not None)
 
                                     if fs is not None and ts is not None:
                                         # route_stops already resolved above.
@@ -1921,7 +2124,12 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                                     'route_int': ri,
                                                     'len': len(frag_seg),
                                                 })
-                                            return {"coords": frag_seg, "source": "route_link_tracks"}
+                                            diag['ok'] = True
+                                            diag['stitch_kind'] = 'route_link_tracks'
+                                            diag['coords_len'] = len(frag_seg)
+                                            return {"coords": frag_seg, "source": "route_link_tracks", "diag": diag}
+                                else:
+                                    diag['link_map_is_none'] = True
                             except Exception:
                                 frag_seg = []
 
@@ -1955,19 +2163,28 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
                                                      profile='foot')
             if coords and len(coords) >= 2:
-                return {"coords": coords, "source": "osrm"}
+                diag['ok'] = True
+                diag['stitch_kind'] = 'osrm'
+                diag['coords_len'] = len(coords)
+                return {"coords": coords, "source": "osrm", "diag": diag}
         except Exception:
             pass
 
     try:
         # Only use the provided stop sequence if it looks valid.
         if 'stop_fallback_coords' in locals() and isinstance(stop_fallback_coords, list) and len(stop_fallback_coords) >= 2:
-            return {"coords": stop_fallback_coords, "source": "stops"}
+            diag['ok'] = True
+            diag['stitch_kind'] = 'stops_fallback'
+            diag['coords_len'] = len(stop_fallback_coords)
+            return {"coords": stop_fallback_coords, "source": "stops", "diag": diag}
     except Exception:
         pass
 
+    diag['ok'] = True
+    diag['stitch_kind'] = 'linear_fallback'
+    diag['coords_len'] = 2
     return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
-            "source": "linear"}
+            "source": "linear", "diag": diag}
 
 
 def _fetch_legacy_route_polyline(route_id: str, *, date_str: str | None = None, bucket: str | None = None):
@@ -8169,35 +8386,6 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
 
         legs.append(leg)
 
-        # Geometry context: persist the exact date/bucket + dense identifiers
-        # while we're still operating inside the correct day's merged data.
-        # This avoids any future need to "re-guess" which merged dataset to
-        # use when attaching geometry.
-        try:
-            if transport != "walking":
-                leg.setdefault("geom_context", {})
-                if isinstance(leg.get("geom_context"), dict):
-                    leg["geom_context"].update({
-                        "date": _date_str,
-                        "bucket": _bucket,
-                        "route_int": route_int,
-                        "from_stop_int": prev_int,
-                        "to_stop_int": curr_int,
-                    })
-
-                if os.environ.get('ROUTE_GEOM_TRACE') == '1':
-                    try:
-                        print('[journey_geom] leg_geom_context', {
-                            'leg_idx': leg_idx,
-                            'transport': transport,
-                            'route_int': route_int,
-                            'ctx': leg.get('geom_context') if isinstance(leg, dict) else None,
-                        })
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
         # -- geometry for this leg --
         color = _COLOR.get(transport, "#666666")
         if transport == "walking":
@@ -8228,6 +8416,37 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 except Exception:
                     route_int = None
             except Exception as exc:
+                pass
+
+            # Geometry context: persist the exact merged identity + dense identifiers
+            # (after we've resolved route_int) so debugging and downstream geometry
+            # selection are self-consistent.
+            try:
+                leg.setdefault("geom_context", {})
+                if isinstance(leg.get("geom_context"), dict):
+                    _ctx_bucket = getattr(merged, 'bucket', None) or _bucket
+                    if _ctx_bucket not in ('AM', 'PM'):
+                        _ctx_bucket = _bucket
+                    leg["geom_context"].update({
+                        "date": _date_str,
+                        "bucket": _ctx_bucket,
+                        "merged_key": (f"{_date_str}|{_ctx_bucket}" if _date_str and _ctx_bucket else None),
+                        "route_int": route_int,
+                        "from_stop_int": prev_int,
+                        "to_stop_int": curr_int,
+                    })
+
+                if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+                    try:
+                        print('[journey_geom] leg_geom_context', {
+                            'leg_idx': leg_idx,
+                            'transport': transport,
+                            'route_int': route_int,
+                            'ctx': leg.get('geom_context') if isinstance(leg, dict) else None,
+                        })
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
             if (not route_id) and transport == 'bus':
@@ -8573,7 +8792,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     # stop sequence, pass it through so /route/leg-geometry can
                     # fall back to stop-derived geometry (all intermediate stops)
                     # instead of a misleading 2-point linear segment.
-                    stop_seq_atcos = None
+                    stop_seq_atcos: str | None = None
                     try:
                         if transport != "walking" and route_int is not None:
                             # Slice only the stop sub-sequence between the leg
@@ -8612,6 +8831,12 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                         mode=mode_hint,
                         route_id=route_id,
                         route_int=route_int,
+                        merged_key=(
+                            f"{_date_str}|{(getattr(merged, 'bucket', None) or _bucket)}"
+                            if _date_str and (getattr(merged, 'bucket', None) or _bucket) in ('AM', 'PM')
+                            else None
+                        ),
+                        merged=merged,
                         from_stop_id=prev_atco if 'prev_atco' in locals() else None,
                         to_stop_id=curr_atco if 'curr_atco' in locals() else None,
                         stop_ids=stop_seq_atcos,
@@ -8619,6 +8844,13 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
                         coords = lg.get("coords")
                         geom_source = lg.get("source")
+                        try:
+                            if isinstance(lg.get('diag'), dict):
+                                # Stash on the leg; we'll copy it into the final
+                                # leg['geometry'] payload when we embed geometry.
+                                leg['_geometry_diag'] = lg.get('diag')
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -8653,6 +8885,17 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     "coords": coords,
                     "source": geom_source or "linear",
                 }
+                try:
+                    if isinstance(leg.get('_geometry_diag'), dict):
+                        leg['geometry']['diag'] = leg.get('_geometry_diag')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Cleanup internal-only fields.
+        try:
+            leg.pop('_geometry_diag', None)
         except Exception:
             pass
 

@@ -26,8 +26,8 @@ from modes import WALKING, BUS, TRAIN, int_to_name, all_transit_modes, name_to_i
 # allowing boarding of a vehicle.  These replace the previous global
 # MIN_TRANSFER_SECONDS / INITIAL_BOARDING_TOLERANCE constants and are
 # chosen per-mode to reflect realistic boarding requirements.
-BUS_BOARD_BUFFER = 60    # 1 minute for buses
-TRAIN_BOARD_BUFFER = 180 # 3 minutes for trains
+BUS_BOARD_BUFFER = 180    # 3 minute for buses
+TRAIN_BOARD_BUFFER = 540 # 9 minutes for trains
 
 
 class RaptorRouter:
