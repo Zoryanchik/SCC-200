@@ -111,6 +111,7 @@ class TestBusLiveOperatorEndpoint:
             urls=["https://transport.scc.lancs.ac.uk/bus/live/ARCT"],
             lat_tol=0.0003,
             lon_tol=0.0003,
+            keep_vehicle_id=None,
         )
 
     def test_all_operator_uses_default_urls(self, client: TestClient):
@@ -127,6 +128,7 @@ class TestBusLiveOperatorEndpoint:
             urls=None,
             lat_tol=0.0003,
             lon_tol=0.0003,
+            keep_vehicle_id=None,
         )
 
     def test_passes_tolerances(self, client: TestClient):
@@ -143,6 +145,7 @@ class TestBusLiveOperatorEndpoint:
             urls=["https://transport.scc.lancs.ac.uk/bus/live/SCCU"],
             lat_tol=0.01,
             lon_tol=0.02,
+            keep_vehicle_id=None,
         )
 
     def test_empty_results_return_empty_list(self, client: TestClient):

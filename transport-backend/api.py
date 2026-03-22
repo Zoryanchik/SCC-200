@@ -5352,6 +5352,13 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     best_jid = None
     best_start_dep = None
 
+    # If we have a feed origin departure time (OriginAimedDepartureTime),
+    # and any candidate matches it *exactly* at the journey's origin stop,
+    # that is a very strong identifier. Prefer it deterministically over
+    # abs(delay) scoring.
+    od_exact_match_jid = None
+    od_exact_match_route_int = None
+
     _track_cache = {}
 
     # Spatial gating threshold (metres): if a vehicle is further than this
@@ -5373,10 +5380,13 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         MATCH_ALLOW_AFTER_S = int(os.environ.get('MATCH_ALLOW_AFTER_S', '900'))
     except Exception:
         MATCH_ALLOW_AFTER_S = 900
+    # Destination proximity ignore threshold (metres). If a vehicle is within
+    # this distance of the scheduled destination stop, treat it as effectively
+    # at-terminus and skip matching it to an in-service journey.
     try:
-        MATCH_DEST_IGNORE_M = int(os.environ.get('MATCH_DEST_IGNORE_M', '30'))
+        MATCH_DEST_IGNORE_M = int(os.environ.get('MATCH_DEST_IGNORE_M', '60'))
     except Exception:
-        MATCH_DEST_IGNORE_M = 30
+        MATCH_DEST_IGNORE_M = 60
 
     for j_id, start_dep, end_arr, r_int in candidates:
         # Ensure we use the correct journey_times for this candidate.
@@ -5468,6 +5478,39 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # candidates solely because they appear near the route start and
         # the nearest stop differs. This makes the matcher permissive for
         # vehicles that may have slightly shifted GPS positions at origin.
+
+        # ── exact origin departure match (highest priority) ──
+        # If the feed provided an origin departure time and our staging pass
+        # found an origin stop time for this journey, then an exact equality
+        # should short-circuit matching.
+        try:
+            if od_exact_match_jid is None and od_adj is not None:
+                f = staged_flags.get(j_id) or {}
+                # Only trust this when the origin stop was actually identified.
+                if f.get('origin_atco'):
+                    try:
+                        # Compute the scheduled time at the origin stop (arrival
+                        # preferred; fallback to departure), mirroring staging.
+                        origin_stop_time = None
+                        if feed_origin_atco_n:
+                            for stop_int, arr_t, dep_t in jt:
+                                s_atco = merged.get_atco_code(stop_int)
+                                if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                                    origin_stop_time = arr_t if arr_t is not None else dep_t
+                                    break
+                        if origin_stop_time is not None and int(origin_stop_time) == int(od_adj):
+                            od_exact_match_jid = j_id
+                            od_exact_match_route_int = r_int
+                            if return_debug:
+                                try:
+                                    _dbg['origin_dep_exact_match_jid'] = int(j_id)
+                                    _dbg['origin_dep_exact_match_route_int'] = int(r_int)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # ── temporal gates ──
         journey_dur = max(end_arr - start_dep, 1)
@@ -5734,6 +5777,151 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             best_jid = j_id
             best_start_dep = start_dep
 
+    # If we found an exact origin departure match, return it immediately.
+    # We still need a delay; derive it from the matched journey's schedule
+    # using the same interpolation logic via a small, single-candidate rerun
+    # of the scoring loop.
+    if od_exact_match_jid is not None:
+        # Fast-path: if we already computed it as best_jid, just return.
+        if best_jid == od_exact_match_jid:
+            if best_delay is not None and best_delay < 0:
+                best_delay = 0
+            if return_jid:
+                return _log_gate_summary((best_delay, int(od_exact_match_route_int or -1)))
+            return _log_gate_summary(best_delay)
+
+        # Otherwise, recompute delay for just the matched journey.
+        try:
+            only = [(c[0], c[1], c[2], c[3]) for c in candidates if c[0] == od_exact_match_jid]
+        except Exception:
+            only = []
+        if only:
+            # Reset best_* and reuse the same per-candidate logic by running
+            # the loop body over a 1-item list. This keeps behaviour aligned.
+            best_delay = None
+            best_score = None
+            best_jid = None
+            best_start_dep = None
+            for j_id, start_dep, end_arr, r_int in only:
+                try:
+                    jt = merged.journey_times[j_id]
+                    if not jt:
+                        continue
+                except Exception:
+                    continue
+
+                # Reuse cached track if present; otherwise compute.
+                journey_stop_set = _get_journey_stop_set(j_id, jt)
+                if r_int not in _track_cache:
+                    track = []
+                    try:
+                        for sid, atime, dtime in jt:
+                            try:
+                                coords = _get_coords(sid)
+                                if coords:
+                                    track.append(coords)
+                            except Exception:
+                                continue
+                    except Exception:
+                        track = []
+                    if not track:
+                        route_stops = merged.route_stops[r_int] if r_int < len(merged.route_stops) else []
+                        track = []
+                        for sid in route_stops:
+                            try:
+                                coords = _get_coords(sid)
+                                if coords:
+                                    track.append(coords)
+                            except Exception:
+                                continue
+                    if not track:
+                        continue
+                    cum = _cum_distances(track)
+                    _track_cache[r_int] = (track, cum)
+                cached = _track_cache.get(r_int)
+                if not cached:
+                    continue
+                track, cum = cached
+
+                dist_m, progress, proj_seg_idx, proj_t = _project_onto_track(lat_v, lon_v, track, cum)
+                journey_dur = max(end_arr - start_dep, 1)
+
+                # Build stop_progs (same as main loop)
+                stop_progs = []
+                try:
+                    stop_progs = _stop_progress_on_track(jt, walking, track, cum)
+                    try:
+                        first_sid, first_atime, first_dtime = jt[0]
+                        first_sched = first_atime if first_atime is not None else first_dtime
+                        if first_sched is not None:
+                            found_first = any(abs(p[1] - first_sched) <= 1 for p in stop_progs) if stop_progs else False
+                            if not found_first:
+                                stop_progs.append((0.0, first_sched))
+                        last_sid, last_atime, last_dtime = jt[-1]
+                        last_sched = last_atime if last_atime is not None else last_dtime
+                        if last_sched is not None:
+                            found_final = any(abs(p[1] - last_sched) <= 1 for p in stop_progs) if stop_progs else False
+                            if not found_final:
+                                stop_progs.append((1.0, last_sched))
+                        if stop_progs:
+                            stop_progs.sort(key=lambda x: x[0])
+                    except Exception:
+                        pass
+                except Exception:
+                    stop_progs = []
+                if not stop_progs:
+                    try:
+                        sched_times = []
+                        for sid, atime, dtime in jt:
+                            sched = atime if atime is not None else dtime
+                            if sched is None:
+                                continue
+                            sched_times.append(sched)
+                        n = len(sched_times)
+                        if n == 1:
+                            stop_progs = [(0.0, sched_times[0])]
+                        elif n > 1:
+                            for idx, sched in enumerate(sched_times):
+                                frac = idx / (n - 1)
+                                stop_progs.append((frac, sched))
+                    except Exception:
+                        stop_progs = []
+
+                expected_time = None
+                if stop_progs:
+                    if progress <= stop_progs[0][0]:
+                        expected_time = stop_progs[0][1]
+                    elif progress >= stop_progs[-1][0]:
+                        expected_time = stop_progs[-1][1]
+                    else:
+                        for k in range(len(stop_progs) - 1):
+                            p0, t0 = stop_progs[k]
+                            p1, t1 = stop_progs[k + 1]
+                            if p0 <= progress <= p1:
+                                seg = p1 - p0
+                                frac = (progress - p0) / seg if seg > 0 else 0.0
+                                expected_time = t0 + frac * (t1 - t0)
+                                break
+
+                if expected_time is None:
+                    try:
+                        journey_span = max(end_arr - start_dep, 1)
+                        expected_time = int(start_dep + progress * journey_span)
+                    except Exception:
+                        continue
+
+                delay = int(now_seconds - expected_time)
+                best_delay = delay
+                best_jid = j_id
+                best_start_dep = start_dep
+                break
+
+        if best_delay is not None and best_delay < 0:
+            best_delay = 0
+        if return_jid:
+            return _log_gate_summary((best_delay, int(od_exact_match_route_int or -1)))
+        return _log_gate_summary(best_delay)
+
     # If we never found a candidate that passed gates/scoring, return no match.
     if best_jid is None:
         _dbg_gate('no_candidate_survived')
@@ -5765,6 +5953,64 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         except Exception:
             return _log_gate_summary((best_delay, -1))
     return _log_gate_summary(best_delay)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live-match instability suppression
+#
+# If a vehicle is repeatedly matched to many different timetable journeys in a
+# short window, the match is likely unstable (e.g. GPS jitter, ambiguous line
+# names, or missing operator scoping). In that case we prefer to suppress the
+# match rather than present a rapidly flipping delay/route.
+#
+# This helper is intentionally small + testable and is used by provenance tests.
+_LIVE_MATCH_HISTORY: dict[str, tuple[float, set[int]]] = {}
+
+
+def _live_vehicle_should_suppress_match(vehicle_key: str, journey_id: int) -> bool:
+    """Return True if we should suppress the current match as unstable.
+
+    Rule (configurable by env vars):
+    - Maintain an in-memory set of distinct `journey_id`s per `vehicle_key`.
+    - If the number of distinct journeys exceeds BUS_LIVE_MAX_DISTINCT_MATCHES
+      within BUS_LIVE_MATCH_HISTORY_TTL_S seconds, return True.
+    - TTL expiry resets the history.
+
+    This is best-effort; on any error it returns False (do not suppress).
+    """
+    try:
+        import time
+
+        try:
+            ttl_s = int(os.environ.get('BUS_LIVE_MATCH_HISTORY_TTL_S', '120'))
+        except Exception:
+            ttl_s = 120
+        try:
+            max_distinct = int(os.environ.get('BUS_LIVE_MAX_DISTINCT_MATCHES', '3'))
+        except Exception:
+            max_distinct = 3
+
+        now = time.time()
+        key = str(vehicle_key or '').strip()
+        if not key:
+            return False
+
+        rec = _LIVE_MATCH_HISTORY.get(key)
+        if not rec or ttl_s <= 0 or (now - float(rec[0])) > float(ttl_s):
+            s: set[int] = set()
+            _LIVE_MATCH_HISTORY[key] = (now, s)
+        else:
+            s = rec[1]
+
+        try:
+            jid = int(journey_id)
+        except Exception:
+            return False
+        s.add(jid)
+
+        return len(s) > int(max_distinct)
+    except Exception:
+        return False
 
 
 def _stage_filter_journeys_for_live_bus(

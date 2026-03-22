@@ -2372,6 +2372,29 @@ export default function MapViewMap({
   // Map: vehicleId -> timestamp (ms) until which clicks for that vehicle are ignored.
   const busClickCooldownByIdRef = React.useRef(new Map());
 
+  // Global lockout: for 0.5 seconds immediately after the live-bus list refreshes,
+  // ignore any bus clicks. This avoids a class of race conditions where a click
+  // arrives while markers/tracks are being torn down/recreated during refresh.
+  const busClickLockUntilRef = React.useRef(0);
+  const prevBusRefreshingRef = React.useRef(!!busRefreshing);
+  React.useEffect(() => {
+    try {
+      const wasRefreshing = !!prevBusRefreshingRef.current;
+      const isRefreshing = !!busRefreshing;
+      prevBusRefreshingRef.current = isRefreshing;
+      // Arm when refresh just finished (falling edge)
+      if (wasRefreshing && !isRefreshing) {
+        const now =
+          typeof performance !== "undefined" && performance.now
+            ? performance.now()
+            : Date.now();
+  busClickLockUntilRef.current = now + 500;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }, [busRefreshing]);
+
   // Debugging: log when showRouteLines changes and when we clear routes
   React.useEffect(() => {
     try {
@@ -3022,6 +3045,18 @@ export default function MapViewMap({
                       }
 
                       if (marker.type === "bus") {
+                        // For 0.5s right after refresh, ignore clicks to avoid
+                        // marker/track state churn causing selection glitches.
+                        try {
+                          const now =
+                            typeof performance !== "undefined" && performance.now
+                              ? performance.now()
+                              : Date.now();
+                          if (now < (busClickLockUntilRef.current || 0)) return;
+                        } catch (e) {
+                          /* ignore */
+                        }
+
                         // If the bus is unmatched (grey), do nothing on click.
                         // This avoids falling back to route tracks/mock geometry for
                         // vehicles that aren't mapped to a timetable journey.
