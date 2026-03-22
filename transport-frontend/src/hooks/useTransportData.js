@@ -41,11 +41,13 @@ const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
  * @param {number}  [options.lon]            - Centre longitude
  * @param {number}  [options.refreshInterval=30000] - Auto-refresh interval (ms)
  * @param {number}  [options.debounceMs=800] - Debounce delay for lat/lon changes (ms)
+ * @param {number}  [options.latTol]         - Latitude tolerance (passed to API)
+ * @param {number}  [options.lonTol]         - Longitude tolerance (passed to API)
  * @param {string}  [options.keep_vehicle_id]- Always return this vehicle
  */
 export const useLiveBusLocations = (
   operatorCode,
-  { lat, lon, refreshInterval = 30000, debounceMs = 800, keep_vehicle_id = null } = {}
+  { lat, lon, refreshInterval = 30000, debounceMs = 800, latTol, lonTol, keep_vehicle_id = null } = {}
 ) => {
   // Enforce a minimum refresh interval of 5 seconds to avoid overly
   // aggressive polling from callers that pass very small values.
@@ -89,6 +91,12 @@ export const useLiveBusLocations = (
       if (typeof fetchLat === 'number' && typeof fetchLon === 'number') {
         opts.lat = fetchLat;
         opts.lon = fetchLon;
+      }
+      if (typeof latTol === 'number') {
+        opts.latTol = latTol;
+      }
+      if (typeof lonTol === 'number') {
+        opts.lonTol = lonTol;
       }
       if (keep_vehicle_id) {
         opts.keep_vehicle_id = keep_vehicle_id;

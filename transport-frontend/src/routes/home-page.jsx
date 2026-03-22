@@ -1447,6 +1447,9 @@ export default function HomePage() {
   } = useLiveBusLocations("SCCU", {
     lat: mapCenter.lat,
     lon: mapCenter.lon,
+    // Always use a wider tolerance so vehicles don't disappear after auto-zoom/refresh.
+    latTol: 0.2,
+    lonTol: 0.2,
     keep_vehicle_id: openPopupId,
     refreshInterval: 20000,
     // Don't auto-refresh during zoom/pan; only refresh when the timer is up.
