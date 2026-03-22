@@ -144,7 +144,7 @@ class BusLive:
         return (c.text or '').strip()
 
     def get_bus_live(self, lat: float, lon: float, urls: Iterable[str] = None,
-                     lat_tol: float = 0.01, lon_tol: float = 0.01) -> List[Tuple]:
+                     lat_tol: float = 0.01, lon_tol: float = 0.01, keep_vehicle_id: str = None) -> List[Tuple]:
         """Return nearby live vehicles.
 
         Each element is a 7-tuple:
@@ -382,7 +382,12 @@ class BusLive:
                         # best-effort: do not fail the entire feed parsing for meta extraction errors
                         meta = meta or {}
 
-                    if lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max:
+                    if (lat_min <= lat_v <= lat_max and lon_min <= lon_v <= lon_max) or (
+                        keep_vehicle_id and (
+                            meta.get('vehicle_ref') == keep_vehicle_id or
+                            meta.get('vehicle_journey_code') == keep_vehicle_id
+                        )
+                    ):
                         # Return a 9-tuple (bearing may be None, meta may be empty dict).
                         # `meta` now includes a best-effort `operator_ref` when available.
                         results.append((line_ref, dest, lat_v, lon_v, operator_name, delay_seconds, origin_dep_secs, bearing, meta))
@@ -394,10 +399,10 @@ class BusLive:
         return results
 
 
-def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, timeout=10):
+def get_bus_live(lat, lon, urls=None, lat_tol=0.01, lon_tol=0.01, keep_vehicle_id=None, timeout=10):
     """Convenience wrapper for BusLive.get_bus_live."""
     bl = BusLive(urls=urls, timeout=timeout)
-    return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol)
+    return bl.get_bus_live(lat, lon, urls=urls, lat_tol=lat_tol, lon_tol=lon_tol, keep_vehicle_id=keep_vehicle_id)
 
 
 def main():

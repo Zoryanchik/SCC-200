@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Polyline, CircleMarker, Tooltip } from 'react-leaflet';
-import { stopsToLatLngs } from '../../services/routeLineApi';
+import React, { useEffect, useMemo, useState } from "react";
+import { Polyline, CircleMarker, Tooltip } from "react-leaflet";
+import { stopsToLatLngs } from "../../services/routeLineApi";
 
 // Best-effort OSRM snapping for route overlays.
 // Input/Output coords are [lat, lon].
@@ -8,18 +8,28 @@ import { stopsToLatLngs } from '../../services/routeLineApi';
 // By default we call the backend proxy to avoid DNS/CORS issues when OSRM is
 // running on a docker-compose hostname (not resolvable from the browser).
 // Advanced: override VITE_OSRM_BASE to hit OSRM directly.
-const OSRM_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OSRM_BASE)
-  ? String(import.meta.env.VITE_OSRM_BASE)
-  : null;
+const OSRM_BASE =
+  typeof import.meta !== "undefined" &&
+  import.meta.env &&
+  import.meta.env.VITE_OSRM_BASE
+    ? String(import.meta.env.VITE_OSRM_BASE)
+    : null;
 
-const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
-  ? String(import.meta.env.VITE_API_BASE_URL)
-  : '';
+const API_BASE =
+  typeof import.meta !== "undefined" &&
+  import.meta.env &&
+  import.meta.env.VITE_API_BASE_URL
+    ? String(import.meta.env.VITE_API_BASE_URL)
+    : "";
 
-const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeoutMs = 6000 } = {}) => {
+const osrmMatchCoordsLatLon = async (
+  coordsLatLon,
+  { profile = "driving", timeoutMs = 6000 } = {},
+) => {
   try {
-    if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2) return coordsLatLon;
-    const norm = []; 
+    if (!Array.isArray(coordsLatLon) || coordsLatLon.length < 2)
+      return coordsLatLon;
+    const norm = [];
     for (const pt of coordsLatLon) {
       if (!Array.isArray(pt) || pt.length < 2) continue;
       const lat = Number(pt[0]);
@@ -29,7 +39,7 @@ const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
     }
     if (norm.length < 2) return coordsLatLon;
 
-    const matchUrl = `${API_BASE.replace(/\/$/, '')}/osrm/match`;
+    const matchUrl = `${API_BASE.replace(/\/$/, "")}/osrm/match`;
 
     // Match snapping via backend POST (avoids URL length limits for dense traces).
     const controller2 = new AbortController();
@@ -37,8 +47,8 @@ const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
     let resp;
     try {
       resp = await fetch(matchUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ coords: norm, profile }),
         signal: controller2.signal,
       });
@@ -47,8 +57,14 @@ const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
     }
     if (!resp || !resp.ok) return coordsLatLon;
     const data = await resp.json();
-    const osrmCoords = data && data.matchings && data.matchings[0] && data.matchings[0].geometry && data.matchings[0].geometry.coordinates;
-    if (!Array.isArray(osrmCoords) || osrmCoords.length < 2) return coordsLatLon;
+    const osrmCoords =
+      data &&
+      data.matchings &&
+      data.matchings[0] &&
+      data.matchings[0].geometry &&
+      data.matchings[0].geometry.coordinates;
+    if (!Array.isArray(osrmCoords) || osrmCoords.length < 2)
+      return coordsLatLon;
     const out = [];
     for (const pt of osrmCoords) {
       if (!Array.isArray(pt) || pt.length < 2) continue;
@@ -66,7 +82,7 @@ const osrmMatchCoordsLatLon = async (coordsLatLon, { profile = 'driving', timeou
 const buildSnapKey = (coords, { maxPts = 12 } = {}) => {
   if (!Array.isArray(coords) || coords.length < 2) return null;
   const take = Math.min(maxPts, coords.length);
-  const step = (coords.length - 1) / Math.max(1, (take - 1));
+  const step = (coords.length - 1) / Math.max(1, take - 1);
   const parts = [];
   for (let i = 0; i < take; i++) {
     const idx = Math.round(i * step);
@@ -77,7 +93,7 @@ const buildSnapKey = (coords, { maxPts = 12 } = {}) => {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
     parts.push(`${lat.toFixed(5)},${lon.toFixed(5)}`);
   }
-  return parts.length >= 2 ? parts.join('|') : null;
+  return parts.length >= 2 ? parts.join("|") : null;
 };
 
 /**
@@ -102,14 +118,14 @@ function HoverTooltip({ delayMs = 500, children, ...tooltipProps }) {
  * inbound / outbound / variant lines are distinguishable.
  */
 const VARIANT_COLORS = [
-  '#1976d2', // blue
-  '#d32f2f', // red
-  '#388e3c', // green
-  '#7b1fa2', // purple
-  '#f57c00', // orange
-  '#0097a7', // teal
-  '#c2185b', // pink
-  '#455a64', // blue-grey
+  "#1976d2", // blue
+  "#d32f2f", // red
+  "#388e3c", // green
+  "#7b1fa2", // purple
+  "#f57c00", // orange
+  "#0097a7", // teal
+  "#c2185b", // pink
+  "#455a64", // blue-grey
 ];
 
 /**
@@ -142,7 +158,7 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
       const lon0 = a[1];
       const lat1 = b[0];
       const lon1 = b[1];
-      const cos = Math.cos(((lat0 + lat1) / 2) * Math.PI / 180);
+      const cos = Math.cos((((lat0 + lat1) / 2) * Math.PI) / 180);
       const dlat = (lat1 - lat0) * 111_320;
       const dlon = (lon1 - lon0) * 111_320 * cos;
       return Math.sqrt(dlat * dlat + dlon * dlon);
@@ -156,7 +172,9 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
       }
     }
     stopGaps.sort((a, b) => a - b);
-    const medianStopGap = stopGaps.length ? stopGaps[Math.floor(stopGaps.length / 2)] : 400; // ~= urban spacing
+    const medianStopGap = stopGaps.length
+      ? stopGaps[Math.floor(stopGaps.length / 2)]
+      : 400; // ~= urban spacing
 
     const ABS_MAX_GAP_M = 15_000; // if we jump >15km, it's definitely wrong
     const REL_MAX_GAP_M = Math.max(3_000, medianStopGap * 10);
@@ -174,7 +192,10 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
     if (Array.isArray(stopPositions) && stopPositions.length) {
       const firstStop = stopPositions[0];
       const lastStop = stopPositions[stopPositions.length - 1];
-      if (toMeters(geom[0], firstStop) > 8_000 && toMeters(geom[geom.length - 1], lastStop) > 8_000) {
+      if (
+        toMeters(geom[0], firstStop) > 8_000 &&
+        toMeters(geom[geom.length - 1], lastStop) > 8_000
+      ) {
         return false;
       }
     }
@@ -196,17 +217,18 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
         // If the backend returns no variant geometry, fall back to stop-to-stop.
         // This is important for "line clicked from stop" flows where we may
         // only have stop coordinates.
-        const geomSource = (variant && variant.geometry_source != null) ? String(variant.geometry_source).toLowerCase() : null;
-        const isTrackGeom = geomSource === 'route_link_tracks';
+        const geomSource =
+          variant && variant.geometry_source != null
+            ? String(variant.geometry_source).toLowerCase()
+            : null;
+        const isTrackGeom = geomSource === "route_link_tracks";
         const hasSaneGeom = Boolean(
           isTrackGeom &&
           Array.isArray(variant.geometry) &&
           variant.geometry.length >= 2 &&
-          isGeometrySane(variant.geometry, stopPositions)
+          isGeometrySane(variant.geometry, stopPositions),
         );
-        const basePositions = hasSaneGeom
-          ? variant.geometry
-          : stopPositions;
+        const basePositions = hasSaneGeom ? variant.geometry : stopPositions;
 
         // Only snap when we have a real track polyline.
         // If we only have stop-to-stop coords, keep it as a straight line.
@@ -216,53 +238,71 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
         // In practice, route data can update without a length change (e.g. refreshed
         // geometry points), so we must not depend only on `length`.
         const [snapped, setSnapped] = useState(null);
-        const snapKey = useMemo(() => buildSnapKey(basePositions), [basePositions]);
+        const snapKey = useMemo(
+          () => buildSnapKey(basePositions),
+          [basePositions],
+        );
 
         const osrmProfile = useMemo(() => {
-          const raw = (
+          const raw =
             variant?.mode ??
             variant?.access_mode ??
             variant?.travel_mode ??
             routeData?.mode ??
             routeData?.access_mode ??
             routeData?.travel_mode ??
-            null
-          );
-          const m = raw == null ? '' : String(raw).toLowerCase();
-          return (m === 'walking' || m === 'walk' || m === 'foot') ? 'foot' : 'driving';
+            null;
+          const m = raw == null ? "" : String(raw).toLowerCase();
+          return m === "walking" || m === "walk" || m === "foot"
+            ? "foot"
+            : "driving";
         }, [variant, routeData]);
 
         useEffect(() => {
           let cancelled = false;
           if (!hasSaneGeom) {
             setSnapped(null);
-            return () => { cancelled = true; };
+            return () => {
+              cancelled = true;
+            };
           }
-          if (!snapKey || !Array.isArray(basePositions) || basePositions.length < 2) {
+          if (
+            !snapKey ||
+            !Array.isArray(basePositions) ||
+            basePositions.length < 2
+          ) {
             setSnapped(null);
-            return () => { cancelled = true; };
+            return () => {
+              cancelled = true;
+            };
           }
           (async () => {
             try {
-              const out = await osrmMatchCoordsLatLon(basePositions, { profile: osrmProfile });
+              const out = await osrmMatchCoordsLatLon(basePositions, {
+                profile: osrmProfile,
+              });
               if (cancelled) return;
-              setSnapped((Array.isArray(out) && out.length >= 2) ? out : null);
+              setSnapped(Array.isArray(out) && out.length >= 2 ? out : null);
             } catch (e) {
               if (cancelled) return;
               setSnapped(null);
             }
           })();
-          return () => { cancelled = true; };
+          return () => {
+            cancelled = true;
+          };
           // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasSaneGeom, snapKey, basePositions.length, osrmProfile]);
+        }, [hasSaneGeom, snapKey, basePositions.length, osrmProfile]);
 
-        const positions = (Array.isArray(snapped) && snapped.length >= 2) ? snapped : basePositions;
-        
-        
+        const positions =
+          Array.isArray(snapped) && snapped.length >= 2
+            ? snapped
+            : basePositions;
+
         if (positions.length < 2) return null;
 
-  const color = VARIANT_COLORS[idx % VARIANT_COLORS.length];
-  const dashArray = dashed || idx > 0 ? '8 6' : undefined;
+        const color = VARIANT_COLORS[idx % VARIANT_COLORS.length];
+        const dashArray = dashed || idx > 0 ? "8 6" : undefined;
 
         return (
           <React.Fragment key={`${routeData.line}-v${idx}`}>
@@ -276,22 +316,26 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
                       e.originalEvent.preventDefault();
                       e.originalEvent.stopPropagation();
                     }
-                    if (e && typeof e.stopPropagation === 'function') {
+                    if (e && typeof e.stopPropagation === "function") {
                       e.stopPropagation();
                     }
                     if (onRouteClick) onRouteClick(routeData.line);
-                  } catch (err) { /* ignore */ }
-                }
+                  } catch (err) {
+                    /* ignore */
+                  }
+                },
               }}
               pathOptions={{
-                color: '#00ffff',
+                color: "#00ffff",
                 weight: 6,
                 opacity: 0.9,
                 dashArray,
               }}
             >
               <HoverTooltip sticky delayMs={500}>
-                <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
+                <strong style={{ fontSize: "1.2em" }}>
+                  Line {routeData.line}
+                </strong>
               </HoverTooltip>
             </Polyline>
 
@@ -305,12 +349,14 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
                       e.originalEvent.preventDefault();
                       e.originalEvent.stopPropagation();
                     }
-                    if (e && typeof e.stopPropagation === 'function') {
+                    if (e && typeof e.stopPropagation === "function") {
                       e.stopPropagation();
                     }
                     if (onRouteClick) onRouteClick(routeData.line);
-                  } catch (err) { /* ignore */ }
-                }
+                  } catch (err) {
+                    /* ignore */
+                  }
+                },
               }}
               pathOptions={{
                 color,
@@ -320,7 +366,9 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
               }}
             >
               <HoverTooltip sticky delayMs={500}>
-                <strong style={{ fontSize: '1.2em' }}>Line {routeData.line}</strong>
+                <strong style={{ fontSize: "1.2em" }}>
+                  Line {routeData.line}
+                </strong>
               </HoverTooltip>
             </Polyline>
             {/* Small circles at each stop along the route */}
@@ -332,7 +380,7 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
                   center={[stop.lat, stop.lon]}
                   radius={5}
                   pathOptions={{
-                    color: '#fff',
+                    color: "#fff",
                     weight: 2,
                     fillColor: color,
                     fillOpacity: 1,
@@ -370,12 +418,12 @@ export default function RouteLineLayer({ activeRoutes, onRouteClick }) {
         const routeData = value && value.data ? value.data : value;
         const dashed = Boolean(value && value.style && value.style.dashed);
         return (
-        <SingleRouteLine 
-          key={line} 
-          routeData={routeData} 
-          dashed={dashed}
-          onRouteClick={onRouteClick} 
-        />
+          <SingleRouteLine
+            key={line}
+            routeData={routeData}
+            dashed={dashed}
+            onRouteClick={onRouteClick}
+          />
         );
       })}
     </>

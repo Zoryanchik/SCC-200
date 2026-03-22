@@ -144,6 +144,7 @@ const handleSearchSelect = useCallback((option) => {
 const { data: busLocations, loading: busLoading, refreshing: busRefreshing, countdown: busCountdown, refreshInterval: busRefreshInterval, error: busError } = useLiveBusLocations('SCCU', {
   lat: mapCenter.lat,
   lon: mapCenter.lon,
+  keep_vehicle_id: openPopupId,
   refreshInterval: 20000,
   // Don't auto-refresh during zoom/pan; only refresh when the timer is up.
   debounceOnMove: false,

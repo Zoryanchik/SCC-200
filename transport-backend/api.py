@@ -6319,6 +6319,7 @@ async def bus_live_operator(
     # Can be overridden by callers when they want a wider scan.
     latTol: float = 0.0003,
     lonTol: float = 0.0003,
+    keep_vehicle_id: Optional[str] = None,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
@@ -6352,6 +6353,7 @@ async def bus_live_operator(
             urls=urls,
             lat_tol=latTol,
             lon_tol=lonTol,
+            keep_vehicle_id=keep_vehicle_id,
         )
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
@@ -8313,6 +8315,25 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             leg["departure_time"] = _time_str(prev_info["arrival_time"])
             leg["line_name"] = None
         else:
+            j_id = curr_info.get("journey")
+            intermediate_stops = []
+            if j_id is not None and getattr(merged, "journey_times", None) and getattr(merged, "journey_stop_index", None):
+                try:
+                    jt = merged.journey_times[j_id]
+                    jsi = merged.journey_stop_index[j_id]
+                    start_idx = jsi.get(prev_int)
+                    end_idx = jsi.get(curr_int)
+                    
+                    if start_idx is not None and end_idx is not None:
+                        # Allow normal forward loop
+                        if start_idx < end_idx:
+                            for idx in range(start_idx + 1, end_idx):
+                                stop_int = jt[idx][0]
+                                intermediate_stops.append(_stop_point(stop_int))
+                except Exception:
+                    pass
+            leg["intermediate_stops"] = intermediate_stops
+
             j_info = curr_info.get("journey_info")
             if j_info and isinstance(j_info, dict):
                 line_name = j_info.get("line_name", "")

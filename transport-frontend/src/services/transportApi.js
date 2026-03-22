@@ -121,7 +121,7 @@ export const fetchBusTimes = async (stopCode) => {
  * @param {number} [options.lonTol=0.0002] - Longitude tolerance (half-width)
  * @returns {Promise<Array>} Array of bus location data
  */
-export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.07, lonTol = 0.07 } = {}) => {
+export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0.07, lonTol = 0.07, keep_vehicle_id = null } = {}) => {
   try {
     let url = `${API_BASE_URL}/bus/live/${operatorCode}`;
     if (typeof lat === 'number' && typeof lon === 'number') {
@@ -131,6 +131,9 @@ export const fetchLiveBusLocations = async (operatorCode, { lat, lon, latTol = 0
         latTol: String(latTol),
         lonTol: String(lonTol),
       });
+      if (keep_vehicle_id) {
+        params.append("keep_vehicle_id", keep_vehicle_id);
+      }
       url += `?${params.toString()}`;
     }
     const response = await fetch(url);

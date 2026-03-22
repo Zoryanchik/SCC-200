@@ -41,10 +41,11 @@ const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
  * @param {number}  [options.lon]            - Centre longitude
  * @param {number}  [options.refreshInterval=30000] - Auto-refresh interval (ms)
  * @param {number}  [options.debounceMs=800] - Debounce delay for lat/lon changes (ms)
+ * @param {string}  [options.keep_vehicle_id]- Always return this vehicle
  */
 export const useLiveBusLocations = (
   operatorCode,
-  { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
+  { lat, lon, refreshInterval = 30000, debounceMs = 800, keep_vehicle_id = null } = {}
 ) => {
   // Enforce a minimum refresh interval of 5 seconds to avoid overly
   // aggressive polling from callers that pass very small values.
@@ -89,6 +90,9 @@ export const useLiveBusLocations = (
         opts.lat = fetchLat;
         opts.lon = fetchLon;
       }
+      if (keep_vehicle_id) {
+        opts.keep_vehicle_id = keep_vehicle_id;
+      }
       const result = await withRetry(
         () => fetchLiveBusLocations(operatorCode, opts),
         { retries: 2, baseDelay: 500 }
@@ -108,7 +112,7 @@ export const useLiveBusLocations = (
     } finally {
       setRefreshing(false);
     }
-  }, [operatorCode, refreshInterval, startCountdown]);
+  }, [operatorCode, refreshInterval, startCountdown, keep_vehicle_id]);
 
   // Debounce lat/lon changes, then set up auto-refresh interval
   useEffect(() => {

@@ -199,33 +199,39 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
           <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary) })}>
             Walk
           </Typography>
-          {route.busLegs > 1 ? (
-            <Typography
-              variant="caption"
-              sx={(theme) => ({
-                color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
-                whiteSpace: 'nowrap',
-                justifySelf: 'end',
-                fontStyle: 'italic',
-              })}
-            >
-              {route.busLegs} × £2.10 single
-            </Typography>
-          ) : route.busLegs === 1 ? (
-            <Typography
-              variant="caption"
-              sx={(theme) => ({
-                color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
-                whiteSpace: 'nowrap',
-                justifySelf: 'end',
-                fontStyle: 'italic',
-              })}
-            >
-              bus single ticket
-            </Typography>
-          ) : (
-            <Box />
-          )}
+          {(() => {
+            if (!route.busLegs) return <Box />;
+            
+            let standardCount = 0;
+            let extendedCount = 0;
+            (route.steps || []).forEach(s => {
+              if (s.type === 'bus') {
+                const stopsCount = (s.stops || s.path_stops || s.pathStops || s.intermediate_stops || s.intermediateStops || []).length;
+                if (stopsCount > 25) extendedCount++;
+                else standardCount++;
+              }
+            });
+            
+            const parts = [];
+            if (standardCount > 0) parts.push(`£2/Single${standardCount > 1 ? `*${standardCount}` : ''}`);
+            if (extendedCount > 0) parts.push(`£3/Single${extendedCount > 1 ? `*${extendedCount}` : ''}`);
+            
+            const text = parts.length > 0 ? `Bus ` + parts.join(' + ') : 'bus single ticket';
+            
+            return (
+              <Typography
+                variant="caption"
+                sx={(theme) => ({
+                  color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                  whiteSpace: 'nowrap',
+                  justifySelf: 'end',
+                  fontStyle: 'italic',
+                })}
+              >
+                {text}
+              </Typography>
+            );
+          })()}
 
           {/* Row 4: values */}
           {(() => {
