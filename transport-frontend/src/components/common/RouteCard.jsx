@@ -92,160 +92,171 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
     >
       {/* Header (fixed) */}
       <Stack spacing={1.5} sx={{ flex: '0 0 auto' }}>
-            <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-              {/* Left column: arrival + duration */}
-              <Box sx={{ flex: 1 }}>
-                <Stack spacing={0.5}>
-                  {/* Arrival: use the last step's arrival time from the routing result */}
-                  {(() => {
-                    // Get the arrival time from the last step — this is the exact value
-                    // from the routing result, including any day offset suffix.
-                    const lastStep = Array.isArray(route.steps) && route.steps.length > 0
-                      ? route.steps[route.steps.length - 1]
-                      : null;
-                    // Pick the best available arrival string from the last step
-                    const rawArrival = lastStep?.arrival_time_with_offset
-                      || lastStep?.scheduled_arrival_time
-                      || route.finalArrivalWithOffset
-                      || null;
-                    if (!rawArrival) return null;
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr auto',
+            columnGap: 2,
+            rowGap: 0.5,
+            alignItems: 'baseline',
+          }}
+        >
+          {/* Row 1: labels */}
+          <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary) })}>
+            Arrival
+          </Typography>
+          <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary) })}>
+            Transfer
+          </Typography>
+          <Typography
+            variant="caption"
+            sx={(theme) => ({
+              color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary),
+              justifySelf: 'end',
+              whiteSpace: 'nowrap',
+            })}
+          >
+            Cost
+          </Typography>
 
-                    // Parse: strip seconds from "HH:MM:SS" → "HH:MM", keep "(+Nd)" suffix
-                    let timeDisplay = rawArrival;
-                    let dayLabel = '';
-                    try {
-                      // Extract day-shift suffix like "(+1d)"
-                      const dm = rawArrival.match(/\(\s*\+\s*(\d+)\s*d\s*\)/i);
-                      if (dm && dm[1]) {
-                        const n = Number(dm[1]);
-                        dayLabel = n === 1 ? ' (+1 day)' : ` (+${n} days)`;
-                      }
-                      // Also check route.dayShift as fallback
-                      if (!dayLabel && route.dayShift > 0) {
-                        dayLabel = route.dayShift === 1 ? ' (+1 day)' : ` (+${route.dayShift} days)`;
-                      }
-                      // Strip the "(+Nd)" part and seconds from the time
-                      const core = rawArrival.split('(')[0].trim();
-                      const parts = core.split(':');
-                      timeDisplay = parts.length >= 2 ? `${parts[0]}:${parts[1]}` : core;
-                    } catch (e) {
-                      // keep rawArrival as-is
-                    }
+          {/* Row 2: values (arrival / transfer / price) */}
+          {(() => {
+            const lastStep = Array.isArray(route.steps) && route.steps.length > 0
+              ? route.steps[route.steps.length - 1]
+              : null;
+            const rawArrival = lastStep?.arrival_time_with_offset
+              || lastStep?.scheduled_arrival_time
+              || route.finalArrivalWithOffset
+              || null;
+            if (!rawArrival) return <Box />;
 
-                    return (
-                      <>
-                        <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
-                          Arrival
-                        </Typography>
-                        {(() => {
-                          const arrivalColor = (route && typeof route.isEarliestArrival !== 'undefined')
-                            ? (route.isEarliestArrival ? '#4CBB17' : '#FF8787')
-                            : (isSelected ? '#00bcd4' : '#ffffff');
-                          return (
-                            <Typography fontWeight={700} sx={() => ({ color: arrivalColor })}>
-                              {timeDisplay}{dayLabel && <span style={{ fontWeight: 600, fontSize: '0.8em', marginLeft: 4 }}>{dayLabel}</span>}
-                            </Typography>
-                          );
-                        })()}
-                      </>
-                    );
-                  })()}
+            let timeDisplay = rawArrival;
+            let dayLabel = '';
+            try {
+              const dm = rawArrival.match(/\(\s*\+\s*(\d+)\s*d\s*\)/i);
+              if (dm && dm[1]) {
+                const n = Number(dm[1]);
+                dayLabel = n === 1 ? ' (+1 day)' : ` (+${n} days)`;
+              }
+              if (!dayLabel && route.dayShift > 0) {
+                dayLabel = route.dayShift === 1 ? ' (+1 day)' : ` (+${route.dayShift} days)`;
+              }
+              const core = rawArrival.split('(')[0].trim();
+              const parts = core.split(':');
+              timeDisplay = parts.length >= 2 ? `${parts[0]}:${parts[1]}` : core;
+            } catch (e) {
+              // keep rawArrival as-is
+            }
 
-                  <Typography
-                    variant="caption"
-                    sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mb: 0.25 })}
-                  >
-                    Duration
-                  </Typography>
-                  {(() => {
-                    const durColor = (route && typeof route.isFastestDuration !== 'undefined')
-                      ? (route.isFastestDuration ? '#4CBB17' : '#FF8787')
-                      : (isSelected ? '#00bcd4' : '#ffffff');
-                    return (
-                      <Typography fontWeight={700} sx={() => ({ color: durColor })}>
-                        {route.duration}
-                      </Typography>
-                    );
-                  })()}
-                </Stack>
-              </Box>
+            const arrivalColor = (route && typeof route.isEarliestArrival !== 'undefined')
+              ? (route.isEarliestArrival ? '#4CBB17' : '#FF8787')
+              : (isSelected ? '#00bcd4' : '#ffffff');
 
-              {/* Middle column: transfers and walk time (styled like arrival/duration) */}
-              <Box sx={{ flex: 1, display: 'flex', justifyContent: 'flex-start', ml: '-6px' }}>
-                <Stack spacing={0.5} alignItems="flex-start">
-                  <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
-                    Transfer
-                  </Typography>
-                  {(() => {
-                    const trColor = (route && typeof route.isFewestTransfers !== 'undefined')
-                      ? (route.isFewestTransfers ? '#4CBB17' : '#FF8787')
-                      : (isSelected ? '#00bcd4' : '#ffffff');
-                    return (
-                      <Typography fontWeight={700} sx={() => ({ color: trColor })}>
-                        {route.transfers == null ? '—' : (route.transfers === 0 ? 'None' : String(route.transfers))}
-                      </Typography>
-                    );
-                  })()}
+            return (
+              <Typography fontWeight={700} sx={() => ({ color: arrivalColor })}>
+                {timeDisplay}{dayLabel && <span style={{ fontWeight: 600, fontSize: '0.8em', marginLeft: 4 }}>{dayLabel}</span>}
+              </Typography>
+            );
+          })()}
 
-                  <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary), mt: 0.5 })}>
-                    Walk
-                  </Typography>
-                  {(() => {
-                    const wColor = (route && typeof route.isLeastWalk !== 'undefined')
-                      ? (route.isLeastWalk ? '#4CBB17' : '#FF8787')
-                      : (isSelected ? '#00bcd4' : '#ffffff');
-                    return (
-                      <Typography fontWeight={700} sx={() => ({ color: wColor })}>
-                        {totalWalkMinutes > 0 ? `${totalWalkMinutes} min` : '0 min'}
-                      </Typography>
-                    );
-                  })()}
-                </Stack>
-              </Box>
+          {(() => {
+            const trColor = (route && typeof route.isFewestTransfers !== 'undefined')
+              ? (route.isFewestTransfers ? '#4CBB17' : '#FF8787')
+              : (isSelected ? '#00bcd4' : '#ffffff');
+            return (
+              <Typography fontWeight={700} sx={() => ({ color: trColor })}>
+                {route.transfers == null ? '—' : (route.transfers === 0 ? 'None' : String(route.transfers))}
+              </Typography>
+            );
+          })()}
 
-              <Stack alignItems="flex-end" spacing={0.5}>
-              {route.price && (
-                <>
-                  <Typography
-                    fontWeight={700}
-                    sx={() => ({
-                      lineHeight: 1.2,
-                      color: route && route.isCheapest ? '#4CBB17' : '#FF8787',
-                    })}
-                  >
-                    {route.price}
-                  </Typography>
-                  <Typography
-                    variant="caption"
-                    sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), whiteSpace: 'nowrap' })}
-                  >
-                    approx. cost
-                  </Typography>
-                  {route.busLegs > 1 && (
-                    <Typography
-                      variant="caption"
-                      sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), whiteSpace: 'nowrap' })}
-                    >
-                      {route.busLegs} × £2.10 single
-                    </Typography>
-                  )}
-                  {route.busLegs === 1 && (
-                    <Typography
-                      variant="caption"
-                      sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary), whiteSpace: 'nowrap' })}
-                    >
-                      bus single ticket
-                    </Typography>
-                  )}
-                </>
-              )}
-              {onSave && (
-                <IconButton size="small" onClick={() => onSave(route)} color={isSaved ? "error" : "default"}>
-                  <Heart size={18} fill={isSaved ? "currentColor" : "none"} />
-                </IconButton>
-              )}
-            </Stack>
-          </Stack>
+          {route.price ? (
+            <Typography
+              fontWeight={700}
+              sx={() => ({
+                lineHeight: 1.2,
+                color: route && route.isCheapest ? '#4CBB17' : '#FF8787',
+                justifySelf: 'end',
+                whiteSpace: 'nowrap',
+              })}
+            >
+              {route.price}
+            </Typography>
+          ) : (
+            <Box />
+          )}
+
+          {/* Row 3: labels */}
+          <Typography
+            variant="caption"
+            sx={(theme) => ({
+              color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary),
+              mb: 0.25,
+            })}
+          >
+            Duration
+          </Typography>
+          <Typography variant="caption" sx={(theme) => ({ color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[600] : theme.palette.text.secondary) })}>
+            Walk
+          </Typography>
+          {route.busLegs > 1 ? (
+            <Typography
+              variant="caption"
+              sx={(theme) => ({
+                color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                whiteSpace: 'nowrap',
+                justifySelf: 'end',
+                fontStyle: 'italic',
+              })}
+            >
+              {route.busLegs} × £2.10 single
+            </Typography>
+          ) : route.busLegs === 1 ? (
+            <Typography
+              variant="caption"
+              sx={(theme) => ({
+                color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                whiteSpace: 'nowrap',
+                justifySelf: 'end',
+                fontStyle: 'italic',
+              })}
+            >
+              bus single ticket
+            </Typography>
+          ) : (
+            <Box />
+          )}
+
+          {/* Row 4: values */}
+          {(() => {
+            const durColor = (route && typeof route.isFastestDuration !== 'undefined')
+              ? (route.isFastestDuration ? '#4CBB17' : '#FF8787')
+              : (isSelected ? '#00bcd4' : '#ffffff');
+            return (
+              <Typography fontWeight={700} sx={() => ({ color: durColor })}>
+                {route.duration}
+              </Typography>
+            );
+          })()}
+
+          {(() => {
+            const wColor = (route && typeof route.isLeastWalk !== 'undefined')
+              ? (route.isLeastWalk ? '#4CBB17' : '#FF8787')
+              : (isSelected ? '#00bcd4' : '#ffffff');
+            return (
+              <Typography fontWeight={700} sx={() => ({ color: wColor })}>
+                {totalWalkMinutes > 0 ? `${totalWalkMinutes} min` : '0 min'}
+              </Typography>
+            );
+          })()}
+
+          <Box />
+
+          {/* Row 5: actions */}
+          <Box />
+          <Box />
+          <Box />
+        </Box>
 
         <Divider sx={{ my: 0.5 }} />
       </Stack>

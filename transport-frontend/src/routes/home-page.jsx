@@ -2717,35 +2717,7 @@ export default function HomePage() {
             </Box>
           )}
 
-          {favorites.length > 0 && (
-            <Box>
-              <Typography variant="caption" fontWeight={700} display="block" mb={1}>
-                Recent Journeys
-              </Typography>
-              <Stack spacing={1}>
-                    {favorites.slice(0, 3).map((fav, idx) => (
-                      <Box
-                        key={idx}
-                        onClick={() => {
-                          setFromLocation(fav.fromName);
-                          setToLocation(fav.toName);
-                        }}
-                        sx={{
-                          p: 1,
-                          borderRadius: 1,
-                          backgroundColor: "#f5f5f5",
-                          cursor: "pointer",
-                          "&:hover": { backgroundColor: "#eeeeee" },
-                        }}
-                      >
-                        <Typography variant="caption" fontWeight={600}>
-                          {fav.fromName} \u2192 {fav.toName}
-                        </Typography>
-                      </Box>
-                    ))}
-                  </Stack>
-                </Box>
-              )}
+          {/* Recent Journeys UI intentionally disabled (even if favorites exist). */}
         </Stack>
       </Paper>
 

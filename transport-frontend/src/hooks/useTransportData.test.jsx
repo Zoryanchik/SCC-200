@@ -42,7 +42,8 @@ describe('useTransportData hooks', () => {
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false)
-	  expect(api.searchStops).toHaveBeenCalledWith('Lan', undefined)
+      // useStopSearch calls the backend with just the query string.
+      expect(api.searchStops).toHaveBeenCalledWith('Lan')
       expect(result.current.results.length).toBeGreaterThan(0)
     })
   })

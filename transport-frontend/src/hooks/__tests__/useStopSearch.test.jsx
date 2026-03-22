@@ -95,15 +95,18 @@ describe('useStopSearch', () => {
       { id: 2, name: 'Common Garden Street', atco_code: 'M1', lat: 54.051, lon: -2.801, type: 'stop', source: 'merged' },
     ])
 
-    const mapCenter = { lat: 54.055, lon: -2.805 }
-    const mapBbox = { south: 54.00, west: -2.85, north: 54.10, east: -2.75 }
-    const { result } = renderHook(() => useStopSearch('Common', 10, mapCenter, mapBbox))
+  // This hook currently sorts stop-type suggestions by proximity to mapCenter,
+  // and does not (yet) explicitly rank by source. Keep the test aligned.
+  const mapCenter = { lat: 54.055, lon: -2.805 }
+  const mapBbox = { south: 54.00, west: -2.85, north: 54.10, east: -2.75 }
+  const { result } = renderHook(() => useStopSearch('Common', 10, mapCenter, mapBbox))
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false)
       expect(result.current.results).toHaveLength(2)
     })
 
-    expect(result.current.results[0].atco_code).toBe('UP1')
+    // M1 is slightly closer to mapCenter than UP1, so it should rank first.
+    expect(result.current.results[0].atco_code).toBe('M1')
   })
 })

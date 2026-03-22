@@ -44,7 +44,7 @@ const withRetry = async (fn, { retries = 2, baseDelay = 500 } = {}) => {
  */
 export const useLiveBusLocations = (
   operatorCode,
-  { lat, lon, refreshInterval = 30000, debounceMs = 800, debounceOnMove = true } = {}
+  { lat, lon, refreshInterval = 30000, debounceMs = 800 } = {}
 ) => {
   // Enforce a minimum refresh interval of 5 seconds to avoid overly
   // aggressive polling from callers that pass very small values.
@@ -62,14 +62,6 @@ export const useLiveBusLocations = (
   const debounceRef = useRef(null);
   const intervalRef = useRef(null);
   const countdownRef = useRef(null);
-  const latestLatRef = useRef(lat);
-  const latestLonRef = useRef(lon);
-
-  // Always keep the latest coords available without forcing timers to reset.
-  useEffect(() => {
-    latestLatRef.current = lat;
-    latestLonRef.current = lon;
-  }, [lat, lon]);
 
   // Start a 1 s tick countdown that resets after each fetch.
   const startCountdown = useCallback((seconds) => {
@@ -118,14 +110,8 @@ export const useLiveBusLocations = (
     }
   }, [operatorCode, refreshInterval, startCountdown]);
 
-  // Timer-only polling uses a stable interval that reads latest lat/lon from refs.
-  const fetchLatestData = useCallback(() => {
-    fetchData(latestLatRef.current, latestLonRef.current);
-  }, [fetchData]);
-
-  // Debounced mode: lat/lon changes schedule an immediate fetch and reset the polling interval.
+  // Debounce lat/lon changes, then set up auto-refresh interval
   useEffect(() => {
-    if (!debounceOnMove) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (intervalRef.current) clearInterval(intervalRef.current);
 
@@ -139,31 +125,9 @@ export const useLiveBusLocations = (
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchData, lat, lon, effectiveRefreshInterval, debounceMs, debounceOnMove]);
-
-  // Timer-only mode: interval is independent from lat/lon changes; it always uses latest refs.
-  useEffect(() => {
-    if (debounceOnMove) return;
-    if (intervalRef.current) clearInterval(intervalRef.current);
-
-    // Immediate fetch on enable/first mount.
-    fetchLatestData();
-    intervalRef.current = setInterval(() => {
-      fetchLatestData();
-    }, effectiveRefreshInterval);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchLatestData, effectiveRefreshInterval, debounceOnMove]);
-
-  // Shared cleanup for the countdown timer.
-  useEffect(() => {
-    return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, []);
+  }, [fetchData, lat, lon, effectiveRefreshInterval, debounceMs]);
 
   const refetch = useCallback(() => fetchData(lat, lon), [fetchData, lat, lon]);
 
@@ -249,7 +213,7 @@ export const useBusArrivals = (stopCode, refreshInterval = 180000) => {
 /**
  * Hook for searching stops
  */
-export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapBbox = null) => {
+export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -264,9 +228,7 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapB
       try {
         setLoading(true);
         const result = await withRetry(
-          () => searchStops(query, (mapCenter && typeof mapCenter.lat === 'number' && typeof mapCenter.lon === 'number')
-			? { lat: mapCenter.lat, lon: mapCenter.lon }
-			: undefined),
+          () => searchStops(query),
           { retries: 1, baseDelay: 400 }
         );
         // Normalize coordinate fields (support lat/lon or latitude/longitude)
@@ -298,36 +260,13 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapB
           filteredResult = normalized;
         }
 
-        // If a map bbox is provided, strongly prefer any stop results that
-        // fall inside the current viewport. This makes autocompletes feel
-        // "map-first" (e.g. typing "common" should surface the stop that's
-        // visible on the map above similarly-named stops elsewhere).
-        // Secondary ordering still prefers proximity to map center.
-        if ((mapCenter || mapBbox) && Array.isArray(filteredResult) && filteredResult.length > 0) {
+        // If a map centre is provided, keep stop-type results first
+        // (they come from the backend) and sort location-type results
+        // by proximity to the map centre so autocomplete prompts favour
+        // nearby POIs.
+        if (mapCenter && Array.isArray(filteredResult) && filteredResult.length > 0) {
           try {
             const { lat: cLat, lon: cLon } = mapCenter;
-            const bbox = mapBbox;
-
-			// Prefer upstream/raw stop sources above merged/derived suggestions.
-			// Rationale: merged results can be convenient fallbacks, but when both
-			// exist we want the authoritative upstream stop to win.
-			const sourcePriority = (r) => {
-				const src = String(r?.source || r?.origin || r?.provider || '').toLowerCase();
-				const isMerged = (
-					src.includes('merged') ||
-					src.includes('merge') ||
-					src.includes('derived') ||
-					src.includes('computed')
-				);
-				// 0 = upstream/default, 1 = merged/derived
-				return isMerged ? 1 : 0;
-			};
-            const withinBbox = (la, lo) => {
-              if (!bbox || typeof la !== 'number' || typeof lo !== 'number') return false;
-              const { south, west, north, east } = bbox;
-              if (![south, west, north, east].every((v) => typeof v === 'number')) return false;
-              return la >= south && la <= north && lo >= west && lo <= east;
-            };
             const haversine = (la, lo) => {
               if (typeof la !== 'number' || typeof lo !== 'number') return Number.POSITIVE_INFINITY;
               const toRad = (v) => (v * Math.PI) / 180;
@@ -338,26 +277,12 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapB
               const d = 2 * R * Math.asin(Math.sqrt(a));
               return d;
             };
-            const sorted = [...filteredResult].sort((a, b) => {
-              // BBox first — stops within the viewport should rank above others.
-              const ina = withinBbox(a?.lat, a?.lon) ? 0 : 1;
-              const inb = withinBbox(b?.lat, b?.lon) ? 0 : 1;
-              if (ina !== inb) return ina - inb;
-			  // Source next — upstream stops before merged/derived.
-			  const sa = sourcePriority(a);
-			  const sb = sourcePriority(b);
-			  if (sa !== sb) return sa - sb;
-              // Distance first.
-              const da = haversine(a?.lat, a?.lon);
-              const db = haversine(b?.lat, b?.lon);
-              if (da !== db) return da - db;
-              // Tie-breaker: prefer stop over location.
-              const ta = a?.type === 'stop' ? 0 : 1;
-              const tb = b?.type === 'stop' ? 0 : 1;
-              if (ta !== tb) return ta - tb;
-              return 0;
-            });
-            setResults(sorted);
+            let stops = filteredResult.filter((r) => r && r.type === 'stop');
+            const locs = filteredResult.filter((r) => r && r.type === 'location');
+            // Sort both stops and locations by proximity to map center
+            stops.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
+            locs.sort((a, b) => (haversine(a.lat, a.lon) - haversine(b.lat, b.lon)));
+            setResults([...stops, ...locs]);
           } catch (e) {
             setResults(filteredResult);
           }
@@ -374,7 +299,7 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapB
     }, debounceDelay);
 
     return () => clearTimeout(timeoutId);
-  }, [query, debounceDelay, mapCenter, mapBbox]);
+  }, [query, debounceDelay]);
 
   return { results, loading, error };
 };
