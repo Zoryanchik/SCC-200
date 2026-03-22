@@ -2328,7 +2328,7 @@ function HoverWinnerController({
         <div style="display: inline-block; padding: 4px 12px; border-radius: 12px; background-color: ${bgColor}; color: ${statusColor}; font-size: 12px; font-weight: 600; white-space: nowrap;">${statusIcon} ${statusText}</div>
       </div>
     </div>
-    ${marker.operator ? `<div style="font-size: 12px; color: #666; margin-top: 8px; text-align: right; white-space: nowrap;"><strong>Operator:</strong> ${marker.operator}</div>` : ''}
+	    ${marker.operator ? `<div style="font-size: 12px; color: #666; margin-top: 8px; text-align: right; white-space: nowrap;">${marker.operator}</div>` : ''}
 </div>
 `;
                                                                                                 } else {
