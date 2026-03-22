@@ -553,6 +553,47 @@ app = FastAPI(title="Transport API", lifespan=lifespan)
 _routing_active_lock = threading.Lock()
 _routing_active_count = 0
 
+# --- Live bus last-known snapshot --------------------------------------------
+# When routing is active, returning an empty list from /bus/live makes the UI
+# appear broken even if routing results are already visible. Instead, we keep a
+# short-lived in-memory snapshot of the most recent successful /bus/live result
+# per operator+query params and serve it while routing computations run.
+_bus_live_snapshot_lock = threading.Lock()
+_bus_live_snapshot: dict[tuple, dict] = {}
+
+
+def _bus_live_snapshot_get(key: tuple, max_age_s: float) -> Optional[list]:
+    try:
+        now = time.time()
+        with _bus_live_snapshot_lock:
+            entry = _bus_live_snapshot.get(key)
+        if not entry:
+            return None
+        ts = entry.get('ts')
+        data = entry.get('data')
+        if ts is None or data is None:
+            return None
+        if (now - float(ts)) > float(max_age_s):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _bus_live_snapshot_set(key: tuple, data: list, max_entries: int = 2000) -> None:
+    try:
+        with _bus_live_snapshot_lock:
+            _bus_live_snapshot[key] = {'ts': time.time(), 'data': data}
+            # crude bound to avoid unbounded growth
+            if len(_bus_live_snapshot) > max_entries:
+                # drop ~10% oldest by timestamp
+                items = sorted(_bus_live_snapshot.items(), key=lambda kv: kv[1].get('ts', 0.0))
+                drop_n = max(1, int(max_entries * 0.1))
+                for k, _v in items[:drop_n]:
+                    _bus_live_snapshot.pop(k, None)
+    except Exception:
+        pass
+
 
 def is_routing_active() -> bool:
     """Return True when a routing computation is currently running."""
@@ -6327,11 +6368,31 @@ async def bus_live_operator(
     if _live_endpoints_disabled():
         return []
 
+    # If routing is active, serve a recent last-known snapshot instead of an
+    # empty list so the UI remains responsive while routing computations run.
+    # Key on operator + coarse location/tolerance params.
+    try:
+        SNAPSHOT_TTL_S = float(os.environ.get('BUS_LIVE_SNAPSHOT_TTL_S', '30'))
+    except Exception:
+        SNAPSHOT_TTL_S = 30.0
+
     # If we're currently doing a heavy routing build, avoid doing any extra
     # work here (including any lazy router init used for stop-name matching).
-    # Live updates can resume on the next poll tick.
+    # But keep the UI alive by returning a recent snapshot when available.
+    snapshot_key = (
+        str(operator).lower(),
+        # round to reduce key explosion from tiny map movements
+        round(lat or 0.0, 4),
+        round(lon or 0.0, 4),
+        round(float(latTol or 0.0), 4),
+        round(float(lonTol or 0.0), 4),
+        str(keep_vehicle_id) if keep_vehicle_id else None,
+    )
     try:
         if is_routing_active():
+            snap = _bus_live_snapshot_get(snapshot_key, SNAPSHOT_TTL_S)
+            if snap is not None:
+                return snap
             return []
     except Exception:
         pass
@@ -6357,6 +6418,13 @@ async def bus_live_operator(
         )
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    # Store last-known snapshot for use during routing-active windows.
+    try:
+        if isinstance(results, list):
+            _bus_live_snapshot_set(snapshot_key, results)
+    except Exception:
+        pass
 
     out = []
     # Enable provenance/debug fields when BUS_LIVE_PROVENANCE is set in the env.

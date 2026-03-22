@@ -766,13 +766,13 @@ export default function HomePage() {
 
   const { results: fromStopResults, loading: fromLoading } = useStopSearch(
     fromLocation,
-    800,
+    500,
     mapCenter,
     mapBbox,
   );
   const { results: toStopResults, loading: toLoading } = useStopSearch(
     toLocation,
-    800,
+    500,
     mapCenter,
     mapBbox,
   );
@@ -786,6 +786,7 @@ export default function HomePage() {
   // Index of the card the user has clicked / selected (controls map geometry)
   const [selectedRouteIdx, setSelectedRouteIdx] = useState(null);
   const [showSuggested, setShowSuggested] = useState(false);
+  const [suggestedFolded, setSuggestedFolded] = useState(false);
   // Geometry drawn on the map: prefer embedded per-leg geometry (legs[].geometry)
   // from the journey response. Only fall back to prefetched `routeGeometries`
   // (from per-leg /route/leg-geometry calls) when embedded geometry is missing.
@@ -1903,6 +1904,7 @@ export default function HomePage() {
   const handleSearch = async () => {
     if (!fromCoords || !toCoords) return;
     setShowSuggested(true);
+    setSuggestedFolded(false);
     setIsSearching(true);
     setRouteOptions([]);
     try {
@@ -3093,34 +3095,89 @@ export default function HomePage() {
             zIndex: 1051,
           }}
         >
-          <Typography variant="h6" fontWeight={700}>
-            Suggested routes
-          </Typography>
-          <Button
-            size="small"
-            variant="contained"
-            onClick={() => {
-              setShowSuggested(false);
-              setSelectedRouteIdx(null);
-              try {
-                setLabelDetail({ open: false, label: "", content: null });
-                setLabelAnchorEl(null);
-              } catch (e) {}
-            }}
-            aria-label="Close suggested routes"
-            startIcon={<X size={16} />}
-            sx={{
-              textTransform: "none",
-              fontWeight: 700,
-              backgroundColor: "#00BCD4",
-              color: "#ffffff",
-              "&:hover": {
-                backgroundColor: "#00acc1",
-              },
-            }}
-          >
-            Close
-          </Button>
+          {suggestedFolded ? (
+            <Button
+              size="small"
+              variant="contained"
+              onClick={() => setSuggestedFolded(false)}
+              aria-label="Unfold suggested routes"
+              startIcon={<span style={{ fontWeight: 900, lineHeight: 1 }}>&lt;</span>}
+              sx={{
+                textTransform: "none",
+                fontWeight: 700,
+                backgroundColor: "#00BCD4",
+                color: "#ffffff",
+                "&:hover": {
+                  backgroundColor: "#00acc1",
+                },
+              }}
+            >
+              Unfold
+            </Button>
+          ) : (
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: "auto 1fr auto",
+                alignItems: "center",
+                width: "100%",
+                columnGap: 1,
+              }}
+            >
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => {
+                  setShowSuggested(false);
+                  setSuggestedFolded(false);
+                  setSelectedRouteIdx(null);
+                  try {
+                    setLabelDetail({ open: false, label: "", content: null });
+                    setLabelAnchorEl(null);
+                  } catch (e) {}
+                }}
+                aria-label="Close suggested routes"
+                startIcon={<X size={16} />}
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 700,
+                  backgroundColor: "#00BCD4",
+                  color: "#ffffff",
+                  "&:hover": {
+                    backgroundColor: "#00acc1",
+                  },
+                }}
+              >
+                Close
+              </Button>
+
+              <Typography
+                variant="h6"
+                fontWeight={700}
+                sx={{ textAlign: "center", justifySelf: "center" }}
+              >
+                Suggested routes
+              </Typography>
+
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => setSuggestedFolded(true)}
+                aria-label="Fold suggested routes"
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 700,
+                  backgroundColor: "#00BCD4",
+                  color: "#ffffff",
+                  "&:hover": {
+                    backgroundColor: "#00acc1",
+                  },
+                }}
+              >
+                Fold &gt;
+              </Button>
+            </Box>
+          )}
         </Box>
       </Stack>
 
@@ -3131,6 +3188,7 @@ export default function HomePage() {
           overflowY: "auto",
           pr: { xs: 0, sm: 1 },
           mt: 1,
+          display: suggestedFolded ? "none" : "block",
         }}
       >
         {isSearching ? (
@@ -4243,31 +4301,65 @@ export default function HomePage() {
           </Stack>
 
           <Suspense fallback={<MapFallback />}>
-            <MapViewMap
-              filteredMarkers={filteredMarkers}
-              openPopupId={openPopupId}
-              onOpenPopup={setOpenPopupId}
-              onOpenPopupSignature={setOpenPopupSignature}
-              onClosePopup={() => {
-                setOpenPopupId(null);
-                try {
-                  setOpenPopupSignature(null);
-                } catch (e) {}
-              }}
-              userLocation={userLocation}
-              nearestStop={nearestStop}
-              busLoading={busLoading}
-              busRefreshing={busRefreshing}
-              busCountdown={busCountdown}
-              busRefreshInterval={busRefreshInterval}
-              trainLoading={trainLoading}
-              onMapReady={setMapInstance}
-              onMoveEnd={handleMoveEnd}
-              sideContent={suggestedRoutesPanel}
-              showSideOverlay={showSuggested}
-              showRouteLines={true}
-              journeyRoute={journeyRoute}
-            />
+            <Box sx={{ position: "relative" }}>
+              <MapViewMap
+                filteredMarkers={filteredMarkers}
+                openPopupId={openPopupId}
+                onOpenPopup={setOpenPopupId}
+                onOpenPopupSignature={setOpenPopupSignature}
+                onClosePopup={() => {
+                  setOpenPopupId(null);
+                  try {
+                    setOpenPopupSignature(null);
+                  } catch (e) {}
+                }}
+                userLocation={userLocation}
+                nearestStop={nearestStop}
+                busLoading={busLoading}
+                busRefreshing={busRefreshing}
+                busCountdown={busCountdown}
+                busRefreshInterval={busRefreshInterval}
+                trainLoading={trainLoading}
+                onMapReady={setMapInstance}
+                onMoveEnd={handleMoveEnd}
+                sideContent={suggestedRoutesPanel}
+                showSideOverlay={showSuggested && !suggestedFolded}
+                showRouteLines={true}
+                journeyRoute={journeyRoute}
+              />
+
+              {showSuggested && suggestedFolded && (
+                <Button
+                  size="medium"
+                  variant="contained"
+                  onClick={() => setSuggestedFolded(false)}
+                  aria-label="Unfold suggested routes"
+                  startIcon={<span style={{ fontWeight: 900, lineHeight: 1, fontSize: 18 }}>&lt;</span>}
+                  sx={{
+                    position: "absolute",
+                    top: 12,
+                    right: 12,
+                    // Keep this below the top page header (e.g. "Lancashire Transport")
+                    zIndex: 900,
+                    textTransform: "none",
+                    fontWeight: 700,
+                    fontSize: 15,
+                    py: 1,
+                    px: 2,
+                    minHeight: 44,
+                    backgroundColor: "#00BCD4",
+                    color: "#ffffff",
+                    border: "4px solid #FF2400",
+                    "&:hover": {
+                      backgroundColor: "#00acc1",
+                      borderColor: "#CC1D00",
+                    },
+                  }}
+                >
+                  Suggested routes
+                </Button>
+              )}
+            </Box>
           </Suspense>
         </Paper>
 

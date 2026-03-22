@@ -1348,7 +1348,10 @@ const MapController = ({
       }
       if (!map.getPane("routePane")) {
         map.createPane("routePane");
-        map.getPane("routePane").style.zIndex = 400;
+        // Ensure routing result tracks (routePane) draw above the selected/live
+        // vehicle track overlay (vehicleTrackPane=590). Vehicle markers still
+        // stay on top via markerPane=600.
+        map.getPane("routePane").style.zIndex = 595;
       }
       // Vehicle tracks should always be visible above base tiles and other overlays.
       // Use a dedicated pane with a very high z-index so the selected vehicle's
@@ -1756,6 +1759,7 @@ export default function MapViewMap({
   onMoveEnd,
   sideContent,
   showSideOverlay = true,
+  sideOverlayFolded = false,
   /** show or hide currently-active route overlays (from useRouteLine) */
   showRouteLines = true,
   /** Route geometry from journey planner. Array of {id, name, coords, color} */
@@ -5882,10 +5886,13 @@ export default function MapViewMap({
               // Keep the suggested routes under the AppBar header
               zIndex: 1050,
               display: { xs: "none", md: "block" },
-              // Adjusted to be ~1.05x (5% wider) from the previous 0.9× baseline
-              minWidth: { md: 363, lg: 381 },
-              width: { md: 408, lg: 436 },
-              maxWidth: "43vw",
+              // When folded, keep a small tab at the map edge and don't
+              // obscure the route track.
+              minWidth: sideOverlayFolded ? 56 : { md: 363, lg: 381 },
+              width: sideOverlayFolded ? 56 : { md: 408, lg: 436 },
+              maxWidth: sideOverlayFolded ? 56 : "43vw",
+              pointerEvents: sideOverlayFolded ? "auto" : "auto",
+              overflow: "hidden",
             }}
           >
             {sideContent}

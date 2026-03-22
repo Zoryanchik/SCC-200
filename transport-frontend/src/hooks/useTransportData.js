@@ -225,7 +225,7 @@ export const useBusArrivals = (stopCode, refreshInterval = 180000) => {
 /**
  * Hook for searching stops
  */
-export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
+export const useStopSearch = (query, debounceDelay = 500, mapCenter = null, mapBbox = null) => {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -239,8 +239,13 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
     const timeoutId = setTimeout(async () => {
       try {
         setLoading(true);
+        // Pass map center to backend so it can proximity-rank results.
+        const center = (mapCenter && typeof mapCenter === 'object') ? mapCenter : null;
+        const lat = center && typeof center.lat === 'number' ? center.lat : undefined;
+        const lon = center && typeof center.lon === 'number' ? center.lon : undefined;
+        const hasCenter = (typeof lat === 'number' && Number.isFinite(lat)) && (typeof lon === 'number' && Number.isFinite(lon));
         const result = await withRetry(
-          () => searchStops(query),
+          () => (hasCenter ? searchStops(query, { lat, lon }) : searchStops(query)),
           { retries: 1, baseDelay: 400 }
         );
         // Normalize coordinate fields (support lat/lon or latitude/longitude)
@@ -310,8 +315,13 @@ export const useStopSearch = (query, debounceDelay = 500, mapCenter = null) => {
       }
     }, debounceDelay);
 
-    return () => clearTimeout(timeoutId);
-  }, [query, debounceDelay]);
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  // NOTE: mapBbox is accepted for call-site compatibility; we don't
+  // currently use it in the backend request, but including it here ensures
+  // changes to bbox restart the debounce and don't leave stale requests.
+  }, [query, debounceDelay, mapCenter, mapBbox]);
 
   return { results, loading, error };
 };

@@ -330,6 +330,7 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
                 weight: 6,
                 opacity: 0.9,
                 dashArray,
+                pane: "routePane",
               }}
             >
               <HoverTooltip sticky delayMs={500}>
@@ -363,6 +364,7 @@ function SingleRouteLine({ routeData, onRouteClick, dashed = false }) {
                 weight: 4,
                 opacity: 0.8,
                 dashArray, // dash secondary variants (and optionally primary)
+                pane: "routePane",
               }}
             >
               <HoverTooltip sticky delayMs={500}>
