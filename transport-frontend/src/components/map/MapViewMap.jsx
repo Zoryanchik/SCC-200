@@ -2119,8 +2119,8 @@ function HoverWinnerController({
 				{!busLoading && (
 					<Box sx={{
 						position: 'absolute',
-						top: 12,
-						right: 12,
+						bottom: 12,
+						left: 12,
 						zIndex: 1001,
 						display: 'flex',
 						flexDirection: 'column',
