@@ -1,3 +1,4 @@
+import React from "react";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
@@ -260,10 +261,24 @@ if ((Array.isArray(busLocations) && busLocations.length > 0) ||
 
 
     // Use stable ids when possible (backend-provided vehicle id/ref) so UI
-    // selections (popups / selectedVehicleTrack) remain associated with the
-    // same vehicle across background refreshes. Fall back to a generated id
-    // using any available unique fields or coordinates.
-    const stableId = bus.id || bus.vehicleId || bus.vehicle_id || bus.vehicle_ref || bus.vehicleRef || bus.v || bus.vehicle || `bus-${bus.vehicleId || bus.id || idx}-${lat}-${lon}`;
+    // selections and any per-marker animation caches remain associated with the
+    // same physical vehicle across background refreshes.
+    //
+    // Important: do NOT fall back to coordinates for identity: if a vehicle id
+    // is missing, coord-based ids cause identity to change every update, which
+    // can look like buses “swap” positions/animation state.
+    const stableId = (
+      bus.vehicle_id ??
+      bus.vehicleId ??
+      bus.vehicle_ref ??
+      bus.vehicleRef ??
+      bus.id ??
+      bus.v ??
+      bus.vehicle ??
+      // Last-resort: derive a deterministic id from relatively stable fields.
+      // (Still imperfect, but better than lat/lon.)
+      `bus-idx-${idx}-${String(bus.line ?? bus.routeNumber ?? bus.route ?? 'unknown')}-${String(bus.destination ?? 'unknown')}`
+    );
     newMarkers.push({
       id: stableId,
       position: [lat, lon],
@@ -356,7 +371,8 @@ const isBusMapped = (m) => {
   // can identify a vehicle or dated journey but do not guarantee a
   // deterministic mapping to the internal timetable journey without
   // server-side resolution.
-  const top = m.logged_journey_id || m.journey_id || m.route_id || null;
+  // Keep this in sync with MapViewMap.isBusMappedLocal (marker coloring).
+  const top = m.logged_journey_id || m.journey_id || m.route_id || m.route_int || null;
   if (top) return true;
   // If provenance fields are present (either top-level or inside meta),
   // only consider a bus mapped when the server explicitly reports it as
@@ -365,8 +381,8 @@ const isBusMapped = (m) => {
   const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
   if (mr != null) return String(mr).toLowerCase() === 'matched';
   const keys = Object.keys(meta).map(k => String(k).toLowerCase());
-  // Accept meta.logged_journey_id or meta.journey_id or meta.route_id only
-  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+  // Accept meta.logged_journey_id / meta.journey_id / meta.route_id / meta.route_int
+  const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid', 'route_int', 'routeint'];
   for (const w of want) {
     if (keys.includes(w)) return true;
     if (meta[w] || meta[w.replace(/_/g, '')]) return true;
@@ -433,8 +449,9 @@ const filteredMarkers = useMemo(() => (
       const mapped = isBusMapped(m);
       if (!mapped && !filters.showOffline) return false;
     } catch (e) {
-      // If mapping check fails, treat as offline.
-      if (!filters.showOffline) return false;
+      // If mapping check fails, err on the side of showing the bus.
+      // Off-lines should never hide a potentially-colored bus.
+      return true;
     }
     return true;
   })

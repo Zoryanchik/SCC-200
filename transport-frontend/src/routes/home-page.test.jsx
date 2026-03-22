@@ -453,6 +453,42 @@ describe("Bus route number display on markers", () => {
       expect(routeNumbers.length).toBe(0);
     });
   });
+
+  test("Off-lines toggle only filters grey/offline buses (never hides matched buses)", async () => {
+    // Two buses:
+    // - one mapped/matched (should always be visible)
+    // - one unmatched/grey (should be hidden by default)
+    const mockBuses = [
+      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool", match_reason: "matched" },
+      // Unmatched bus: MapViewMap renders it grey when it's NOT mapped.
+      // Use `meta.match_reason: 'unmatched'` to avoid accidentally matching.
+      { lat: 54.051, lon: -2.801, line: "X1", destination: "Somewhere", meta: { match_reason: "unmatched" } },
+    ];
+    api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
+    api.fetchRailDepartures.mockResolvedValue([]);
+
+    await renderPage();
+
+    // Default: Off-lines is OFF -> hide the grey/unmatched one.
+    await waitFor(() => {
+      expect(screen.getAllByTestId("marker-bus").length).toBe(1);
+      const names = screen.getAllByTestId("marker-name").map((el) => el.textContent || "");
+      expect(names.some((t) => t.includes("Blackpool"))).toBe(true);
+      expect(names.some((t) => t.includes("Somewhere"))).toBe(false);
+    });
+
+    // Turn Off-lines ON -> show both.
+    await act(async () => {
+      screen.getByText("Off-lines").click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("marker-bus").length).toBe(2);
+      const names = screen.getAllByTestId("marker-name").map((el) => el.textContent || "");
+      expect(names.some((t) => t.includes("Blackpool"))).toBe(true);
+      expect(names.some((t) => t.includes("Somewhere"))).toBe(true);
+    });
+  });
 });
 
 describe("Bus delay handling on markers", () => {

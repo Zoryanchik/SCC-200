@@ -1112,7 +1112,7 @@ export default function HomePage() {
       const newMarkers = [];
       let id = 1;
       if (Array.isArray(busLocations)) {
-        busLocations.forEach((bus) => {
+        busLocations.forEach((bus, idx) => {
           const lat = bus.latitude ?? bus.lat;
           const lon = bus.longitude ?? bus.lon;
           // copy backend-provided fields into meta but exclude coords
@@ -1161,8 +1161,23 @@ export default function HomePage() {
             return "On time";
           })();
 
+          // Stable identity for a bus marker.
+          // Avoid using a sequential counter: it changes every refresh and can
+          // make markers appear to “swap” animation state between vehicles.
+          // Also avoid using coordinates for identity.
+          const stableBusId = (
+            bus.vehicle_id ??
+            bus.vehicleId ??
+            bus.vehicle_ref ??
+            bus.vehicleRef ??
+            bus.id ??
+            bus.v ??
+            bus.vehicle ??
+            `bus-idx-${idx}-${String(bus.line ?? bus.routeNumber ?? bus.route ?? 'unknown')}-${String(bus.destination ?? 'unknown')}`
+          );
+
           newMarkers.push({
-            id: id++,
+            id: stableBusId,
             position: [lat, lon],
             name: displayName,
             type: "bus",
@@ -1226,32 +1241,37 @@ export default function HomePage() {
       if (m.type !== 'bus') return false;
       if (!filters.showBuses) return false;
 
-      // Grey/unmatched buses are considered “offline” in the UI.
-      // Home page should match Map view behaviour.
+      // Off-lines should ONLY control the *grey* buses.
+      // "Grey" on the map is determined by the same mapping heuristic used by
+      // `MapViewMap` (see `isBusMappedLocal` in `components/map/MapViewMap.jsx`).
+      // If we use a different predicate here, we can end up hiding buses that
+      // are actually being rendered as colored.
       try {
-        // Same mapping heuristic as Map view: the backend must have provided
-        // an authoritative journey/route identifier, or explicitly marked the
-        // vehicle as matched.
+        const meta = m && m.meta ? m.meta : {};
+
+        // Keep in sync with MapViewMap.isBusMappedLocal
         if (m.mock === true) return true;
         if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
-        const meta = m && m.meta ? m.meta : {};
-        const top = m.logged_journey_id || m.journey_id || m.route_id || null;
-        let mapped = !!top;
-        if (!mapped) {
+        const top = m.logged_journey_id || m.journey_id || m.route_id || m.route_int || null;
+        let isMapped = !!top;
+        if (!isMapped) {
           const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
-          if (mr != null) mapped = String(mr).toLowerCase() === 'matched';
+          if (mr != null) isMapped = String(mr).toLowerCase() === 'matched';
         }
-        if (!mapped) {
+        if (!isMapped) {
           const keys = Object.keys(meta).map((k) => String(k).toLowerCase());
-          const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+          const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid', 'route_int', 'routeint'];
           for (const w of want) {
-            if (keys.includes(w)) { mapped = true; break; }
-            if (meta[w] || meta[w.replace(/_/g, '')]) { mapped = true; break; }
+            if (keys.includes(w)) { isMapped = true; break; }
+            if (meta[w] || meta[w.replace(/_/g, '')]) { isMapped = true; break; }
           }
         }
-        if (!mapped && !filters.showOffline) return false;
+
+        const isGreyOffline = !isMapped;
+        if (isGreyOffline && !filters.showOffline) return false;
       } catch (e) {
-        if (!filters.showOffline) return false;
+        // On any unexpected shape, err on the side of showing the bus.
+        return true;
       }
       return true;
     }),
