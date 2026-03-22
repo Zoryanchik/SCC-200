@@ -36,19 +36,10 @@ class _DummyWalking:
         return self.stop_coords.get(stop_int)
 
     def reachable_stops(self, latlon):
-        # Return the nearest stop (simple) so matcher doesn't early-abort.
+        # Return all stops — tests are about time/offtrack gates, and we want
+        # to avoid early aborts due to reachability heuristics.
         try:
-            lat, lon = latlon
-            best = None
-            best_d = 1e18
-            for sid, (slat, slon) in self.stop_coords.items():
-                d = (lat - slat) ** 2 + (lon - slon) ** 2
-                if d < best_d:
-                    best_d = d
-                    best = sid
-            if best is None:
-                return []
-            return [(int(best), 0)]
+            return [(int(sid), 0) for sid in self.stop_coords.keys()]
         except Exception:
             return [(0, 0)]
 
@@ -160,6 +151,8 @@ def test_offtrack_allowed_when_between_two_far_stops(monkeypatch):
     # But allow between-stops exception for segments >= 800m.
     monkeypatch.setenv("MATCH_BETWEEN_STOPS_MIN_GAP_M", "800")
     monkeypatch.setenv("MATCH_BETWEEN_STOPS_MAX_PERP_M", "400")
+    # Disable the new past-start guard for this geometry-only test.
+    monkeypatch.setenv("MATCH_REJECT_PAST_START_S", "200000")
 
     # Vehicle near the middle of the segment, but shifted ~150-200m east
     # (longitude) so projection distance is likely > 50m.
@@ -177,3 +170,67 @@ def test_offtrack_allowed_when_between_two_far_stops(monkeypatch):
     assert res is not None
     delay, route_int = res
     assert delay is None or isinstance(delay, int)
+
+
+def test_reject_when_origin_start_more_than_4h_in_past(monkeypatch):
+    _install_fixed_time(monkeypatch)
+
+    # now = 10:00:00 (36000). Use *yesterday* encoding (negative seconds)
+    # to satisfy the matcher's day-guard while still being >4h in the past.
+    #
+    # start -7200 => yesterday 22:00 (12h ago) -> should be rejected by 4h gate
+    # start -3600 => yesterday 23:00 (11h ago) -> should be rejected by 4h gate
+    merged_stale = _DummyMerged(
+        journey_metadata=[
+            {"line_name": "10", "operator_national_code": "SCCU"},
+            {"line_name": "10", "operator_national_code": "SCCU"},
+        ],
+        journey_times=[
+            [(0, -7200, -7200), (1, -6600, -6600)],
+            [(0, -3600, -3600), (1, -3000, -3000)],
+        ],
+        journey_to_route=[0, 1],
+        journey_stop_index=[{0: 0, 1: 1}, {0: 0, 1: 1}],
+        legacy_full_route_polyline=[
+            [(54.0, -2.8), (54.01, -2.8)],
+            [(54.0, -2.8), (54.01, -2.8)],
+        ],
+        route_stops=[[0, 1], [0, 1]],
+        stop_metadata=["A", "B"],
+    )
+
+
+    walking = _DummyWalking(
+        stop_coords={
+            0: (54.0000, -2.8000),
+            1: (54.0100, -2.8000),
+        }
+    )
+
+    def _fake_get_router_for_date_stale(_today, start_time=None, apply_delay=False):
+        return merged_stale, SimpleNamespace(), walking
+
+    monkeypatch.setattr(api_module, "get_router_for_date", _fake_get_router_for_date_stale)
+    monkeypatch.setattr(
+        api_module,
+        "_LIVE_MATCH_JOURNEYS_BY_LINE",
+        {id(merged_stale): {"10": [0, 1]}},
+        raising=False,
+    )
+
+    # Make spatial gates permissive.
+    monkeypatch.setenv("MATCH_MAX_TRACK_DIST_M", "5000")
+    monkeypatch.setenv("MATCH_SCORE_MAX_TRACK_DIST_M", "5000")
+
+    # Use default 4h (14400s). Vehicle location on the route.
+    res = api_module._compute_delay_from_timetable(
+        "10",
+        dest="",
+        lat_v=54.0050,
+        lon_v=-2.8000,
+        return_jid=True,
+        operator_ref="SCCU",
+    )
+
+    # With only stale journeys available, the matcher should reject all.
+    assert res is None or res == (None, None)

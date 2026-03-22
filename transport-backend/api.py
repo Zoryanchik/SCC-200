@@ -5055,6 +5055,23 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         except Exception:
             continue
 
+        # Time-window guard: if a candidate's scheduled origin start is too far
+        # in the past, reject it early. This complements the existing
+        # "too far in the future" check to prevent stale previous journeys from
+        # being matched.
+        #
+        # Default: 4 hours.
+        try:
+            MATCH_REJECT_PAST_START_S = int(os.environ.get('MATCH_REJECT_PAST_START_S', str(4 * 3600)))
+        except Exception:
+            MATCH_REJECT_PAST_START_S = 4 * 3600
+        try:
+            if start_dep is not None and MATCH_REJECT_PAST_START_S is not None:
+                if int(start_dep) < int(now_seconds) - int(MATCH_REJECT_PAST_START_S):
+                    continue
+        except Exception:
+            pass
+
         # Day guard: allow journeys from yesterday and today.
         # The merged timetable includes journeys with day-offsets
         # (previous day encoded as negative seconds). Restrict to
@@ -6007,6 +6024,26 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 best_start_dep,
             )
         return _log_gate_summary((None, None) if return_jid else None)
+
+    # Symmetric guard: if the chosen journey's scheduled start time is too far
+    # in the past (default 4h), reject it. This prevents stale previous
+    # journeys from being matched when a line name is ambiguous.
+    try:
+        MATCH_REJECT_PAST_START_S = int(os.environ.get('MATCH_REJECT_PAST_START_S', str(4 * 3600)))
+    except Exception:
+        MATCH_REJECT_PAST_START_S = 4 * 3600
+    try:
+        if best_start_dep is not None and now_seconds - int(best_start_dep) > int(MATCH_REJECT_PAST_START_S):
+            if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
+                logger.info(
+                    "matcher: rejecting matched bus for journey %s because its start_dep %d is > %ds in the past",
+                    best_jid,
+                    best_start_dep,
+                    MATCH_REJECT_PAST_START_S,
+                )
+            return _log_gate_summary((None, None) if return_jid else None)
+    except Exception:
+        pass
 
     # Clamp negative delays to zero at the source of computation so
     # callers don't have to special-case early/negative values.
