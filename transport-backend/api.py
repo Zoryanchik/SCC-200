@@ -5366,9 +5366,35 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # candidate. Make this configurable via env var so operators can tune
     # for noisy GPS or coarse route geometry.
     try:
-        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '2000'))
+        # Reduce default to be stricter by default; we now also have a
+        # "between far stops" exception below to avoid false off-track
+        # rejections on long, sparse stop-to-stop legs.
+        MATCH_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_MAX_TRACK_DIST_M', '1200'))
     except Exception:
-        MATCH_MAX_TRACK_DIST_M = 2000
+        MATCH_MAX_TRACK_DIST_M = 1200
+
+    # Scoring-stage only off-track threshold (metres). This can be tuned
+    # independently of the earlier route-proximity prefilter.
+    try:
+        MATCH_SCORE_MAX_TRACK_DIST_M = int(os.environ.get('MATCH_SCORE_MAX_TRACK_DIST_M', str(MATCH_MAX_TRACK_DIST_M)))
+    except Exception:
+        MATCH_SCORE_MAX_TRACK_DIST_M = MATCH_MAX_TRACK_DIST_M
+
+    # If the vehicle is far from the track, we may still want to accept it
+    # when it lies between two consecutive stops that are far apart.
+    #
+    # Intuition: on routes with sparse stops, the polyline built from stop
+    # coordinates may under-represent the real road geometry, and a bus can
+    # legitimately be "off" that simplified track while travelling between
+    # two distant stops.
+    try:
+        MATCH_BETWEEN_STOPS_MIN_GAP_M = int(os.environ.get('MATCH_BETWEEN_STOPS_MIN_GAP_M', '800'))
+    except Exception:
+        MATCH_BETWEEN_STOPS_MIN_GAP_M = 800
+    try:
+        MATCH_BETWEEN_STOPS_MAX_PERP_M = int(os.environ.get('MATCH_BETWEEN_STOPS_MAX_PERP_M', '400'))
+    except Exception:
+        MATCH_BETWEEN_STOPS_MAX_PERP_M = 400
 
     # Configurable stricter gating thresholds (seconds/metres). These
     # default to conservative values but can be tuned via env vars.
@@ -5459,15 +5485,59 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         # merely share a short line name.
         try:
             offtrack = False
-            if MATCH_MAX_TRACK_DIST_M is not None and dist_m > MATCH_MAX_TRACK_DIST_M:
+            if MATCH_SCORE_MAX_TRACK_DIST_M is not None and dist_m > MATCH_SCORE_MAX_TRACK_DIST_M:
                 offtrack = True
+
+            # Exception: if we're "off-track" but plausibly between two
+            # far-apart consecutive scheduled stops, do not reject.
+            if offtrack and not allow_offtrack:
+                try:
+                    # Need a segment index for the projected edge.
+                    if proj_seg_idx is not None and isinstance(proj_seg_idx, int):
+                        i = int(proj_seg_idx)
+                        if 0 <= i < len(track) - 1:
+                            a = track[i]
+                            b = track[i + 1]
+                            gap_m = _hav(a[0], a[1], b[0], b[1])
+
+                            # Perpendicular distance from point to segment AB
+                            # (in local metres using the same cosine-lat scaling
+                            # as the projection routine).
+                            ax, ay = a
+                            bx, by = b
+                            cos_lat = math.cos(math.radians((ax + bx) / 2))
+                            abx = (by - ay) * cos_lat * 111320.0
+                            aby = (bx - ax) * 111320.0
+                            apx = (lon_v - ay) * cos_lat * 111320.0
+                            apy = (lat_v - ax) * 111320.0
+                            ab2 = abx * abx + aby * aby
+                            if ab2 > 1e-9:
+                                t = (apx * abx + apy * aby) / ab2
+                                t = max(0.0, min(1.0, t))
+                                cx = ax + t * (bx - ax)
+                                cy = ay + t * (by - ay)
+                                perp_m = _hav(lat_v, lon_v, cx, cy)
+                            else:
+                                perp_m = dist_m
+
+                            if gap_m >= MATCH_BETWEEN_STOPS_MIN_GAP_M and perp_m <= MATCH_BETWEEN_STOPS_MAX_PERP_M:
+                                offtrack = False
+                                if return_debug:
+                                    try:
+                                        _dbg['offtrack_between_stops_ok'] = True
+                                        _dbg['between_stops_gap_m'] = float(gap_m)
+                                        _dbg['between_stops_perp_m'] = float(perp_m)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
 
             if offtrack and not allow_offtrack:
                 if str(os.environ.get('BUS_LIVE_PROVENANCE') or '').lower() in ('1', 'true', 'yes'):
-                    logger.info("matcher: candidate j_id=%s rejected for being off-track (dist_m=%.1f > dist_thresh=%s)", j_id, dist_m, MATCH_MAX_TRACK_DIST_M)
+                    logger.info("matcher: candidate j_id=%s rejected for being off-track (dist_m=%.1f > dist_thresh=%s)", j_id, dist_m, MATCH_SCORE_MAX_TRACK_DIST_M)
                 if DEBUG_MATCH:
                     _gate_hit('offtrack')
-                _dbg_gate('offtrack_dist', dist_m=float(dist_m), dist_thresh=float(MATCH_MAX_TRACK_DIST_M or 0), journey_id=j_id, route_int=r_int)
+                _dbg_gate('offtrack_dist', dist_m=float(dist_m), dist_thresh=float(MATCH_SCORE_MAX_TRACK_DIST_M or 0), journey_id=j_id, route_int=r_int)
                 continue
         except Exception:
             # On failure of the on-track check, fall back to permissive
