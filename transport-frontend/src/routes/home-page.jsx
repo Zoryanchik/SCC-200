@@ -594,7 +594,7 @@ export default function HomePage() {
   const { favorites, saveFavorite, removeFavorite } = useFavoriteRoutes();
   // ---- Map + live-bus state (needed for stop search proximity) ----
   const [markers, setMarkers] = useState(MOCK_MARKERS);
-  const [filters, setFilters] = useState({ showBuses: true, showTrains: true });
+  const [filters, setFilters] = useState({ showBuses: true, showTrains: true, showOffline: false });
   const [openPopupId, setOpenPopupId] = useState(null);
   const [openPopupSignature, setOpenPopupSignature] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
@@ -1221,8 +1221,41 @@ export default function HomePage() {
   }, [busLocations, trainDepartures]);
 
   const filteredMarkers = useMemo(
-    () => markers.filter((m) => (m.type === "bus" && filters.showBuses) || (m.type === "train" && filters.showTrains)),
-    [markers, filters.showBuses, filters.showTrains]
+    () => markers.filter((m) => {
+      if (m.type === 'train') return !!filters.showTrains;
+      if (m.type !== 'bus') return false;
+      if (!filters.showBuses) return false;
+
+      // Grey/unmatched buses are considered “offline” in the UI.
+      // Home page should match Map view behaviour.
+      try {
+        // Same mapping heuristic as Map view: the backend must have provided
+        // an authoritative journey/route identifier, or explicitly marked the
+        // vehicle as matched.
+        if (m.mock === true) return true;
+        if (m.id && String(m.id).toLowerCase().startsWith('mock')) return true;
+        const meta = m && m.meta ? m.meta : {};
+        const top = m.logged_journey_id || m.journey_id || m.route_id || null;
+        let mapped = !!top;
+        if (!mapped) {
+          const mr = (m.match_reason ?? (meta && meta.match_reason) ?? null);
+          if (mr != null) mapped = String(mr).toLowerCase() === 'matched';
+        }
+        if (!mapped) {
+          const keys = Object.keys(meta).map((k) => String(k).toLowerCase());
+          const want = ['logged_journey_id', 'loggedjourneyid', 'journey_id', 'journeyid', 'route_id', 'routeid'];
+          for (const w of want) {
+            if (keys.includes(w)) { mapped = true; break; }
+            if (meta[w] || meta[w.replace(/_/g, '')]) { mapped = true; break; }
+          }
+        }
+        if (!mapped && !filters.showOffline) return false;
+      } catch (e) {
+        if (!filters.showOffline) return false;
+      }
+      return true;
+    }),
+    [markers, filters.showBuses, filters.showTrains, filters.showOffline]
   );
 
   const nearestStop = useMemo(() => {
@@ -2769,6 +2802,28 @@ export default function HomePage() {
             }}
           >
             <Train size={18} /> Trains {filteredMarkers.filter((m) => m.type === "train").length}
+          </Box>
+
+          <Box
+            onClick={() => setFilters((f) => ({ ...f, showOffline: !f.showOffline }))}
+            sx={{
+              padding: "8px 16px",
+              border: "2px solid " + (filters.showOffline ? "#9CA3AF" : "#E2E8F0"),
+              borderRadius: "12px",
+              minHeight: 48,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: 'center',
+              width: { xs: '100%', sm: 'auto' },
+              gap: 1,
+              cursor: "pointer",
+              backgroundColor: filters.showOffline ? "#9CA3AF" : "transparent",
+              color: filters.showOffline ? "white" : "inherit",
+              fontWeight: 600,
+              transition: "all 0.3s ease",
+            }}
+          >
+            Off-lines
           </Box>
           <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />
           {!userLocation && (

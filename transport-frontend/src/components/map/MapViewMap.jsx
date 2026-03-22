@@ -2197,14 +2197,17 @@ function HoverWinnerController({
 				{!busLoading && !trainLoading && filteredMarkers.length === 0 && (
 					<Box sx={{
 						position: 'absolute',
-						inset: 0,
-						zIndex: 1000,
-						backgroundColor: 'rgba(255,255,255,0.7)',
-						display: 'flex',
-						alignItems: 'center',
-						justifyContent: 'center'
+						top: 10,
+						left: 64,
+						zIndex: 1100,
+						pointerEvents: 'none',
+						backgroundColor: 'rgba(75, 85, 99, 0.6)',
+						color: 'white',
+						padding: '6px 10px',
+						borderRadius: '10px',
+						boxShadow: '0 2px 10px rgba(0,0,0,0.15)'
 					}}>
-						<Typography variant="body2" fontWeight={600} color="text.secondary">
+						<Typography variant="body2" fontWeight={600} sx={{ color: 'inherit' }}>
 							No vehicles found with current filters.
 						</Typography>
 					</Box>

@@ -94,10 +94,11 @@ export default function MapViewPage() {
 const debugShowAllBuses = (typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('SHOW_ALL_BUSES_DEBUG') === '1');
 
 const [markers, setMarkers] = useState(MOCK_MARKERS); // Start with mock data for instant display
-const [filters, setFilters] = useState({
-showBuses: true,
-showTrains: true
-});
+  const [filters, setFilters] = useState({
+    showBuses: true,
+    showTrains: true,
+    showOffline: false,
+  });
 const [openPopupId, setOpenPopupId] = useState(null);
 // Track a compact signature for the currently-open popup so we can detect
 // whether a subsequent data refresh has caused the same id to be reused for
@@ -422,8 +423,22 @@ const isOriginDepartureTooFar = (m, maxFutureSec = 20 * 60) => {
 // according to the user's toggles without applying stricter server-mapping
 // gating here. This keeps the Map view consistent with the Home dashboard.
 const filteredMarkers = useMemo(() => (
-  markers.filter(m => (m.type === 'bus' && filters.showBuses) || (m.type === 'train' && filters.showTrains))
-), [markers, filters.showBuses, filters.showTrains]);
+  markers.filter(m => {
+    if (m.type === 'train') return !!filters.showTrains;
+    if (m.type !== 'bus') return false;
+    if (!filters.showBuses) return false;
+    // Grey/unmatched buses are considered "offline" in the UI.
+    // When Off-line is toggled off, hide these grey buses.
+    try {
+      const mapped = isBusMapped(m);
+      if (!mapped && !filters.showOffline) return false;
+    } catch (e) {
+      // If mapping check fails, treat as offline.
+      if (!filters.showOffline) return false;
+    }
+    return true;
+  })
+), [markers, filters.showBuses, filters.showTrains, filters.showOffline]);
 
 // Debugging: when markers change, log counts so we can see why buses are filtered
 useEffect(() => {
@@ -714,6 +729,36 @@ transform: 'translateY(0px)'
 >
 <Train size={20} />
 Trains {filteredMarkers.filter(m => m.type === 'train').length}
+</Box>
+
+<Box
+onClick={() => setFilters(f => ({ ...f, showOffline: !f.showOffline }))}
+sx={{
+padding: '12px 20px',
+border: `2px solid ${filters.showOffline ? '#9CA3AF' : '#E2E8F0'}`,
+borderRadius: '10px',
+display: 'flex',
+alignItems: 'center',
+justifyContent: 'center',
+width: { xs: '100%', sm: 'auto' },
+gap: 1,
+cursor: 'pointer',
+backgroundColor: filters.showOffline ? '#9CA3AF' : 'transparent',
+color: filters.showOffline ? 'white' : 'inherit',
+fontWeight: 600,
+transition: 'all 0.3s ease',
+'&:hover': {
+boxShadow: '0 4px 12px rgba(156,163,175,0.25)',
+transform: 'translateY(-2px)',
+borderColor: '#9CA3AF',
+backgroundColor: filters.showOffline ? '#6B7280' : 'rgba(156,163,175,0.08)'
+},
+'&:active': {
+transform: 'translateY(0px)'
+}
+}}
+>
+Off-lines
 </Box>
 
 <Box sx={{ flex: 1, display: { xs: 'none', sm: 'block' } }} />

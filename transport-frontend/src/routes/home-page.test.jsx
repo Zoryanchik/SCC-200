@@ -134,6 +134,9 @@ describe("HomePage (combined search + map)", () => {
 
     expect(screen.getByTestId("filter-buses")).toBeTruthy();
     expect(screen.getByTestId("filter-trains")).toBeTruthy();
+		// Map-view filter controls (including Off-line) are not always rendered in this
+		// HomePage test setup (MapViewMap is stubbed). So we only assert the legacy
+		// filter chip wiring here.
   });
 
   test("renders departure cards section", async () => {
@@ -378,8 +381,8 @@ describe("Bus route number display on markers", () => {
 
   test("bus markers carry routeNumber equal to bus.line from API response", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster" },
-      { lat: 54.06, lon: -2.81, line: "44", destination: "Morecambe" },
+      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster", match_reason: "matched" },
+      { lat: 54.06, lon: -2.81, line: "44", destination: "Morecambe", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -396,7 +399,7 @@ describe("Bus route number display on markers", () => {
 
   test("bus markers display name combining line and destination", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool" },
+      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -415,7 +418,7 @@ describe("Bus route number display on markers", () => {
 
   test("bus marker routeNumber falls back to bus.routeNumber if line is absent", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, routeNumber: "X2", destination: "Preston" },
+      { lat: 54.05, lon: -2.80, routeNumber: "X2", destination: "Preston", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -430,7 +433,12 @@ describe("Bus route number display on markers", () => {
 
   test("bus markers without a line/routeNumber show no route number element", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, destination: "Unknown" },
+      // Home page Off-lines defaults OFF and uses the same mapping/offline
+      // heuristic as Map view: a bus is "mapped" when match_reason is
+      // explicitly 'matched' or journey/route identifiers exist.
+      // This fixture has no route number, but it's not meant to represent a
+      // grey/offline bus, so we mark it as matched.
+      { lat: 54.05, lon: -2.80, destination: "Unknown", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -454,7 +462,7 @@ describe("Bus delay handling on markers", () => {
 
   test("bus with no delay shows 'On time' status", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster", delay_minutes: null, status: "On time" },
+      { lat: 54.05, lon: -2.80, line: "1A", destination: "Lancaster", delay_minutes: null, status: "On time", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -469,7 +477,7 @@ describe("Bus delay handling on markers", () => {
 
   test("bus with delay_minutes >= 2 shows delayed status", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "2", destination: "Morecambe", delay_minutes: 5.0, status: "Delayed 5 min" },
+      { lat: 54.05, lon: -2.80, line: "2", destination: "Morecambe", delay_minutes: 5.0, status: "Delayed 5 min", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -478,13 +486,13 @@ describe("Bus delay handling on markers", () => {
 
     await waitFor(() => {
       const statuses = screen.getAllByTestId("marker-status");
-      console.log("statuses:", statuses.map(s => s.textContent)); expect(statuses.some((el) => el.textContent === "Delayed 5 min")).toBe(true);
+      expect(statuses.some((el) => el.textContent === "Delayed 5 min")).toBe(true);
     });
   });
 
   test("bus with delay_minutes propagated as numeric to marker", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool", delay_minutes: 10.5, status: "Delayed 11 min" },
+      { lat: 54.05, lon: -2.80, line: "100", destination: "Blackpool", delay_minutes: 10.5, status: "Delayed 11 min", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -499,7 +507,7 @@ describe("Bus delay handling on markers", () => {
 
   test("bus with early arrival shows early status", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "X2", destination: "Preston", delay_minutes: -2.0, status: "Early 2 min" },
+      { lat: 54.05, lon: -2.80, line: "X2", destination: "Preston", delay_minutes: -2.0, status: "Early 2 min", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -514,7 +522,7 @@ describe("Bus delay handling on markers", () => {
 
   test("bus with no delay info shows no delay-minutes element", async () => {
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "44", destination: "Carnforth", delay_minutes: null, status: "On time" },
+      { lat: 54.05, lon: -2.80, line: "44", destination: "Carnforth", delay_minutes: null, status: "On time", match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
@@ -529,7 +537,7 @@ describe("Bus delay handling on markers", () => {
   test("status derived from delay_minutes when status field absent", async () => {
     // Backend might not always return status; frontend computes it from delay_minutes
     const mockBuses = [
-      { lat: 54.05, lon: -2.80, line: "7", destination: "Fylde", delay_minutes: 7 },
+      { lat: 54.05, lon: -2.80, line: "7", destination: "Fylde", delay_minutes: 7, match_reason: "matched" },
     ];
     api.fetchLiveBusLocations.mockResolvedValue(mockBuses);
     api.fetchRailDepartures.mockResolvedValue([]);
