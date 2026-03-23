@@ -311,6 +311,19 @@ function journeyToRouteCard(journey) {
   };
 }
 
+function dayOfWeekShortUpper(year, month1, day) {
+  // month1 is 1-12
+  try {
+    const dt = new Date(year, (month1 ?? 1) - 1, day ?? 1);
+    // Use a stable locale (English) so the UI shows MON/TUE/etc.
+    return dt
+      .toLocaleDateString("en-GB", { weekday: "short" })
+      .toUpperCase();
+  } catch (e) {
+    return "";
+  }
+}
+
 // Initial mock markers removed to prevent UI confusion
 const MOCK_MARKERS = [
   {
@@ -3811,7 +3824,7 @@ export default function HomePage() {
                   display: "flex",
                   gap: 1,
                   alignItems: "stretch",
-                  flexWrap: "wrap",
+                  flexWrap: { xs: "wrap", sm: "nowrap" },
                   // keep Hour aligned with the From field start; on desktop the main grid
                   // has a 48px icon column, so we shift the time row left by that amount
                   // slight extra nudge left so the Now button sits more centered
@@ -3881,6 +3894,24 @@ export default function HomePage() {
                     </MenuItem>
                   ))}
                 </TextField>
+
+                <Box
+                  aria-hidden
+                  sx={{
+                    height: 40,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    px: 0.25,
+                    fontWeight: 700,
+                    lineHeight: 1,
+                    userSelect: "none",
+                    opacity: 0.9,
+                    // Hide the separator on very small screens to avoid awkward wrapping.
+                    display: { xs: "none", sm: "flex" },
+                  }}
+                >
+                  :
+                </Box>
                 <TextField
                   label="Minute"
                   select
@@ -3920,11 +3951,29 @@ export default function HomePage() {
                     );
                   }}
                   SelectProps={{
+                    renderValue: () => {
+                      const dow = dayOfWeekShortUpper(
+                        dateSelYear,
+                        dateSelMonth,
+                        dateSelDay,
+                      );
+                      // Render weekday and numeric day as separate spans so we can
+                      // add a small left margin to the numeric day element.
+                      return dow ? (
+                        <span>
+                          <span>{dow}</span>
+                          <span style={{ marginLeft: 8 }}>{dateSelDay}</span>
+                        </span>
+                      ) : (
+                        <span>{String(dateSelDay)}</span>
+                      );
+                    },
                     SelectDisplayProps: { sx: { textAlign: "center" } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
+                    // keep this narrower than Month/Year, but aligned on the same row
+                    width: { xs: "calc(50% - 4px)", sm: 150 },
                     "& .MuiSelect-select": { textAlign: "center" },
                   }}
                 >
@@ -3933,7 +3982,10 @@ export default function HomePage() {
                     (_, i) => i + 1,
                   ).map((d) => (
                     <MenuItem key={d} value={d} sx={{ textAlign: "center" }}>
-                      {d}
+                      <span>
+                        <span>{dayOfWeekShortUpper(dateSelYear, dateSelMonth, d)}</span>
+                        <span style={{ marginLeft: 8 }}>{d}</span>
+                      </span>
                     </MenuItem>
                   ))}
                 </TextField>
@@ -3966,7 +4018,7 @@ export default function HomePage() {
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "100%", sm: 180 },
+                    width: { xs: "calc(50% - 4px)", sm: 180 },
                     "& .MuiSelect-select": { textAlign: "center" },
                   }}
                 >
