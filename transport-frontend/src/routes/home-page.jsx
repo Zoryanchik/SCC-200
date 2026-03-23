@@ -3812,9 +3812,49 @@ export default function HomePage() {
                   gap: 1,
                   alignItems: "stretch",
                   flexWrap: "wrap",
+                  // keep Hour aligned with the From field start; on desktop the main grid
+                  // has a 48px icon column, so we shift the time row left by that amount
+                  // slight extra nudge left so the Now button sits more centered
+                  // relative to the locate icon, without moving the locate icon itself
+                  ml: { md: "-56px" },
                   mt: { xs: 1, md: 0 },
                 }}
               >
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => {
+                    const now = new Date();
+                    const h = now.getHours();
+                    const mm = now.getMinutes();
+                    const y = now.getFullYear();
+                    const m = now.getMonth() + 1;
+                    const d = now.getDate();
+
+                    setTimeSelHour(h);
+                    setTimeSelMinute(mm);
+                    setDepartureClock(`${pad2(h)}:${pad2(mm)}`);
+
+                    setDateSelYear(y);
+                    setDateSelMonth(m);
+                    setDateSelDay(d);
+                    setDepartureDate(`${String(y)}-${pad2(m)}-${pad2(d)}`);
+                  }}
+                  sx={{
+                    height: 40,
+                    minWidth: 44,
+                    px: 1,
+                    flexShrink: 0,
+                    color: "#fff",
+                    borderColor: "#fff",
+                    "&:hover": {
+                      borderColor: "#fff",
+                      backgroundColor: "rgba(255,255,255,0.08)",
+                    },
+                  }}
+                >
+                  Now
+                </Button>
                 <TextField
                   label="Hour"
                   select
