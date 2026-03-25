@@ -13,15 +13,12 @@ import sys
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
-from urllib.request import Request as UrllibRequest, urlopen
 from xml.etree import ElementTree
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 from bus_live import BusLive, get_bus_live
 from main import build_for_date
@@ -30,11 +27,25 @@ from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
 from modes import name_to_int, all_transit_modes
+from api_models import (
+    AddressRouteRequest,
+    JourneyPlanRequest,
+    RouteRequest,
+    RouteResponse,
+    StopLocation,
+)
+from api_search_utils import geocode_locations, looks_like_street as _looks_like_street
+from api_geometry_utils import (
+    fetch_journey_times_external as _fetch_journey_times_external,
+    fetch_logged_journey_from_db as _fetch_logged_journey_from_db,
+    query_osrm_for_coords as _query_osrm_for_coords,
+    query_osrm_for_coords_profile as _query_osrm_for_coords_profile,
+    sample_coords_for_osrm as _sample_coords_for_osrm,
+    subsegment_from_tracks as _subsegment_from_tracks,
+)
+from rail_parsers import parse_nrcc_messages, parse_train_services
 import copy
-import threading
 import time
-import psycopg
-from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
 
@@ -43,51 +54,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Add minimal globals used by startup logic
 _base_cache = None
 _base_init_attempted = False
-
-# Nominatim rate-limiting: ensure we do at most 1 request per second
-NOMINATIM_LOCK = threading.Lock()
-_NOMINATIM_LAST_CALL = 0.0
-_NOMINATIM_MIN_INTERVAL = 1.0
-
-
-# Routing request/response models
-class RouteRequest(BaseModel):
-    start_lat: float
-    start_lon: float
-    end_lat: float
-    end_lon: float
-    date: str
-    time: str  # HH:MM:SS
-    max_transfers: int = 3
-    mode: str = "both"  # "bus", "train", or "both"
-
-class RouteResponse(BaseModel):
-    success: bool
-    route: Optional[dict] = None
-    error: Optional[str] = None
-
-
-class AddressRouteRequest(BaseModel):
-    start: str
-    end: str
-    date: str
-    time: str  # HH:MM:SS
-    max_transfers: int = 3
-    mode: str = "both"
-
-
-# Journey plan request/response models
-class StopLocation(BaseModel):
-    lat: float
-    lon: float
-
-class JourneyPlanRequest(BaseModel):
-    fromStop: StopLocation
-    toStop: StopLocation
-    departureTime: str     # HH:MM:SS
-    date: str              # YYYY-MM-DD
-    maxTransfers: int = 5
-    mode: str = "both"     # bus | train | both
 
 # — Lifespan (startup / shutdown) ——————————————————————————
 
@@ -297,130 +263,6 @@ async def status():
 
 # -- Stop search ---------------------------------------------------------------
 
-# Known Lancashire place names, areas, and common POIs used for fuzzy
-# correction when the user makes a typo.  Nominatim has no built-in
-# fuzzy matching, so we correct the query first using difflib.
-_LANCASHIRE_PLACES: List[str] = [
-    # Major towns / cities
-    "Lancaster", "Preston", "Blackpool", "Blackburn", "Burnley",
-    "Accrington", "Morecambe", "Fleetwood", "Lytham", "Clitheroe",
-    "Chorley", "Leyland", "Ormskirk", "Skelmersdale", "Colne",
-    "Nelson", "Darwen", "Rawtenstall", "Bacup", "Haslingden",
-    "Carnforth", "Garstang", "Poulton-le-Fylde", "Thornton-Cleveleys",
-    "Cleveleys", "Kirkham", "Longridge", "Bamber Bridge", "Fulwood",
-    "Ingleton", "Heysham", "Silverdale", "Bolton-le-Sands",
-    "Galgate", "Cockerham", "Knott End", "Whalley", "Ribchester",
-    "Oswaldtwistle", "Great Harwood", "Rishton", "Clayton-le-Moors",
-    "Padiham", "Brierfield", "Barnoldswick", "Earby",
-    "Penwortham", "Lostock Hall", "Walton-le-Dale", "Longton",
-    "Freckleton", "Warton", "Wesham",
-    # University / institutions
-    "Lancaster University", "UCLan", "Edge Hill University",
-    # Transport hubs
-    "Lancaster Bus Station", "Preston Bus Station",
-    "Blackpool North", "Blackpool South", "Blackpool Pleasure Beach",
-    "Lancaster Railway Station", "Preston Railway Station",
-    "Morecambe Railway Station", "Carnforth Railway Station",
-    # Landmarks / attractions
-    "Blackpool Tower", "Blackpool Zoo", "Williamson Park",
-    "Beacon Fell", "Pendle Hill", "Forest of Bowland",
-    "Ribble Valley", "Lune Valley", "Trough of Bowland",
-    "Ashton Memorial", "Lancaster Castle", "Lancaster Priory",
-    "Morecambe Bay", "Happy Mount Park", "Stanley Park",
-    # Common POI / brand names people search for
-    "Sainsbury", "Sainsburys", "Sainsbury's",
-    "Tesco", "Asda", "Aldi", "Lidl", "Morrisons", "Morrison",
-    "Nando's", "Nandos", "McDonald's", "McDonalds",
-    "Costa", "Starbucks", "Greggs",
-    "Hospital", "Royal Lancaster Infirmary", "Royal Preston Hospital",
-    "Blackpool Victoria Hospital",
-    "Arndale", "Fishergate", "St George's Shopping Centre",
-    "Houndshill", "Market", "Library", "Cinema", "Park", "Beach",
-]
-
-# Lower-cased version for matching
-_LANCASHIRE_PLACES_LOWER: List[str] = [p.lower() for p in _LANCASHIRE_PLACES]
-
-
-def _fuzzy_correct_query(query: str, threshold: float = 0.6) -> str:
-    """Return the best fuzzy match from the known-places list.
-
-    If the query (or any individual word ≥ 4 chars) closely matches a
-    known place/POI, return the corrected version. Otherwise return the
-    original query unchanged.
-    """
-    from difflib import SequenceMatcher, get_close_matches
-
-    q = query.strip()
-    q_lower = q.lower()
-
-    # 1) Try matching the full query against known places
-    matches = get_close_matches(q_lower, _LANCASHIRE_PLACES_LOWER, n=1, cutoff=threshold)
-    if matches:
-        # Return the original-case version from the canonical list
-        idx = _LANCASHIRE_PLACES_LOWER.index(matches[0])
-        return _LANCASHIRE_PLACES[idx]
-
-    # 2) Try matching individual words (for multi-word queries like
-    #    "Lancster University" → correct "Lancster" → "Lancaster")
-    words = q.split()
-    corrected_words = []
-    changed = False
-    for word in words:
-        if len(word) < 4:
-            corrected_words.append(word)
-            continue
-        word_matches = get_close_matches(
-            word.lower(), _LANCASHIRE_PLACES_LOWER, n=1, cutoff=threshold
-        )
-        if word_matches:
-            idx = _LANCASHIRE_PLACES_LOWER.index(word_matches[0])
-            corrected_words.append(_LANCASHIRE_PLACES[idx])
-            changed = True
-        else:
-            corrected_words.append(word)
-    if changed:
-        return " ".join(corrected_words)
-
-    return q
-
-
-def _looks_like_street(s: str) -> bool:
-    """Heuristic: return True if the suffix looks like a street/address.
-
-    Checks for house numbers, common street-type tokens (street, rd,
-    lane, avenue, drive, etc.) or short numeric/postcode-like tokens.
-    Used to decide whether the text after a comma should be treated as
-    a town/city filter (False) or as part of a street address (True).
-    """
-    if not s:
-        return False
-    s = s.strip().lower()
-    import re
-    # If it contains a number (house number, postcode fragment), treat as street/address
-    if re.search(r"\d", s):
-        return True
-
-    # Common street-type tokens
-    street_tokens = {
-        'street', 'st', 'road', 'rd', 'lane', 'ln', 'avenue', 'ave', 'drive', 'dr',
-        'way', 'court', 'ct', 'crescent', 'close', 'terrace', 'gardens', 'place',
-        'square', 'hill', 'park', 'boulevard', 'blvd', 'grove', 'row', 'alley', 'isle',
-        'mount', 'mountain', 'walk', 'end'
-    }
-    words = re.split(r"[\s,]+", s)
-    for w in words:
-        if w in street_tokens:
-            return True
-        if w.rstrip('.') in street_tokens:
-            return True
-
-    # Very short tails (1-3 chars) are more likely postcode fragments or abbreviations — treat as street-like
-    if 0 < len(s) <= 3:
-        return True
-
-    return False
-
 
 # --- Geometry assembly endpoint ----------------------------------------
 @app.get("/route/geometry")
@@ -619,92 +461,6 @@ def route_geometry(logged_journey_id: str):
 
 
 # --- Geometry assembly endpoint helpers -------------------------------
-def _get_db_connection():
-    from main import BUS_DB_PATH
-    return psycopg.connect(BUS_DB_PATH)
-
-
-def _fetch_logged_journey_from_db(ljid: str):
-    """Return the JSON object stored in bus_journeys for id=ljid, or None."""
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT journey FROM bus_journeys WHERE id = %s", (ljid,))
-        row = cur.fetchone()
-        conn.close()
-        if not row:
-            return None
-        return row[0]
-    except Exception:
-        return None
-
-
-def _fetch_journey_times_external(journey_id: str):
-    """Return ordered list of (atco_code, arrival_time) for an external journey_id from bus_journey_times."""
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT atco_code, arrival_time FROM bus_journey_times WHERE journey_id = %s ORDER BY arrival_time", (journey_id,))
-        rows = cur.fetchall()
-        conn.close()
-        return [(r[0], r[1]) for r in rows]
-    except Exception:
-        return []
-
-
-def _query_osrm_for_coords(osrm_base: str, coords_lonlat: list):
-    """Call OSRM route with a list of 'lon,lat' strings; return list of [lat,lon] or None on failure."""
-    if not coords_lonlat:
-        return None
-    coords_str = ";".join(coords_lonlat)
-    url = osrm_base.rstrip('/') + f"/route/v1/driving/{coords_str}?overview=full&geometries=geojson"
-    try:
-        req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
-        with urlopen(req, timeout=10) as resp:
-            data = json.load(resp)
-        if data.get('code') != 'Ok':
-            return None
-        routes = data.get('routes') or []
-        if not routes:
-            return None
-        geom = routes[0].get('geometry')
-        if not geom:
-            return None
-        # geometry is GeoJSON LineString coords [[lon,lat],...]
-        coords = [[c[1], c[0]] for c in geom.get('coordinates', [])]
-        return coords
-    except URLError:
-        return None
-    except Exception:
-        return None
-
-
-def _query_osrm_for_coords_profile(osrm_base: str, coords_lonlat: list, profile: str = 'driving'):
-    """Call OSRM route with a list of 'lon,lat' strings and a profile; return list of [lat,lon] or None on failure."""
-    if not coords_lonlat:
-        return None
-    coords_str = ";".join(coords_lonlat)
-    url = osrm_base.rstrip('/') + f"/route/v1/{profile}/{coords_str}?overview=full&geometries=geojson"
-    try:
-        req = UrllibRequest(url, headers={"User-Agent": "transport-backend"})
-        with urlopen(req, timeout=10) as resp:
-            data = json.load(resp)
-        if data.get('code') != 'Ok':
-            return None
-        routes = data.get('routes') or []
-        if not routes:
-            return None
-        geom = routes[0].get('geometry')
-        if not geom:
-            return None
-        coords = [[c[1], c[0]] for c in geom.get('coordinates', [])]
-        return coords
-    except URLError:
-        return None
-    except Exception:
-        return None
-
-
 @app.get("/route/walking")
 def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float):
     """Return walking geometry between two points by proxying OSRM foot profile.
@@ -741,8 +497,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
     profile = 'foot' if mode == 'walking' else 'driving'
     try:
         coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
-        coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
-                                                 profile=profile)
+        coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat, profile=profile)
         if coords and len(coords) >= 2:
             return {"coords": coords, "source": "osrm"}
         # Fall back to a straight line between the two points
@@ -751,217 +506,6 @@ def route_leg_geometry(from_lat: float, from_lon: float,
     except Exception:
         return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
                 "source": "linear"}
-
-
-def _fetch_route_tracks(route_id: str):
-    """Return the route track from bus_route_tracks as list of (lat, lon) or [] on failure."""
-    try:
-        conn = _get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT lat, lon FROM bus_route_tracks WHERE route_id = %s ORDER BY seq", (route_id,))
-        rows = cur.fetchall()
-        conn.close()
-        return [[r[0], r[1]] for r in rows]
-    except Exception:
-        return []
-
-
-def _haversine(lat1, lon1, lat2, lon2):
-    import math
-    r = 6371000.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-
-def _subsegment_from_tracks(route_id: str, stop_atcos: list, walking_coords: dict):
-    """Return a subsegment of route_tracks for route_id that spans the stops in stop_atcos.
-
-    Strategy:
-      - Load full route track points (lat, lon).
-      - For each stop ATCO, find nearest track index using walking_coords mapping.
-      - Take min..max index range (inclusive) and return that slice.
-    Returns list of [lat, lon] or [] if not possible.
-    """
-    if not stop_atcos:
-        return []
-    tracks = _fetch_route_tracks(route_id)
-    if not tracks:
-        return []
-    # Build list of indices for each stop
-    indices = []
-    for atco in stop_atcos:
-        coord = None
-        if walking_coords:
-            coord = walking_coords.get(atco)
-        if not coord:
-            # can't map this stop
-            continue
-        lat_s, lon_s = coord[0], coord[1]
-        # find nearest track point
-        best_i = None
-        best_d = None
-        for i, (tlat, tlon) in enumerate(tracks):
-            d = _haversine(lat_s, lon_s, tlat, tlon)
-            if best_d is None or d < best_d:
-                best_d = d
-                best_i = i
-        if best_i is not None:
-            indices.append(best_i)
-
-    if not indices:
-        return []
-    start, end = min(indices), max(indices)
-    if start <= end:
-        return tracks[start:end+1]
-    else:
-        return list(reversed(tracks[end:start+1]))
-
-
-def _sample_coords_for_osrm(points, max_samples=20):
-    """Return a list of 'lon,lat' strings sampled evenly from points."""
-    if not points:
-        return []
-    n = len(points)
-    if n <= max_samples:
-        return [f"{p[1]},{p[0]}" for p in points]
-    step = max(1, n // max_samples)
-    sampled = [points[i] for i in range(0, n, step)]
-    # ensure last point included
-    if sampled[-1] != points[-1]:
-        sampled.append(points[-1])
-    return [f"{p[1]},{p[0]}" for p in sampled]
-
-
-
-def geocode_locations(query: str, limit: int = 5, county: str = "Lancashire") -> List[Dict[str, Any]]:
-    """Query Nominatim and return candidates filtered to Lancashire.
-
-    Results are restricted to ``countrycodes=gb`` and filtered so that
-    only items whose address contains the county string are returned.
-    The county is also appended to the Nominatim query to bias results
-    toward the correct region (helps for brand / POI searches).
-
-    A fuzzy-correction step maps common typos (e.g. "Lancster",
-    "Blackpol") to known Lancashire place names before sending the
-    query to Nominatim.
-    """
-    if not query or limit <= 0:
-        return []
-
-    # Handle comma-suffix heuristics: if the user typed "Morrisons,Morecambe"
-    # we should treat the text after the comma as a town/city filter and
-    # bias Nominatim toward that place. If it looks like a street/address
-    # (contains numbers or a street token) we keep the whole query intact.
-    main_q = query
-    town_hint = None
-    if "," in query:
-        first, tail = query.split(",", 1)
-        first = first.strip()
-        tail = tail.strip()
-        if tail and not _looks_like_street(tail):
-            main_q = first
-            town_hint = tail
-
-    # Fuzzy-correct the main query and the town hint separately against
-    # the known Lancashire places / POIs so typos like 'Morrisions'
-    # or 'Lancster' are corrected before hitting Nominatim.
-    corrected = _fuzzy_correct_query(main_q)
-    if town_hint:
-        town_corrected = _fuzzy_correct_query(town_hint)
-    else:
-        town_corrected = None
-
-    # When a county is provided, always append it to the query so
-    # Nominatim returns geographically relevant results. This works
-    # well for place names ("Lancaster Lancashire") and brands alike
-    # ("Sainsbury Lancashire"). We ask Nominatim for extra results and
-    # then do a lenient post-filter to trim any outliers.
-    # Build the effective Nominatim query. Prefer: "<corrected main> <town> <county>"
-    effective_query = corrected
-    if town_corrected:
-        effective_query = f"{corrected} {town_corrected}"
-    if county:
-        # Only append if the user hasn't already included the county or town
-        lower_eff = effective_query.lower()
-        if county.lower() not in lower_eff and (not town_corrected or county.lower() not in town_corrected.lower()):
-            effective_query = f"{effective_query} {county}"
-
-    nominatim_limit = limit * 3 if county else limit  # over-fetch for filtering
-    params = {
-        "format": "json",
-        "q": effective_query,
-        "limit": str(nominatim_limit),
-        "addressdetails": "1",
-    }
-
-    if county:
-        # Prefer UK results when a UK county is requested
-        params["countrycodes"] = "gb"
-
-    url = f"https://nominatim.openstreetmap.org/search?{urlencode(params)}"
-    # Use requests (which bundles certifi) so TLS verification works in
-    # virtualenvs and containers. Do not disable verification.
-    import requests
-    headers = {"User-Agent": "transport-backend/1.0"}
-
-    # Rate-limit access to Nominatim to 1 request per second. We acquire
-    # a module-level lock and sleep as necessary before making the call.
-    # The HTTP request is performed while holding the lock so concurrent
-    # callers are serialized and spacing between requests is preserved.
-    global _NOMINATIM_LAST_CALL
-    with NOMINATIM_LOCK:
-        now = time.monotonic()
-        elapsed = now - _NOMINATIM_LAST_CALL
-        wait = _NOMINATIM_MIN_INTERVAL - elapsed
-        if wait > 0:
-            time.sleep(wait)
-        # mark last call timestamp immediately before the request
-        _NOMINATIM_LAST_CALL = time.monotonic()
-        resp = requests.get(url, headers=headers, timeout=5)
-    resp.raise_for_status()
-    payload = resp.json()
-
-    results = []
-    for idx, item in enumerate(payload):
-        try:
-            lat = float(item.get("lat"))
-            lon = float(item.get("lon"))
-        except (TypeError, ValueError):
-            continue
-
-        # Lenient county post-filter: check county, state_district,
-        # display_name and all address values for the county string.
-        # This catches unitary authorities (Blackpool, Lancaster)
-        # whose Nominatim `county` field differs from "Lancashire"
-        # but whose `state_district` is "Lancashire".
-        if county:
-            addr = item.get("address", {}) or {}
-            display = (item.get("display_name") or "").lower()
-            addr_combined = " ".join(
-                str(v) for v in addr.values() if v
-            ).lower()
-            county_lc = county.lower()
-            if county_lc not in addr_combined and county_lc not in display:
-                continue
-
-        name = item.get("display_name") or item.get("name") or query
-        results.append({
-            "id": f"loc:{len(results)}",
-            "name": name,
-            "lat": lat,
-            "lon": lon,
-            "atco_code": None,
-            "type": "location",
-        })
-        if len(results) >= limit:
-            break
-    return results
-
-
 @app.get("/search/stops")
 async def search_stops(
     q: str = "",
@@ -3188,7 +2732,6 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 
 def _sanitize_route(route_result):
@@ -4280,46 +3823,6 @@ async def route_weather(lat: float | None = None, lon: float | None = None):
         "wind": wind,
         "main": main,
     }
-
-# Parse the lt8:trainServices element into its services
-def parse_train_services(root: ElementTree):
-    services = []
-    for service in root:
-        # lt8:service
-        service_data = {}
-        for child in service:
-            _, _, tag = child.tag.rpartition("}")
-            match tag:
-                case "std": service_data["scheduledTime"] = seconds_since_midnight(child.text + ":00")
-                case "etd":
-                    # Return the correct status for this service
-                    if child.text == "On time":
-                        service_data["status"] = "On time"
-                        service_data["departureTime"] = seconds_to_time(service_data["scheduledTime"])
-                    elif child.text == "Delayed":
-                        service_data["status"] = f"Delayed"
-                        service_data["departureTime"] = "Unknown Delay"
-                    elif child.text == "Cancelled":
-                        service_data["status"] = f"Cancelled"
-                        service_data["departureTime"] = "No Departure"
-                    else:
-                        etd = seconds_since_midnight(child.text + ":00")
-                        delay_min = (etd - service_data["scheduledTime"]) // 60
-                        service_data["delayMins"] = delay_min
-                        service_data["status"] = f"Delayed {delay_min} mins"
-                        service_data["departureTime"] = seconds_to_time(etd)
-
-                case "destination":
-                    service_data["destination"] = child[0][0].text # lt4:location>lt4:locationName
-    
-        services.append(service_data)
-
-    return services
-
-# Parse NRCC messages to display as alerts
-def parse_nrcc_messages(root: ElementTree):
-    # For now, every message is a warning
-    return [{ "message": msg.text, "severity": "warning" } for msg in root]
 
 @app.get("/rail/departures/{station_code}")
 async def route_rail_departures(station_code):
