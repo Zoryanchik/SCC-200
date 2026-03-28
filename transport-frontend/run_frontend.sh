@@ -205,7 +205,10 @@ $RUNTIME run -d \
   /bin/sh -c "$START_SCRIPT"
 
 # Wait until Vite is actually serving before printing the URL.
-READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-90}"
+# Increase readiness timeout to 10 minutes by default to allow npm installs
+# on slower machines or first-run dependency fetches. Can be overridden by
+# setting READY_TIMEOUT_SECS in the environment.
+READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-600}"
 echo "Waiting for frontend to become ready (timeout: ${READY_TIMEOUT_SECS}s)..."
 
 start_ts=$(date +%s)

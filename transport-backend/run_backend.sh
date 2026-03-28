@@ -58,8 +58,15 @@ export NETWORK_NAME
 
 "$HERE/start_container.sh"
 
-echo "Waiting for /health to respond (timeout ~300s)..."
-for i in {1..100}; do
+# Wait for backend health. Default timeout is 10 minutes (600s) to allow
+# slower container startups; can be overridden with READY_TIMEOUT_SECS env var.
+READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-600}"
+echo "Waiting for /health to respond (timeout ~${READY_TIMEOUT_SECS}s)..."
+# Poll interval (seconds)
+INTERVAL=3
+# Number of attempts
+ATTEMPTS=$(( READY_TIMEOUT_SECS / INTERVAL ))
+for i in $(seq 1 $ATTEMPTS); do
   if curl -sS http://localhost:5050/health >/dev/null 2>&1; then
     echo
     echo "Backend is ready at http://localhost:5050"
