@@ -54,6 +54,8 @@ class _DummyMerged:
     route_stops: list[list[int]]
     stop_metadata: list[str]
 
+    route_tracks = [[]]
+
     def get_atco_code(self, stop_int: int):
         return None
 
@@ -109,7 +111,6 @@ def test_offtrack_rejected_when_far_from_track(monkeypatch):
         lat_v=54.0100,
         lon_v=-2.8100,
         return_jid=True,
-        operator_ref="SCCU",
     )
     assert res is None or res == (None, None)
 
@@ -162,7 +163,6 @@ def test_offtrack_allowed_when_between_two_far_stops(monkeypatch):
         lat_v=54.0050,
         lon_v=-2.7975,
         return_jid=True,
-        operator_ref="SCCU",
     )
 
     # Should match (i.e., not be treated as off-track). In this unit-level stub
@@ -229,7 +229,6 @@ def test_reject_when_origin_start_more_than_4h_in_past(monkeypatch):
         lat_v=54.0050,
         lon_v=-2.8000,
         return_jid=True,
-        operator_ref="SCCU",
     )
 
     # With only stale journeys available, the matcher should reject all.
