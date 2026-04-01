@@ -209,6 +209,7 @@ async def get_pricing(
     """
     import math
 
+
     dlat = math.radians(toLat - fromLat)
     dlon = math.radians(toLon - fromLon)
     a = (math.sin(dlat / 2) ** 2
@@ -479,33 +480,562 @@ def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float
         return {"error": "failed"}
 
 
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+
+def _subsegment_from_coords(tracks: list, stop_atcos: list, walking_coords: dict):
+    """Slice a subsegment from already-resolved track coords.
+
+    This is the same algorithm as _subsegment_from_tracks, but avoids
+    any route_id resolution so callers can use dense route_int lookups.
+    """
+    if not stop_atcos or not tracks:
+        return []
+    # Map each stop -> list of candidate indices on track.
+    # We keep multiple candidates to handle loop routes where the track passes
+    # near the same stop multiple times.
+    stop_to_candidates: dict[str, list[tuple[float, int]]] = {}
+    for atco in stop_atcos:
+        coord = None
+        if walking_coords:
+            coord = walking_coords.get(atco)
+        if not coord:
+            # can't map this stop
+            continue
+        # Accept either (lat, lon) tuples or [lat, lon] lists.
+        try:
+            lat_s, lon_s = float(coord[0]), float(coord[1])
+        except Exception:
+            continue
+        # collect k nearest track points (k small for speed)
+        dists: list[tuple[float, int]] = []
+        for i, (tlat, tlon) in enumerate(tracks):
+            d = _haversine(lat_s, lon_s, tlat, tlon)
+            dists.append((d, i))
+        dists.sort(key=lambda x: x[0])
+
+        # Keep a few nearest candidates, but also drop extremely-far matches
+        # (prevents random snapping when stop coords are wrong).
+        # Threshold is generous; most good snaps are < 100m.
+        max_keep = 8
+        max_dist_m = 500.0
+        keep = [(d, i) for (d, i) in dists[:max_keep] if d <= max_dist_m]
+        if keep:
+            stop_to_candidates[atco] = keep
+
+    if not stop_to_candidates:
+        return []
+
+    # If only one stop resolved, we can't slice meaningfully.
+    if len(stop_to_candidates) < 2:
+        return []
+
+    # Prefer using the first and last stop in the requested order (common case).
+    resolved = [s for s in stop_atcos if s in stop_to_candidates]
+    if len(resolved) < 2:
+        return []
+
+    a = resolved[0]
+    b = resolved[-1]
+
+    # Choose the best (ia, ib) using multiple candidates.
+    # Score = distance_to_a + distance_to_b + lambda * slice_len.
+    # This biases toward (1) close snaps and (2) shorter plausible segments.
+    #
+    # IMPORTANT: When slicing between two stops *in a known order*, we must
+    # avoid picking a pair of indices that implies travelling backwards along
+    # the polyline (ib < ia). On looped / self-crossing tracks, the same stop
+    # can have multiple equally-close snap candidates. If we allow backwards
+    # index pairs, we can produce short-circuit "teleport" geometry.
+    best = None  # (score, ia, ib, da, db)
+    best_rev = None  # best reverse pair (fallback only)
+    lam = 0.15  # penalty per point of segment length
+    for da, ia in stop_to_candidates.get(a, []):
+        for db, ib in stop_to_candidates.get(b, []):
+            seg_len = abs(ib - ia) + 1
+            score = float(da) + float(db) + lam * float(seg_len)
+            if ib >= ia:
+                if best is None or score < best[0]:
+                    best = (score, ia, ib, da, db)
+            else:
+                if best_rev is None or score < best_rev[0]:
+                    best_rev = (score, ia, ib, da, db)
+
+    if best is None and best_rev is not None:
+        # No forward slice was possible with the available candidates. This can
+        # happen when the polyline direction is opposite our stop order.
+        # Keep the previous behaviour as a fallback.
+        best = best_rev
+
+    if best is None:
+        return []
+
+    # Optional trace to help diagnose "teleporting" geometry where a stop snaps
+    # to the wrong part of a looped polyline.
+    if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+        try:
+            score, ia, ib, da, db = best
+            print('[subsegment] pick', {
+                'a': a,
+                'b': b,
+                'a_coord': (walking_coords.get(a) if walking_coords else None),
+                'b_coord': (walking_coords.get(b) if walking_coords else None),
+                'best_score': float(score),
+                'ia': int(ia),
+                'ib': int(ib),
+                'da_m': float(da),
+                'db_m': float(db),
+                'seg_len_pts': int(abs(ib - ia) + 1),
+                'a_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(a, [])],
+                'b_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(b, [])],
+            })
+        except Exception:
+            pass
+
+    _, ia, ib, _, _ = best
+    if ia <= ib:
+        return tracks[ia:ib + 1]
+    return list(reversed(tracks[ib:ia + 1]))
+
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+
+def _subsegment_from_coords(tracks: list, stop_atcos: list, walking_coords: dict):
+    """Slice a subsegment from already-resolved track coords.
+
+    This is the same algorithm as _subsegment_from_tracks, but avoids
+    any route_id resolution so callers can use dense route_int lookups.
+    """
+    if not stop_atcos or not tracks:
+        return []
+    # Map each stop -> list of candidate indices on track.
+    # We keep multiple candidates to handle loop routes where the track passes
+    # near the same stop multiple times.
+    stop_to_candidates: dict[str, list[tuple[float, int]]] = {}
+    for atco in stop_atcos:
+        coord = None
+        if walking_coords:
+            coord = walking_coords.get(atco)
+        if not coord:
+            # can't map this stop
+            continue
+        # Accept either (lat, lon) tuples or [lat, lon] lists.
+        try:
+            lat_s, lon_s = float(coord[0]), float(coord[1])
+        except Exception:
+            continue
+        # collect k nearest track points (k small for speed)
+        dists: list[tuple[float, int]] = []
+        for i, (tlat, tlon) in enumerate(tracks):
+            d = _haversine(lat_s, lon_s, tlat, tlon)
+            dists.append((d, i))
+        dists.sort(key=lambda x: x[0])
+
+        # Keep a few nearest candidates, but also drop extremely-far matches
+        # (prevents random snapping when stop coords are wrong).
+        # Threshold is generous; most good snaps are < 100m.
+        max_keep = 8
+        max_dist_m = 500.0
+        keep = [(d, i) for (d, i) in dists[:max_keep] if d <= max_dist_m]
+        if keep:
+            stop_to_candidates[atco] = keep
+
+    if not stop_to_candidates:
+        return []
+
+    # If only one stop resolved, we can't slice meaningfully.
+    if len(stop_to_candidates) < 2:
+        return []
+
+    # Prefer using the first and last stop in the requested order (common case).
+    resolved = [s for s in stop_atcos if s in stop_to_candidates]
+    if len(resolved) < 2:
+        return []
+
+    a = resolved[0]
+    b = resolved[-1]
+
+    # Choose the best (ia, ib) using multiple candidates.
+    # Score = distance_to_a + distance_to_b + lambda * slice_len.
+    # This biases toward (1) close snaps and (2) shorter plausible segments.
+    #
+    # IMPORTANT: When slicing between two stops *in a known order*, we must
+    # avoid picking a pair of indices that implies travelling backwards along
+    # the polyline (ib < ia). On looped / self-crossing tracks, the same stop
+    # can have multiple equally-close snap candidates. If we allow backwards
+    # index pairs, we can produce short-circuit "teleport" geometry.
+    best = None  # (score, ia, ib, da, db)
+    best_rev = None  # best reverse pair (fallback only)
+    lam = 0.15  # penalty per point of segment length
+    for da, ia in stop_to_candidates.get(a, []):
+        for db, ib in stop_to_candidates.get(b, []):
+            seg_len = abs(ib - ia) + 1
+            score = float(da) + float(db) + lam * float(seg_len)
+            if ib >= ia:
+                if best is None or score < best[0]:
+                    best = (score, ia, ib, da, db)
+            else:
+                if best_rev is None or score < best_rev[0]:
+                    best_rev = (score, ia, ib, da, db)
+
+    if best is None and best_rev is not None:
+        # No forward slice was possible with the available candidates. This can
+        # happen when the polyline direction is opposite our stop order.
+        # Keep the previous behaviour as a fallback.
+        best = best_rev
+
+    if best is None:
+        return []
+
+    # Optional trace to help diagnose "teleporting" geometry where a stop snaps
+    # to the wrong part of a looped polyline.
+    if os.environ.get('ROUTE_GEOM_TRACE') == '1':
+        try:
+            score, ia, ib, da, db = best
+            print('[subsegment] pick', {
+                'a': a,
+                'b': b,
+                'a_coord': (walking_coords.get(a) if walking_coords else None),
+                'b_coord': (walking_coords.get(b) if walking_coords else None),
+                'best_score': float(score),
+                'ia': int(ia),
+                'ib': int(ib),
+                'da_m': float(da),
+                'db_m': float(db),
+                'seg_len_pts': int(abs(ib - ia) + 1),
+                'a_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(a, [])],
+                'b_candidates': [(float(d), int(i)) for (d, i) in stop_to_candidates.get(b, [])],
+            })
+        except Exception:
+            pass
+
+    _, ia, ib, _, _ = best
+    if ia <= ib:
+        return tracks[ia:ib + 1]
+    return list(reversed(tracks[ib:ia + 1]))
+
+
+
 @app.get("/route/leg-geometry")
 def route_leg_geometry(from_lat: float, from_lon: float,
                        to_lat: float, to_lon: float,
-                       mode: str = "driving"):
-    """Return road-following OSRM geometry for a single journey leg.
+                       mode: str = "driving",
+                       route_id: str | None = None,
+                       route_int: int | None = None,
+                       from_stop_id: str | None = None,
+                       to_stop_id: str | None = None,
+                       stop_ids: str | None = None,
+                       date: str | None = None,
+                       departure_time: str | None = None):
+    """Return road-following OSRM geometry or timetable geometry for a single journey leg."""
+    if date:
+        try:
+            get_router_for_date(date, departure_time)
+        except Exception:
+            pass
 
-    Query params:
-      from_lat, from_lon – start point
-      to_lat, to_lon     – end point
-      mode               – 'walking' | 'bus' | 'train' | 'driving' (default)
-
-    Walking legs use the OSRM *foot* profile; all others use *driving*.
-    Response: {"coords": [[lat, lon], ...], "source": "osrm"} or {"error": "..."}
-    """
-    osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
-    profile = 'foot' if mode == 'walking' else 'driving'
+    # Prefer stored timetable tracks when we have enough context.
+    #
+    # IMPORTANT: The frontend often calls this endpoint with mode=driving
+    # even for bus legs (it uses the driving OSRM profile for road snapping).
+    # When a canonical route_id is provided, we still want to prefer the
+    # timetable's own fragment geometry.
+    trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
     try:
-        coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
-        coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat, profile=profile)
-        if coords and len(coords) >= 2:
-            return {"coords": coords, "source": "osrm"}
-        # Fall back to a straight line between the two points
-        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
-                "source": "linear"}
+        if trace:
+            print('[route_leg_geometry] start', {
+                'mode': mode,
+                'route_id': route_id,
+                'from_stop_id': from_stop_id,
+                'to_stop_id': to_stop_id,
+                'from': (from_lat, from_lon),
+                'to': (to_lat, to_lon),
+            })
+
+        # Normalize common frontend mode labels.
+        norm_mode = (mode or '').strip().lower()
+        if norm_mode == 'walk':
+            norm_mode = 'walking'
+
+        if norm_mode != 'walking':
+            tracks = []
+            frag_seg = []
+
+            # Optional stop-sequence fallback (ATCO codes) supplied by callers.
+            # This is ONLY used when fragment stitching is unavailable.
+            stop_fallback_coords = []
+            try:
+                raw = (stop_ids or '').strip()
+                if raw:
+                    parts = [p.strip() for p in raw.split(',') if p.strip()]
+                else:
+                    parts = []
+                if len(parts) >= 2:
+                    atco_coords_dict = {}
+                    try:
+                        if globals().get('_base_cache') and _base_cache.get('atco_loader'):
+                            atco_coords_dict = _base_cache['atco_loader'].get_all_stop_coords() or {}
+                    except Exception:
+                        atco_coords_dict = {}
+
+                    # IMPORTANT: stop-sequence fallback must work even when no
+                    # merged/router cache is loaded (e.g. unit tests, minimal
+                    # deployments). So we rely on atco_loader's coordinate map.
+                    try:
+                        for atco in parts:
+                            coord = atco_coords_dict.get(atco)
+                            if coord and len(coord) >= 2:
+                                stop_fallback_coords.append([coord[0], coord[1]])
+                    except Exception:
+                        stop_fallback_coords = []
+            except Exception:
+                stop_fallback_coords = []
+            # Prefer dense route_int lookup when provided.
+            if route_int is not None:
+                try:
+                    merged = None
+                    if globals().get('_base_cache'):
+                        prebuilt = _base_cache.get('prebuilt_cache')
+                        if prebuilt:
+                            for _k, v in prebuilt.items():
+                                try:
+                                    merged = v[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                    if merged is None:
+                        rcache = globals().get('_router_cache')
+                        rlock = globals().get('_router_cache_lock')
+                        if rcache is not None:
+                            if rlock:
+                                with rlock:
+                                    items = list(rcache.values())
+                            else:
+                                items = list(rcache.values())
+                            for val in items:
+                                try:
+                                    merged = val[0]
+                                except Exception:
+                                    merged = None
+                                if merged:
+                                    break
+                    if merged is not None:
+                        ri = int(route_int)
+                        # If caller didn't provide stop ids, derive endpoints from this
+                        # route's stop list (first/last) so we stitch the *whole* route.
+                        # This avoids returning raw full-route polyline geometry
+                        # that may not be aligned to stops.
+                        if merged is not None and (from_stop_id is None or to_stop_id is None):
+                            try:
+                                route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+                            except Exception:
+                                route_stops = []
+                            if route_stops and len(route_stops) >= 2:
+                                try:
+                                    if from_stop_id is None:
+                                        c0 = merged.get_atco_code(route_stops[0])
+                                        if c0:
+                                            from_stop_id = str(c0).strip()
+                                    if to_stop_id is None:
+                                        c1 = merged.get_atco_code(route_stops[-1])
+                                        if c1:
+                                            to_stop_id = str(c1).strip()
+                                    if trace:
+                                        print('[route_leg_geometry] derived_stop_ids', {
+                                            'route_int': ri,
+                                            'from_stop_id': from_stop_id,
+                                            'to_stop_id': to_stop_id,
+                                        })
+                                except Exception:
+                                    pass
+
+                        # Prefer stitching from fragment index when we have stop context.
+                        if merged is not None and from_stop_id and to_stop_id:
+                            try:
+                                # Prefer a lazy accessor when available; otherwise
+                                # fall back to the raw attribute.
+                                if hasattr(merged, 'get_route_link_tracks'):
+                                    link_map = merged.get_route_link_tracks(ri)
+                                else:
+                                    links = getattr(merged, 'route_link_tracks', None)
+                                    link_map = links[ri] if (links and 0 <= ri < len(links)) else None
+
+                                if trace:
+                                    try:
+                                        print('[route_leg_geometry] link_map', {
+                                            'route_int': ri,
+                                            'link_map_type': type(link_map).__name__,
+                                            'link_map_len': (len(link_map) if isinstance(link_map, dict) else None),
+                                        })
+                                    except Exception:
+                                        pass
+
+                                if link_map is not None:
+                                    fs = None
+                                    ts = None
+                                    route_stops = []
+                                    try:
+                                        route_stops = merged.route_stops[ri] if ri < len(getattr(merged, 'route_stops', []) or []) else []
+                                    except Exception:
+                                        route_stops = []
+                                    try:
+                                        if route_stops and (from_stop_id or to_stop_id):
+                                            atco_to_stop = {}
+                                            for s in route_stops:
+                                                try:
+                                                    c = merged.get_atco_code(s)
+                                                except Exception:
+                                                    c = None
+                                                if c:
+                                                    atco_to_stop.setdefault(c, s)
+                                            if from_stop_id:
+                                                fs = atco_to_stop.get(from_stop_id)
+                                            if to_stop_id:
+                                                ts = atco_to_stop.get(to_stop_id)
+                                    except Exception:
+                                        fs = None
+                                        ts = None
+
+                                    if fs is not None and ts is not None:
+                                        # route_stops already resolved above.
+
+                                        frag = None
+                                        # Primary: chain along route stop order.
+                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
+                                            i = route_stops.index(fs)
+                                            j = route_stops.index(ts)
+                                            step = 1 if j > i else -1
+                                            stitched = []
+                                            ok = True
+                                            k = i
+                                            while k != j:
+                                                a = route_stops[k]
+                                                b = route_stops[k + step]
+                                                seg2 = link_map.get((a, b))
+                                                if not seg2:
+                                                    rev2 = link_map.get((b, a))
+                                                    if rev2:
+                                                        seg2 = list(reversed(rev2))
+                                                if not seg2:
+                                                    ok = False
+                                                    break
+                                                if stitched and stitched[-1] == seg2[0]:
+                                                    stitched.extend(seg2[1:])
+                                                else:
+                                                    stitched.extend(seg2)
+                                                k += step
+                                            if ok and len(stitched) >= 2:
+                                                frag = stitched
+
+                                        # Secondary: exact fragment (either direction)
+                                        if not frag:
+                                            frag = link_map.get((fs, ts))
+                                            if not frag:
+                                                rev = link_map.get((ts, fs))
+                                                if rev:
+                                                    frag = list(reversed(rev))
+
+                                        if frag and len(frag) >= 2:
+                                            frag_seg = [[t[0], t[1]] for t in frag]
+                                            if trace:
+                                                print('[route_leg_geometry] returning fragment-stitched subsegment', {
+                                                    'route_int': ri,
+                                                    'len': len(frag_seg),
+                                                })
+                                            return {"coords": frag_seg, "source": "route_link_tracks"}
+                            except Exception:
+                                frag_seg = []
+
+            # IMPORTANT: do NOT return raw full-route polyline geometry when
+                        # route_int is provided. If fragment stitching isn't available,
+                        # we fall through to OSRM/linear fallback rather than emitting
+                        # a potentially messy non-stop-stitched polyline.
+                        tracks = []
+                except Exception:
+                    tracks = []
+
+            # Policy: full-route polylines are not allowed as a fallback here.
+            # If fragment stitching didn't succeed, fall through to OSRM/linear.
     except Exception:
-        return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
-                "source": "linear"}
+        # Best-effort only; fall through to OSRM/linear.
+        if trace:
+            import traceback
+            print('[route_leg_geometry] exception in legacy-polyline path')
+            traceback.print_exc()
+        pass
+
+    # Fallback policy:
+    # - walking legs may use OSRM foot routing
+    # - if caller provided a full stop sequence (stop_ids) and we couldn't stitch
+    #   tracks, return those stop coordinates unsmoothed.
+    # - all other non-walking cases return a straight line between endpoints.
+    if norm_mode == 'walking':
+        osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
+        try:
+            coords_lonlat = [f"{from_lon},{from_lat}", f"{to_lon},{to_lat}"]
+            coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
+                                                     profile='foot')
+            if coords and len(coords) >= 2:
+                return {"coords": coords, "source": "osrm"}
+        except Exception:
+            pass
+
+    try:
+        # Only use the provided stop sequence if it looks valid.
+        if 'stop_fallback_coords' in locals() and isinstance(stop_fallback_coords, list) and len(stop_fallback_coords) >= 2:
+            return {"coords": stop_fallback_coords, "source": "stops"}
+    except Exception:
+        pass
+
+    return {"coords": [[from_lat, from_lon], [to_lat, to_lon]],
+            "source": "linear"}
+
+
 @app.get("/search/stops")
 async def search_stops(
     q: str = "",
@@ -2165,6 +2695,7 @@ async def bus_live_operator(
     lon: Optional[float] = None,
     latTol: float = 0.0003,
     lonTol: float = 0.0003,
+    keep_vehicle_id: Optional[bool] = None,
 ):
     """Get live bus positions for a specific operator."""
     from fastapi.responses import JSONResponse
@@ -2186,6 +2717,7 @@ async def bus_live_operator(
             urls=urls,
             lat_tol=latTol,
             lon_tol=lonTol,
+            keep_vehicle_id=keep_vehicle_id,
         )
     except Exception as exc:
         return JSONResponse(
@@ -2219,12 +2751,14 @@ async def bus_live_operator(
     except Exception:
         _stop_name_map = None
     for item in results:
-        # Support both legacy 7-tuples and new 8-tuples with bearing
+        meta = None
+        bearing = None
         if len(item) == 7:
             line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep = item
-            bearing = None
-        else:
+        elif len(item) == 8:
             line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep, bearing = item
+        else:
+            line_ref, dest, lat_v, lon_v, _operator, delay_s, origin_dep, bearing, meta = item
         computed = None
         if delay_s is None:
             try:
@@ -2254,7 +2788,7 @@ async def bus_live_operator(
         except Exception:
             # On any failure in matching/filtering, fall back to including the vehicle
             pass
-        out.append({
+        item_dict = {
             "line": line_ref,
             "destination": dest,
             "lat": lat_v,
@@ -2263,7 +2797,10 @@ async def bus_live_operator(
             "delay_minutes": round(final_delay / 60, 1) if final_delay is not None else None,
             "status": _bus_delay_status(final_delay),
             "bearing": bearing,
-        })
+        }
+        if meta is not None:
+            item_dict["meta"] = meta
+        out.append(item_dict)
     return out
 
 # ── Upcoming timetabled departures from a bus stop ──────────────────
@@ -2929,7 +3466,11 @@ def format_route_text(route_result, merged):
     return "\n".join(out)
 
 
-def build_journey_plan_response(route_result, merged, stop_coords, request_start_seconds=None):
+def _resolve_route_id_for_leg(line_name: str | None, from_atco: str | None, to_atco: str | None):
+        if not line_name or not from_atco or not to_atco:
+            return None
+
+def build_journey_plan_response(route_result, merged, stop_coords, request_start_seconds=None, include_geometry=False):
     """Convert raw RAPTOR router result into a structured journey plan.
 
     Args:
@@ -2942,6 +3483,24 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     """
     from time_utils import seconds_to_time
     import math
+
+    atco_coords_dict = {}
+    try:
+        if globals().get('_base_cache') and _base_cache.get("atco_loader"):
+            atco_coords_dict = _base_cache["atco_loader"].get_all_stop_coords()
+    except Exception:
+        pass
+
+    def _get_stop_coord(s_idx):
+        if isinstance(stop_coords, dict) and s_idx in stop_coords:
+            return stop_coords[s_idx]
+        try:
+            a_code = merged.get_atco_code(s_idx)
+            if a_code in atco_coords_dict:
+                return atco_coords_dict[a_code]
+        except Exception:
+            pass
+        return None
 
     if not route_result:
         return {
@@ -3109,7 +3668,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     # -- Start walking leg --
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
         first_int = ordered[0][0]
-        first_coord = stop_coords.get(first_int)
+        first_coord = _get_stop_coord(first_int)
         first_name = _display_name(first_int)
         to_loc = {"name": first_name}
         if first_coord:
@@ -3180,8 +3739,8 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
         prev_name = _display_name(prev_int)
         curr_name = _display_name(curr_int)
-        prev_coord = stop_coords.get(prev_int)
-        curr_coord = stop_coords.get(curr_int)
+        prev_coord = _get_stop_coord(prev_int)
+        curr_coord = _get_stop_coord(curr_int)
 
         from_loc = {"name": prev_name}
         to_loc = {"name": curr_name}
@@ -3226,6 +3785,17 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 if line_name and ":" in line_name:
                     line_name = line_name.split(":")[-1]
             leg["line_name"] = line_name or None
+            
+            if include_geometry and transport == "bus":
+                j_idx = curr_info.get("journey")
+                if j_idx is not None and hasattr(merged, "journey_to_route"):
+                    try:
+                        r_int = merged.journey_to_route[j_idx]
+                        m_key = f"{merged.meta.get('date', '')}|{getattr(merged, 'bucket', '')}"
+                        leg["geom_context"] = {"route_int": r_int, "merged_key": m_key}
+                    except Exception:
+                        pass
+
             leg["journey_origin"] = curr_info.get("journey_origin", "") or None
             leg["journey_destination"] = (
                 curr_info.get("journey_destination", "") or None)
@@ -3302,24 +3872,477 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         else:
             geo_name = transport.title() if transport else "Unknown"
         coords = []
-        if prev_coord:
-            coords.append([prev_coord[0], prev_coord[1]])
-        if curr_coord:
-            coords.append([curr_coord[0], curr_coord[1]])
+
+        route_id = None
+        route_int = None
+        track_coords = None
+        geom_source = None
+        trace = os.environ.get('ROUTE_GEOM_TRACE') == '1'
+        if transport != "walking":
+            try:
+                j_info = curr_info.get("journey_info") or {}
+                if isinstance(j_info, dict) and j_info.get("route_id"):
+                    route_id = j_info.get("route_id")
+                # Prefer route_int for direct in-memory geometry lookup.
+                try:
+                    j_id_tmp = curr_info.get('journey')
+                    if j_id_tmp is not None and hasattr(merged, 'journey_to_route') and j_id_tmp < len(merged.journey_to_route):
+                        r_tmp = merged.journey_to_route[j_id_tmp]
+                        if r_tmp is not None and int(r_tmp) >= 0:
+                            route_int = int(r_tmp)
+                except Exception:
+                    route_int = None
+            except Exception as exc:
+                pass
+
+            if (not route_id) and transport == 'bus':
+                # Router didn't provide route_id, attempt best-effort resolution.
+                try:
+                    prev_atco = merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+                try:
+                    curr_atco = merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+                try:
+                    line_name = leg.get('line_name')
+                except Exception:
+                    line_name = None
+                route_id = _resolve_route_id_for_leg(line_name, prev_atco, curr_atco)
+
+                try:
+                    prev_atco = prev_atco or merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+
+                try:
+                    curr_atco = curr_atco or merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+
+                # (handled below) if route_id resolved we will attempt slicing
+
+    # If we have a geometry candidate (prefer route_int) and we know stop ids,
+    # try to obtain a segment between the two stops.
+        if transport != "walking":
+            try:
+                prev_atco = None
+                curr_atco = None
+                try:
+                    prev_atco = merged.get_atco_code(prev_int)
+                except Exception:
+                    prev_atco = None
+                try:
+                    curr_atco = merged.get_atco_code(curr_int)
+                except Exception:
+                    curr_atco = None
+
+                if trace:
+                    try:
+                        print('[journey_geom] leg', {
+                            'leg_idx': leg_idx,
+                            'transport': transport,
+                            'line_name': (leg.get('line_name') if isinstance(leg, dict) else None),
+                            'route_id': route_id,
+                            'route_int': route_int,
+                            'from_stop_int': prev_int,
+                            'to_stop_int': curr_int,
+                            'from_atco': prev_atco,
+                            'to_atco': curr_atco,
+                            'from_name': (from_loc.get('name') if isinstance(from_loc, dict) else None),
+                            'to_name': (to_loc.get('name') if isinstance(to_loc, dict) else None),
+                        })
+                    except Exception:
+                        pass
+
+                if prev_atco and curr_atco:
+                    local_coords = {}
+                    if prev_coord:
+                        local_coords[prev_atco] = prev_coord
+                    if curr_coord:
+                        local_coords[curr_atco] = curr_coord
+
+                    seg = []
+                    if route_int is not None:
+                        try:
+                            # Prefer stop-to-stop fragment tracks if present.
+                            # These are indexed by (from_stop_int,to_stop_int)
+                            # and avoid the "jumbled full route polyline" problem.
+                            frag = None
+                            try:
+                                # Prefer a lazy accessor when available; otherwise
+                                # fall back to the raw attribute.
+                                if hasattr(merged, 'get_route_link_tracks'):
+                                    link_map = merged.get_route_link_tracks(route_int)
+                                else:
+                                    links = getattr(merged, 'route_link_tracks', None)
+                                    link_map = links[route_int] if (links and route_int < len(links)) else None
+
+                                if trace:
+                                    try:
+                                        print('[journey_geom] link_map_status', {
+                                            'route_int': route_int,
+                                            'has_get_route_link_tracks': bool(hasattr(merged, 'get_route_link_tracks')),
+                                            'link_map_is_none': (link_map is None),
+                                            'link_map_len': (len(link_map) if link_map else 0),
+                                        })
+                                    except Exception:
+                                        pass
+
+                                if link_map:
+                                    # We only have ATCO strings here; resolve to stop_int.
+                                    # NOTE: merged.stop_metadata is a list of stop display names,
+                                    # not an ATCO->stop_int mapping, so we map within route_stops.
+                                    fs = None
+                                    ts = None
+                                    route_stops = []
+                                    try:
+                                        route_stops = merged.route_stops[route_int] if route_int < len(merged.route_stops) else []
+                                    except Exception:
+                                        route_stops = []
+                                    if trace:
+                                        try:
+                                            print('[journey_geom] route_stops_status', {
+                                                'route_int': route_int,
+                                                'route_stops_len': (len(route_stops) if route_stops else 0),
+                                                'have_prev_atco': bool(prev_atco),
+                                                'have_curr_atco': bool(curr_atco),
+                                            })
+                                        except Exception:
+                                            pass
+                                    try:
+                                        if route_stops and (prev_atco or curr_atco):
+                                            atco_to_stop = {}
+                                            for s in route_stops:
+                                                try:
+                                                    c = merged.get_atco_code(s)
+                                                except Exception:
+                                                    c = None
+                                                if c:
+                                                    atco_to_stop.setdefault(c, s)
+                                            if prev_atco:
+                                                fs = atco_to_stop.get(prev_atco)
+                                            if curr_atco:
+                                                ts = atco_to_stop.get(curr_atco)
+                                    except Exception:
+                                        fs = None
+                                        ts = None
+
+                                    if trace:
+                                        try:
+                                            print('[journey_geom] fragment_endpoint_resolution', {
+                                                'route_int': route_int,
+                                                'prev_atco': prev_atco,
+                                                'curr_atco': curr_atco,
+                                                'fs': fs,
+                                                'ts': ts,
+                                                'fs_in_route_stops': (fs in route_stops) if (route_stops and fs is not None) else False,
+                                                'ts_in_route_stops': (ts in route_stops) if (route_stops and ts is not None) else False,
+                                            })
+                                        except Exception:
+                                            pass
+                                    if fs is not None and ts is not None:
+                                        frag = None
+                                        frag_strategy = None
+
+                                        # Primary: stitch adjacent fragments along route stop sequence.
+                                        # This handles cases where section tracks are keyed by
+                                        # intermediate timing points rather than the leg endpoints.
+                                        # route_stops already resolved above.
+                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
+                                            i = route_stops.index(fs)
+                                            j = route_stops.index(ts)
+                                            step = 1 if j > i else -1
+                                            stitched = []
+                                            ok = True
+                                            k = i
+                                            # stitch consecutive stop pairs along the route
+                                            while k != j:
+                                                a = route_stops[k]
+                                                b = route_stops[k + step]
+                                                seg2 = link_map.get((a, b))
+                                                if not seg2:
+                                                    # allow reverse if needed
+                                                    rev2 = link_map.get((b, a))
+                                                    if rev2:
+                                                        seg2 = list(reversed(rev2))
+                                                if not seg2:
+                                                    ok = False
+                                                    break
+                                                if stitched and seg2 and stitched[-1] == seg2[0]:
+                                                    stitched.extend(seg2[1:])
+                                                else:
+                                                    stitched.extend(seg2)
+                                                k += step
+                                            if ok and len(stitched) >= 2:
+                                                frag = stitched
+                                                frag_strategy = 'stitched_adjacent_pairs'
+
+                                        if trace:
+                                            try:
+                                                print('[journey_geom] route_int_fragment_ctx', {
+                                                    'route_int': route_int,
+                                                    'from_stop_int': fs,
+                                                    'to_stop_int': ts,
+                                                    'route_stops_len': (len(route_stops) if route_stops else 0),
+                                                    'route_stops_i': (route_stops.index(fs) if (route_stops and fs in route_stops) else None),
+                                                    'route_stops_j': (route_stops.index(ts) if (route_stops and ts in route_stops) else None),
+                                                    'link_map_len': (len(link_map) if link_map else 0),
+                                                    'strategy': frag_strategy,
+                                                })
+                                            except Exception:
+                                                pass
+
+                                        # Secondary: exact stop-pair fragment (either direction)
+                                        if not frag:
+                                            frag = link_map.get((fs, ts))
+                                            if not frag:
+                                                # Try reverse direction.
+                                                rev = link_map.get((ts, fs))
+                                                if rev:
+                                                    frag = list(reversed(rev))
+                                                    frag_strategy = 'exact_pair_reversed'
+                                            else:
+                                                frag_strategy = 'exact_pair'
+
+                                        if trace and (not frag):
+                                            try:
+                                                # sample a few available keys for debugging
+                                                some_keys = []
+                                                try:
+                                                    for _k in link_map.keys():
+                                                        some_keys.append(_k)
+                                                        if len(some_keys) >= 5:
+                                                            break
+                                                except Exception:
+                                                    some_keys = []
+                                                print('[journey_geom] fragment_pair_missing', {
+                                                    'route_int': route_int,
+                                                    'fs': fs,
+                                                    'ts': ts,
+                                                    'sample_keys': some_keys,
+                                                })
+                                            except Exception:
+                                                pass
+
+                                        # Tertiary: 1-hop near endpoints.
+                                        if not frag and route_stops:
+                                            if fs in route_stops:
+                                                try:
+                                                    i = route_stops.index(fs)
+                                                    for step in (1, -1):
+                                                        if 0 <= i + step < len(route_stops):
+                                                            b = route_stops[i + step]
+                                                            seg2 = link_map.get((fs, b))
+                                                            if not seg2:
+                                                                rev2 = link_map.get((b, fs))
+                                                                if rev2:
+                                                                    seg2 = list(reversed(rev2))
+                                                            if seg2 and len(seg2) >= 2:
+                                                                frag = seg2
+                                                                frag_strategy = 'near_endpoint_from'
+                                                                break
+                                                except Exception:
+                                                    pass
+                                            if (not frag) and ts in route_stops:
+                                                try:
+                                                    j = route_stops.index(ts)
+                                                    for step in (1, -1):
+                                                        if 0 <= j + step < len(route_stops):
+                                                            a = route_stops[j + step]
+                                                            seg2 = link_map.get((a, ts))
+                                                            if not seg2:
+                                                                rev2 = link_map.get((ts, a))
+                                                                if rev2:
+                                                                    seg2 = list(reversed(rev2))
+                                                            if seg2 and len(seg2) >= 2:
+                                                                frag = seg2
+                                                                frag_strategy = 'near_endpoint_to'
+                                                                break
+                                                except Exception:
+                                                    pass
+                            except Exception:
+                                frag = None
+
+                            if frag and len(frag) >= 2:
+                                tracks_ll = [[t[0], t[1]] for t in frag]
+                                seg = tracks_ll
+                                if trace:
+                                    try:
+                                        print('[journey_geom] route_int_fragment', {
+                                            'route_int': route_int,
+                                            'frag_len': len(frag),
+                                            'strategy': (locals().get('frag_strategy') if 'frag_strategy' in locals() else None),
+                                        })
+                                    except Exception:
+                                        pass
+                            # IMPORTANT: do not fall back to slicing a full-route polyline here.
+                            # Full-route polylines can be branched/jumbled and lead to
+                            # "teleport" segments on loops. If we can't obtain link
+                            # fragments, treat geometry as unavailable so callers can
+                            # handle it (e.g. OSRM or linear fallback) rather than
+                            # drawing misleading map lines.
+                            if trace and (not seg):
+                                try:
+                                    print('[journey_geom] no_link_fragments', {
+                                        'route_int': route_int,
+                                        'link_map_len': (len(link_map) if link_map else 0),
+                                    })
+                                except Exception:
+                                    pass
+                        except Exception:
+                            seg = []
+                used_full_route_polyline = False
+                if seg and len(seg) >= 2:
+                    track_coords = seg
+                    if trace:
+                        try:
+                            print('[journey_geom] sliced', {
+                                'len': len(seg),
+                                'first': seg[0],
+                                'last': seg[-1],
+                            })
+                        except Exception:
+                            pass
+                elif trace:
+                    try:
+                        print('[journey_geom] slice_failed', {
+                            'have_prev_atco': bool(prev_atco),
+                            'have_curr_atco': bool(curr_atco),
+                            'have_prev_coord': bool(prev_coord),
+                            'have_curr_coord': bool(curr_coord),
+                        })
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if track_coords:
+            coords = track_coords
+            # If we reached this point because we stitched stop-to-stop link fragments,
+            # label it explicitly.
+            if transport == 'bus':
+                geom_source = "route_link_tracks"
+            else:
+                geom_source = geom_source or "computed"
+        else:
+            # Per-leg fallback: for missing tracks, fall back to OSRM (best-effort)
+            # and then to a straight line. This is intentionally per-leg so a
+            # single missing track doesn't degrade the whole route.
+            try:
+                if prev_coord and curr_coord:
+                    mode_hint = "walking" if transport == "walking" else "driving"
+
+                    # If this is a transit leg (bus/train) and we know the route's
+                    # stop sequence, pass it through so /route/leg-geometry can
+                    # fall back to stop-derived geometry (all intermediate stops)
+                    # instead of a misleading 2-point linear segment.
+                    stop_seq_atcos = None
+                    try:
+                        if transport != "walking" and route_int is not None:
+                            # Slice only the stop sub-sequence between the leg
+                            # endpoints (hop-on -> hop-off) so we don't draw the
+                            # entire route as the fallback geometry.
+                            rs = merged.route_stops[route_int] if route_int < len(getattr(merged, 'route_stops', []) or []) else []
+                            if rs and len(rs) >= 2:
+                                # prev_int/curr_int are the merged stop_ints for this leg
+                                if prev_int in rs and curr_int in rs and prev_int != curr_int:
+                                    i0 = rs.index(prev_int)
+                                    i1 = rs.index(curr_int)
+                                    if i1 >= i0:
+                                        sub = rs[i0:i1 + 1]
+                                    else:
+                                        # Reverse travel along stop order
+                                        sub = list(reversed(rs[i1:i0 + 1]))
+                                else:
+                                    sub = rs
+
+                                atcos = []
+                                for s_int in sub:
+                                    try:
+                                        c = merged.get_atco_code(s_int)
+                                    except Exception:
+                                        c = None
+                                    if c:
+                                        atcos.append(str(c).strip())
+                                if len(atcos) >= 2:
+                                    stop_seq_atcos = ",".join(atcos)
+                    except Exception:
+                        stop_seq_atcos = None
+
+                    lg = route_leg_geometry(
+                        prev_coord[0], prev_coord[1],
+                        curr_coord[0], curr_coord[1],
+                        mode=mode_hint,
+                        route_id=route_id,
+                        route_int=route_int,
+                        from_stop_id=prev_atco if 'prev_atco' in locals() else None,
+                        to_stop_id=curr_atco if 'curr_atco' in locals() else None,
+                        stop_ids=stop_seq_atcos,
+                    )
+                    if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
+                        coords = lg.get("coords")
+                        geom_source = lg.get("source")
+            except Exception:
+                pass
+
+            if not coords:
+                if prev_coord:
+                    coords.append([prev_coord[0], prev_coord[1]])
+                if curr_coord:
+                    coords.append([curr_coord[0], curr_coord[1]])
+                geom_source = geom_source or "linear"
+
+        # If bus link fragments were unavailable, surface a clear note for debugging.
+        try:
+            if transport == 'bus' and geom_source in (None, 'linear', 'osrm'):
+                if 'link_map' in locals() and isinstance(locals().get('link_map'), dict) and len(locals().get('link_map')) == 0:
+                    leg.setdefault('geometry_note', 'no_link_fragments')
+        except Exception:
+            pass
+
+        # Attach geometry source to the leg so clients can debug mixed sources.
+        try:
+            if geom_source:
+                leg["geometry_source"] = geom_source
+        except Exception:
+            pass
+
+        # Optionally embed geometry directly into the leg. This keeps the
+        # /journey/* endpoints self-contained for map rendering (no secondary
+        # /route/leg-geometry calls needed).
+        try:
+            if include_geometry and coords and len(coords) >= 2:
+                leg["geometry"] = {
+                    "coords": coords,
+                    "source": geom_source or "linear",
+                }
+        except Exception:
+            pass
 
         geometries.append({
             "id": f"{transport}-{geo_idx}",
             "name": geo_name,
             "coords": coords,
             "color": color,
+            "mode": transport,
+            "leg_idx": geo_idx,
+            "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
+            "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
+            "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
+            "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
+            "source": geom_source,
         })
         geo_idx += 1
+        
 
-    # -- End walking leg --
+    
+          # -- End walking leg --
     if (destination_point and len(destination_point) >= 2
             and end_walk > 0 and ordered):
         last_int = ordered[-1][0]
-        last_coord = stop_coords.get(last_int)
+        last_coord = _get_stop_coord(last_int)
         last_name = _display_name(last_int)
         from_loc = {"name": last_name}
         if last_coord:
@@ -3936,3 +4959,498 @@ if __name__ == "__main__":
 
 
 
+@app.get('/debug/route-tracks/{route_id:path}')
+def debug_route_tracks_gone(route_id: str):
+    """Deprecated: returns 410."""
+    from fastapi.responses import Response
+    return Response(status_code=410, content="Gone: legacy full-route polylines removed")
+
+@app.get('/debug/route-link-tracks/{route_id:path}')
+def debug_route_link_tracks(route_id: str, sample: int = 5, suggest: int = 0):
+    global _base_cache
+    if not _base_cache:
+        return JSONResponse(status_code=404, content={"route_id": route_id, "found": False})
+    
+    merged = None
+    for value in _base_cache.get("prebuilt_cache", {}).values():
+        if value and isinstance(value, tuple) and len(value) > 0:
+            merged = value[0]
+            if merged:
+                break
+                
+    if not merged:
+        return JSONResponse(status_code=404, content={"route_id": route_id, "found": False})
+        
+    route_int_val = None
+    for meta in getattr(merged, "route_metadata", []):
+        if meta.get("route_id") == route_id:
+            route_int_val = meta.get("route_int")
+            break
+            
+    if route_int_val is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="route_id not found")
+        
+    link_tracks = merged.get_route_link_tracks(route_int=route_int_val)
+    if not link_tracks:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="route_id has no tracks")
+        
+    sample_links = list(link_tracks.keys())[:sample]
+    sample_fragment = []
+    if sample_links:
+        first_link = sample_links[0]
+        frags = link_tracks[first_link]
+        if frags:
+            sample_fragment = frags[0]
+            
+    return {
+        "route_id": route_id,
+        "found": True,
+        "link_count": len(link_tracks),
+        "route_int": route_int_val,
+        "sample_links": sample_links,
+        "sample_fragment": sample_fragment
+    }
+
+
+@app.get("/routes/line_at_stop/{atco}/{line}")
+async def routes_for_line_at_stop(
+    atco: str,
+    line: str,
+):
+    """Return route variants for a line *restricted to routes serving a stop*.
+
+    This endpoint is designed to eliminate ambiguity for short line names like
+    "1" by only considering route_ints from merged.stop_to_routes for the given
+    ATCO stop.
+
+    Response mirrors `/routes/line/{line}`:
+
+        {"line": "1", "variants": [ {"route_id": "...", "stops": [...], "geometry": [...] }, ... ]}
+    """
+    from fastapi.responses import JSONResponse
+
+    atco_code = atco.strip()
+    line_key = line.strip().upper()
+
+    # thresholds (same as routes_for_line)
+    min_stops = int(os.environ.get('ROUTE_MIN_STOPS', '6'))
+    max_gap_m = int(os.environ.get('ROUTE_MAX_GAP_METERS', '3500'))
+    mean_gap_mult = float(os.environ.get('ROUTE_MEAN_GAP_MULT', '1.8'))
+
+    try:
+        merged, _router, _walking = get_router_for_date(datetime.now().strftime("%Y-%m-%d"))
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "Backend not initialized"})
+
+    # Identify stop_int(s) for this ATCO code
+    matching_stop_ints: list[int] = []
+    for s_int in range(len(merged.stop_to_routes)):
+        try:
+            code = merged.get_atco_code(s_int)
+        except Exception:
+            code = None
+        if code == atco_code:
+            matching_stop_ints.append(s_int)
+
+    if not matching_stop_ints:
+        return {"line": line, "variants": []}
+
+    # Candidate route_ints are strictly those serving this stop
+    candidate_routes: set[int] = set()
+    for s_int in matching_stop_ints:
+        try:
+            for r_int in merged.stop_to_routes[s_int]:
+                candidate_routes.add(int(r_int))
+        except Exception:
+            continue
+
+    def _route_matches_line(r_int: int) -> bool:
+        try:
+            if r_int < 0 or r_int >= len(merged.route_metadata):
+                return False
+            meta = merged.route_metadata[r_int] or {}
+            raw_line = (meta.get("line_name") or "").strip()
+            if not raw_line:
+                return False
+            raw_norm = raw_line.upper()
+            if ":" in line_key:
+                return raw_norm == line_key
+            return raw_norm.split(":")[-1].strip() == line_key
+        except Exception:
+            return False
+
+    matching_routes = sorted([r for r in candidate_routes if _route_matches_line(r)])
+    if not matching_routes:
+        return {"line": line, "variants": []}
+
+    # NaPTAN coordinate lookup
+    atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+    coord_map: Dict[str, tuple] = {}
+    if atco_loader:
+        try:
+            coord_map = atco_loader.get_all_stop_coords()
+        except Exception:
+            coord_map = {}
+
+    def _route_stops_variant(r_int: int) -> list[dict]:
+        stops: list[dict] = []
+        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+        for s_int in route_stops or []:
+            try:
+                code = merged.get_atco_code(s_int)
+            except Exception:
+                code = None
+            if not code:
+                continue
+            coords = coord_map.get(code)
+            if not coords:
+                continue
+            lat0, lon0 = coords
+            name = merged.stop_metadata[s_int] if s_int < len(merged.stop_metadata) else ""
+            stops.append({
+                "name": name or code,
+                "lat": float(lat0),
+                "lon": float(lon0),
+                "atco_code": str(code),
+            })
+        return stops
+
+    import math
+    def _mean_gap(stops: list[dict]) -> float:
+        if len(stops) < 2:
+            return 0.0
+        total = 0.0
+        cos_lat = math.cos(math.radians(stops[0]["lat"]))
+        for i in range(len(stops) - 1):
+            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+            total += math.sqrt(dlat * dlat + dlon * dlon)
+        return total / (len(stops) - 1)
+
+    variants: list[dict] = []
+    for r_int in matching_routes:
+        stops = _route_stops_variant(r_int)
+        if len(stops) < min_stops:
+            continue
+        meta = merged.route_metadata[r_int] or {}
+        route_id = meta.get("route_id", f"route_{r_int}")
+        variants.append({
+            "route_int": int(r_int),
+            "route_id": route_id,
+            "stops": stops,
+        })
+
+    # Deduplicate and keep a few most distinct variants
+    seen_sigs: set[tuple] = set()
+    unique: list[dict] = []
+    for v in variants:
+        sig = tuple(s["atco_code"] for s in v.get("stops") or [])
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(v)
+    unique.sort(key=lambda v: len(v.get("stops") or []), reverse=True)
+    unique = unique[:3]
+
+    # Apply the same mean/max gap heuristics as /routes/line
+    if unique:
+        def _max_gap(stops: list[dict]) -> float:
+            cos_lat = math.cos(math.radians(stops[0]["lat"]))
+            mx = 0.0
+            for i in range(len(stops) - 1):
+                dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+                dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+                mx = max(mx, math.sqrt(dlat * dlat + dlon * dlon))
+            return mx
+
+        mean_gaps = [_mean_gap(v["stops"]) for v in unique]
+        best = min(mean_gaps)
+        filtered = [v for v, mg in zip(unique, mean_gaps) if mg <= best * mean_gap_mult and _max_gap(v["stops"]) < max_gap_m]
+        if filtered:
+            unique = filtered
+
+    # Attach fragment-only geometry (route_link_tracks), same as /routes/line.
+    for v in unique:
+        try:
+            r_int = v.get('route_int')
+            if not isinstance(r_int, int):
+                continue
+            stitched = None
+
+            try:
+                if hasattr(merged, 'get_route_link_tracks'):
+                    link_map = merged.get_route_link_tracks(r_int)
+                else:
+                    links = getattr(merged, 'route_link_tracks', None)
+                    link_map = links[r_int] if (links and r_int < len(links)) else None
+
+                if link_map and isinstance(link_map, dict):
+                    stops = v.get('stops') or []
+                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+                    if len(atcos) >= 2:
+                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
+                        atco_to_stop = {}
+                        for s_int in route_stops or []:
+                            try:
+                                c = merged.get_atco_code(s_int)
+                            except Exception:
+                                c = None
+                            if c:
+                                atco_to_stop[str(c)] = s_int
+
+                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
+                        stop_ints = [x for x in stop_ints if x is not None]
+                        if len(stop_ints) >= 2:
+                            stitched_pts = []
+                            ok = True
+                            for a, b in zip(stop_ints, stop_ints[1:]):
+                                seg = link_map.get((a, b))
+                                if not seg:
+                                    rev = link_map.get((b, a))
+                                    if rev:
+                                        seg = list(reversed(rev))
+                                if not seg:
+                                    ok = False
+                                    break
+                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
+                                    stitched_pts.extend(seg[1:])
+                                else:
+                                    stitched_pts.extend(seg)
+                            if ok and len(stitched_pts) >= 2:
+                                stitched = stitched_pts
+            except Exception:
+                stitched = None
+
+            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
+                coords = []
+                for pt in stitched:
+                    try:
+                        lat_pt, lon_pt = pt
+                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
+                            coords.append([float(lat_pt), float(lon_pt)])
+                    except Exception:
+                        continue
+                if len(coords) >= 2:
+                    v['geometry'] = coords
+                    v['geometry_source'] = 'route_link_tracks'
+            else:
+                v.pop('geometry', None)
+                v.pop('geometry_source', None)
+        except Exception:
+            continue
+
+    return {"line": line, "variants": unique}
+
+
+# ΓÇö Static files & frontend ΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇöΓÇö
+
+# Only mount static files if the directory exists (skipped during tests)
+_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+
+
+def _stage_filter_journeys_for_live_bus(
+    merged,
+    walking,
+    *,
+    line_ref: str,
+    operator_ref: str | None = None,
+    dest: str | None = None,
+    feed_origin_atco: str | None = None,
+    feed_destination_atco: str | None = None,
+    origin_dep_secs: int | None = None,
+    origin_tz_offset_secs: int = 0,
+    strict_tol: int = 600,
+):
+    """Return candidate journey ids after applying the staged ATCO/time latch.
+
+    This helper isolates the *new rule* from the rest of the delay matcher
+    (spatial projection + delay scoring). It's used by tests and can be used
+    by provenance tooling.
+
+    Inputs are intentionally similar to _compute_delay_from_timetable, but it
+    requires a preloaded `merged` + `walking`.
+    """
+    line_q = (line_ref or "").strip()
+    dest_q = (dest or "").strip().lower() if dest else ""
+    try:
+        feed_origin_atco_n = str(feed_origin_atco).strip() if feed_origin_atco else None
+    except Exception:
+        feed_origin_atco_n = None
+    try:
+        feed_destination_atco_n = str(feed_destination_atco).strip() if feed_destination_atco else None
+    except Exception:
+        feed_destination_atco_n = None
+
+    od_adj = None
+    if origin_dep_secs is not None:
+        try:
+            od_adj = int(origin_dep_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                od_adj = int(origin_dep_secs)
+            except Exception:
+                od_adj = None
+
+    # stop name map for weak destination matching.
+    stop_name_map = {}
+    try:
+        for si, sname in enumerate(getattr(merged, 'stop_metadata', []) or []):
+            if not sname:
+                continue
+            stop_name_map.setdefault(str(sname).strip().lower(), []).append(si)
+    except Exception:
+        stop_name_map = {}
+
+    candidates: list[int] = []
+    staged_flags: dict[int, dict] = {}
+
+    for j_id, jmeta in enumerate(getattr(merged, 'journey_metadata', []) or []):
+        if not jmeta:
+            continue
+        line_name = jmeta.get('line_name') or ''
+        simple_line = line_name.split(':')[-1] if line_name else ''
+        if line_q and simple_line != line_q:
+            continue
+
+        # Operator filter (same approach as main matcher)
+        if operator_ref:
+            op_noc = jmeta.get('operator_national_code') or None
+            svc = None
+            if op_noc:
+                svc = str(op_noc).strip()
+            else:
+                sc = jmeta.get('service_code') or ''
+                if sc:
+                    svc = str(sc).strip()
+                else:
+                    ln = (jmeta.get('line_name') or '')
+                    if ':' in ln:
+                        svc = ln.split(':')[0]
+            if not svc or svc.strip() != str(operator_ref).strip():
+                continue
+
+        try:
+            jt = merged.journey_times[j_id]
+            if not jt:
+                continue
+        except Exception:
+            continue
+
+        # Endpoint ATCO sets (same as main: a few stops from ends)
+        dest_atcos = []
+        origin_atcos = []
+        try:
+            for i in range(1, min(4, len(jt) + 1)):
+                atco = merged.get_atco_code(jt[-i][0])
+                if atco:
+                    dest_atcos.append(str(atco).strip())
+            for i in range(min(3, len(jt))):
+                atco = merged.get_atco_code(jt[i][0])
+                if atco:
+                    origin_atcos.append(str(atco).strip())
+        except Exception:
+            pass
+
+        origin_atco_match = bool(feed_origin_atco_n and feed_origin_atco_n in origin_atcos)
+        dest_atco_match = bool(feed_destination_atco_n and feed_destination_atco_n in dest_atcos)
+
+        weak_dest_text_match = False
+        if not feed_destination_atco_n and dest_q:
+            try:
+                candidate_dest_atcos = set()
+                for sname_key, sidx_list in stop_name_map.items():
+                    if dest_q in sname_key or sname_key in dest_q:
+                        for si in sidx_list:
+                            atco = merged.get_atco_code(si)
+                            if atco:
+                                candidate_dest_atcos.add(str(atco).strip())
+                if candidate_dest_atcos and any(da in candidate_dest_atcos for da in dest_atcos):
+                    weak_dest_text_match = True
+            except Exception:
+                weak_dest_text_match = False
+
+        origin_time_aligned = False
+        if origin_atco_match and od_adj is not None:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        if stop_time is not None and abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
+                            origin_time_aligned = True
+                        break
+            except Exception:
+                origin_time_aligned = False
+
+        staged_flags[j_id] = {
+            'origin_atco': origin_atco_match,
+            'dest_atco': dest_atco_match,
+            'weak_dest_text': weak_dest_text_match,
+            'origin_time_aligned': origin_time_aligned,
+        }
+
+        candidates.append(j_id)
+
+    if not candidates:
+        return []
+
+    latched: set[int] = set()
+
+    # Stage 2 latch: origin ATCO + origin start time match.
+    if feed_origin_atco_n and od_adj is not None:
+        aligned = set()
+        origin_only = set()
+        for j_id in candidates:
+            f = staged_flags.get(j_id) or {}
+            if f.get('origin_atco'):
+                origin_only.add(j_id)
+                if f.get('origin_time_aligned'):
+                    aligned.add(j_id)
+        # If we have any aligned origin matches, they win outright.
+        if aligned:
+            latched = aligned
+        # Otherwise, restrict to journeys that at least contain the origin ATCO.
+        elif origin_only:
+            latched = origin_only
+
+    # Stage 3 latch: destination ATCO (for those not already latched)
+    if not latched and feed_destination_atco_n:
+        for j_id in candidates:
+            f = staged_flags.get(j_id) or {}
+            if f.get('dest_atco'):
+                latched.add(j_id)
+
+    # Stage 4: for destination-latched candidates, require origin ATCO to exist
+    # and compare origin time against the arrival/departure time at that stop.
+    if latched and feed_destination_atco_n and feed_origin_atco_n and od_adj is not None:
+        refined: set[int] = set()
+        for j_id in latched:
+            try:
+                jt = merged.journey_times[j_id]
+            except Exception:
+                continue
+            stop_time = None
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        break
+            except Exception:
+                stop_time = None
+            if stop_time is None:
+                continue
+            try:
+                if abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
+                    refined.add(j_id)
+            except Exception:
+                continue
+        if refined:
+            latched = refined
+
+
+    return sorted(latched) if latched else sorted(candidates)
