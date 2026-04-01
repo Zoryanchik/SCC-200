@@ -18,6 +18,12 @@ def test_build_journey_plan_response_bus_no_fragments_uses_stop_sequence(monkeyp
     def _boom(*_a, **_k):
         raise AssertionError("OSRM should not be called in stop-sequence fallback")
 
+    import bus_loader
+    if hasattr(bus_loader, "BusLoader"):
+        monkeypatch.setattr(bus_loader, "BusLoader", lambda *a, **k: type("Stub", (), {"insert_logged_journey": lambda *a, **k: None})(), raising=False)
+
+    monkeypatch.setattr(api, "_classification_for_merged", lambda x: {})
+
     monkeypatch.setattr(api, "_query_osrm_for_coords_profile", _boom)
 
     # Provide ATCO -> (lat, lon)
