@@ -239,7 +239,7 @@ class TestBusLiveNoDbContract:
 
         # Make _compute_delay_from_timetable deterministic and ensure it doesn't
         # trigger any hidden DB fallbacks.
-        monkeypatch.setattr(api_module, "_compute_delay_from_timetable", lambda *a, **k: (0, 0))
+        monkeypatch.setattr(api_module, "_compute_delay_from_timetable", lambda *a, **k: 0)
 
         resp = client.get("/bus/live/SCCU", params={"lat": 53.48, "lon": -2.24})
         assert resp.status_code == 200
