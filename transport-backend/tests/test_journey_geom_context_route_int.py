@@ -20,6 +20,12 @@ def test_bus_leg_geom_context_includes_route_int_and_merged_key(monkeypatch):
 
     monkeypatch.setattr(api, "_query_osrm_for_coords_profile", _boom)
 
+    import bus_loader
+    if hasattr(bus_loader, "BusLoader"):
+        monkeypatch.setattr(bus_loader, "BusLoader", lambda *a, **k: type("Stub", (), {"insert_logged_journey": lambda *a, **k: None})(), raising=False)
+
+    monkeypatch.setattr(api, "_classification_for_merged", lambda x: {})
+
     # Minimal ATCO -> coords (not strictly required but keeps geometry clean)
     stops = {
         "A": (54.00, -2.80),
