@@ -3817,20 +3817,14 @@ export default function HomePage() {
                 </Button>
               </Box>
 
-              {/* Date/time group aligned under From */}
               <Box
                 sx={{
-                  gridColumn: { xs: "1 / -1", md: 2 },
+                  gridColumn: "1 / -1",
                   display: "flex",
-                  gap: 1,
-                  alignItems: "stretch",
-                  flexWrap: { xs: "wrap", sm: "nowrap" },
-                  // keep Hour aligned with the From field start; on desktop the main grid
-                  // has a 48px icon column, so we shift the time row left by that amount
-                  // slight extra nudge left so the Now button sits more centered
-                  // relative to the locate icon, without moving the locate icon itself
-                  ml: { md: "-56px" },
-                  mt: { xs: 1, md: 0 },
+                  gap: 2,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  mt: 1,
                 }}
               >
                 <Button
@@ -3856,10 +3850,11 @@ export default function HomePage() {
                   sx={{
                     height: 40,
                     minWidth: 44,
-                    px: 1,
+                    px: 2,
                     flexShrink: 0,
+                    borderRadius: 2,
                     color: "#fff",
-                    borderColor: "#fff",
+                    borderColor: "rgba(255,255,255,0.3)",
                     "&:hover": {
                       borderColor: "#fff",
                       backgroundColor: "rgba(255,255,255,0.08)",
@@ -3869,7 +3864,6 @@ export default function HomePage() {
                   Now
                 </Button>
                 <TextField
-                  label="Hour"
                   select
                   size="small"
                   value={timeSelHour}
@@ -3879,13 +3873,14 @@ export default function HomePage() {
                     setDepartureClock(`${pad2(h)}:${pad2(timeSelMinute)}`);
                   }}
                   SelectProps={{
+                    displayEmpty: true,
                     renderValue: () => pad2(timeSelHour),
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 80 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   {Array.from({ length: 24 }, (_, i) => i).map((h) => (
@@ -3898,22 +3893,19 @@ export default function HomePage() {
                 <Box
                   aria-hidden
                   sx={{
-                    height: 40,
+                    display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
                     px: 0.25,
                     fontWeight: 700,
-                    lineHeight: 1,
                     userSelect: "none",
-                    opacity: 0.9,
-                    // Hide the separator on very small screens to avoid awkward wrapping.
-                    display: { xs: "none", sm: "flex" },
+                    opacity: 0.7,
                   }}
                 >
                   :
                 </Box>
+
                 <TextField
-                  label="Minute"
                   select
                   size="small"
                   value={timeSelMinute}
@@ -3923,13 +3915,14 @@ export default function HomePage() {
                     setDepartureClock(`${pad2(timeSelHour)}:${pad2(mm)}`);
                   }}
                   SelectProps={{
+                    displayEmpty: true,
                     renderValue: () => pad2(timeSelMinute),
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 80 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   {Array.from({ length: 60 }, (_, i) => i).map((mm) => (
@@ -3938,8 +3931,8 @@ export default function HomePage() {
                     </MenuItem>
                   ))}
                 </TextField>
+
                 <TextField
-                  label="Day"
                   select
                   size="small"
                   value={dateSelDay}
@@ -3951,30 +3944,28 @@ export default function HomePage() {
                     );
                   }}
                   SelectProps={{
+                    displayEmpty: true,
                     renderValue: () => {
                       const dow = dayOfWeekShortUpper(
                         dateSelYear,
                         dateSelMonth,
                         dateSelDay,
                       );
-                      // Render weekday and numeric day as separate spans so we can
-                      // add a small left margin to the numeric day element.
                       return dow ? (
                         <span>
-                          <span>{dow}</span>
+                          <span style={{ opacity: 0.7 }}>{dow}</span>
                           <span style={{ marginLeft: 8 }}>{dateSelDay}</span>
                         </span>
                       ) : (
                         <span>{String(dateSelDay)}</span>
                       );
                     },
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    // keep this narrower than Month/Year, but aligned on the same row
-                    width: { xs: "calc(50% - 4px)", sm: 150 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 120 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   {Array.from(
@@ -3989,8 +3980,8 @@ export default function HomePage() {
                     </MenuItem>
                   ))}
                 </TextField>
+
                 <TextField
-                  label="Month / Year"
                   select
                   size="small"
                   value={`${dateSelYear}-${pad2(dateSelMonth)}`}
@@ -4012,18 +4003,18 @@ export default function HomePage() {
                     );
                   }}
                   SelectProps={{
+                    displayEmpty: true,
                     renderValue: () =>
-                      `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()}${"\u00A0\u00A0\u00A0\u00A0"}/${"\u00A0\u00A0\u00A0\u00A0"}${dateSelYear}`,
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                      `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()} ${dateSelYear}`,
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 180 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 140 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   {(() => {
-                    // Start three months earlier than now, and produce a 7-year (84 month) range
                     const start = new Date();
                     start.setMonth(start.getMonth() - 3);
                     const totalMonths = 7 * 12; // 7 years
@@ -4037,7 +4028,7 @@ export default function HomePage() {
                       const y = d.getFullYear();
                       const m = d.getMonth() + 1;
                       const val = `${y}-${pad2(m)}`;
-                      const label = `${new Date(y, m - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()}${"\u00A0\u00A0\u00A0\u00A0"}/${"\u00A0\u00A0\u00A0\u00A0"}${y}`;
+                      const label = `${new Date(y, m - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()} ${y}`;
                       opts.push(
                         <MenuItem
                           key={val}
@@ -4051,20 +4042,9 @@ export default function HomePage() {
                     return opts;
                   })()}
                 </TextField>
-              </Box>
 
-              {/* Transfers/mode group aligned under To */}
-              <Box
-                sx={{
-                  gridColumn: { xs: "1 / -1", md: 4 },
-                  display: "flex",
-                  gap: 1,
-                  alignItems: "stretch",
-                  flexWrap: "wrap",
-                  mt: { xs: 1, md: 0 },
-                  justifyContent: { xs: "flex-start", md: "flex-end" },
-                }}
-              >
+                <Box sx={{ flexGrow: 1 }} />
+
                 <TextField
                   select
                   size="small"
@@ -4074,22 +4054,23 @@ export default function HomePage() {
                     if (val !== null) setTransportMode(val);
                   }}
                   SelectProps={{
+                    displayEmpty: true,
                     renderValue: (selected) => {
                       if (!selected) return "";
                       return selected === "all"
-                        ? "All"
+                        ? "All Modes"
                         : selected.charAt(0).toUpperCase() + selected.slice(1);
                     },
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 120 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   <MenuItem value="all" sx={{ textAlign: "center" }}>
-                    All
+                    All Modes
                   </MenuItem>
                   <MenuItem value="bus" sx={{ textAlign: "center" }}>
                     Bus
@@ -4098,8 +4079,8 @@ export default function HomePage() {
                     Train
                   </MenuItem>
                 </TextField>
+
                 <TextField
-                  label="Transfers"
                   select
                   size="small"
                   value={maxTransfers}
@@ -4110,12 +4091,14 @@ export default function HomePage() {
                     );
                   }}
                   SelectProps={{
-                    SelectDisplayProps: { sx: { textAlign: "center" } },
+                    displayEmpty: true,
+                    renderValue: (val) => val === 0 ? "Direct" : `${val} ${val === 1 ? 'Transfer' : 'Transfers'}`,
+                    SelectDisplayProps: { sx: { textAlign: "center", py: 1 } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "calc(50% - 4px)", sm: 140 },
+                    "& .MuiOutlinedInput-root": { borderRadius: 2 },
                   }}
                 >
                   {[0, 1, 2, 3, 4, 5].map((n) => (
