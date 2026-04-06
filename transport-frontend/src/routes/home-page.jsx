@@ -790,7 +790,7 @@ export default function HomePage() {
     mapBbox,
   );
 
-  const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
+  const { alerts: serviceAlerts, loading: alertsLoading, error: alertsError } = useServiceAlerts();
   const { data: liveAlertUpdate, isConnected: alertsConnected } =
     useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
@@ -1858,14 +1858,21 @@ export default function HomePage() {
         : [];
     const combined = [...liveAlerts, ...apiAlerts];
     if (combined.length > 0) return combined.slice(0, 3);
-    return [
-      {
-        id: 1,
-        severity: "info",
-        message: "loading",
-      },
-    ];
-  }, [serviceAlerts, liveAlerts]);
+    
+    // Only drop to a fallback fake message if there was an actual error fetching.
+    // If it was successful but empty, we return empty so it correctly says "No alerts right now."
+    if (alertsError || alertsLoading) {
+      return [
+        {
+          id: 1,
+          severity: "info",
+          message: "loading",
+        },
+      ];
+    }
+    
+    return [];
+  }, [serviceAlerts, liveAlerts, alertsError, alertsLoading]);
 
   const allStops = useMemo(() => {
     const buildOptions = (results) => {
