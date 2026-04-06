@@ -318,6 +318,137 @@ class TestRouteLineAtStopEndpoint:
         assert "DB unavailable" in data["error"]
 
 
+class TestRouteLineEndpoint:
+    """Tests for GET /routes/line/{line}."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        api_module._route_line_cache.clear()
+
+    @pytest.fixture
+    def mock_merged(self):
+        class FakeMerged:
+            def __init__(self):
+                self.route_metadata = [
+                    {"route_id": "R0", "line_name": "PCX:100"},
+                    {"route_id": "R1", "line_name": "MAY:100"},
+                    {"route_id": "R2", "line_name": "OTHER:99"}
+                ]
+                self.journey_to_route = [0, 0, 1, 2]
+                # journey_times is list of lists of (stop_int, time_str)
+                self.journey_times = [
+                    # R0 - Journey 0: 3 stops, tight spacing
+                    [[0, "10:00"], [1, "10:05"], [2, "10:10"]],
+                    # R0 - Journey 1: 2 stops (much worse gap)
+                    [[0, "11:00"], [2, "11:05"]],
+                    # R1 - Journey 2: 4 stops, also tight spacing
+                    [[0, "12:00"], [1, "12:05"], [2, "12:10"], [3, "12:15"]],
+                    # R2 - Journey 3: ignored because it's line 99
+                    [[0, "13:00"], [2, "13:05"]]
+                ]
+                self.stop_metadata = ["Stop A", "Stop B", "Stop C", "Stop D"]
+
+            def get_atco_code(self, stop_int: int):
+                return f"STOP{stop_int}"
+
+        return FakeMerged()
+
+    @pytest.fixture
+    def mock_atco(self):
+        class FakeAtcoLoader:
+            def get_all_stop_coords(self):
+                return {
+                    "STOP0": (54.0, -2.8),
+                    "STOP1": (54.01, -2.81),
+                    "STOP2": (54.02, -2.82),
+                    "STOP3": (54.03, -2.83)
+                }
+        return FakeAtcoLoader()
+
+    def test_line_not_initialized(self, client: TestClient):
+        with patch.object(api_module, "get_router_for_date", side_effect=Exception("DB down")):
+            res = client.get("/routes/line/100")
+            assert res.status_code == 503
+            assert "Backend not initialized" in res.json()["error"]
+
+    def test_line_valid_response(self, client: TestClient, mock_merged, mock_atco):
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(mock_merged, MagicMock(), MagicMock())):
+                with patch.object(api_module, "_base_cache", {"atco_loader": mock_atco}):
+                    # Mock _fetch_route_tracks to provide a track source geometry
+                    with patch.object(api_module, "_fetch_route_tracks", return_value=[[54.0, -2.8], [54.01, -2.81]]):
+                        res = client.get("/routes/line/100")
+        
+        assert res.status_code == 200
+        data = res.json()
+        assert data["line"] == "100"
+        
+        # Both R0 and R1 have line_name matching 100
+        variants = data["variants"]
+        assert len(variants) == 2
+        
+        # Sort by stops descending -> R1 should be first (4 stops vs 3 stops)
+        assert variants[0]["route_id"] == "R1"
+        assert len(variants[0]["stops"]) == 4
+
+        # Verify the stops are attached in correct order and format
+        # R0 maps to journey 0 (STOP0 -> STOP1 -> STOP2)
+        r0_variant = next(v for v in variants if v["route_id"] == "R0")
+        assert len(r0_variant["stops"]) == 3
+        assert r0_variant["stops"][0]["atco_code"] == "STOP0"
+        assert r0_variant["stops"][0]["name"] == "Stop A"
+        
+        # Verify the track geometry fallback worked
+        assert r0_variant.get("geometry_source") == "track"
+        assert r0_variant["geometry"] == [[54.0, -2.8], [54.01, -2.81]]
+
+    def test_line_missing_returns_empty(self, client: TestClient, mock_merged, mock_atco):
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(mock_merged, MagicMock(), MagicMock())):
+                with patch.object(api_module, "_base_cache", {"atco_loader": mock_atco}):
+                    # Fallback geometry if missing track
+                    with patch.object(api_module, "_fetch_route_tracks", return_value=[]):
+                        res = client.get("/routes/line/999")
+                    
+        assert res.status_code == 200
+        data = res.json()
+        assert data["line"] == "999"
+        assert data["variants"] == []
+
+    def test_line_caching(self, client: TestClient, mock_merged, mock_atco):
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(mock_merged, MagicMock(), MagicMock())) as mock_get_router:
+                with patch.object(api_module, "_base_cache", {"atco_loader": mock_atco}):
+                    with patch.object(api_module, "_fetch_route_tracks", return_value=[]):
+                        # First call: sets cache
+                        res1 = client.get("/routes/line/100")
+                        assert res1.status_code == 200
+                        # Second call: uses cache
+                        res2 = client.get("/routes/line/100")
+                        assert res2.status_code == 200
+                        
+                        # Router should only be hit once
+                        mock_get_router.assert_called_once()
+                        assert res1.json() == res2.json()
+
+    def test_line_osrm_geometry_fallback(self, client: TestClient, mock_merged, mock_atco):
+        """Test fallback to OSRM when tracks are missing."""
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(mock_merged, MagicMock(), MagicMock())):
+                with patch.object(api_module, "_base_cache", {"atco_loader": mock_atco}):
+                    # Mock _fetch_route_tracks to return nothing, forcing OSRM fallback
+                    with patch.object(api_module, "_fetch_route_tracks", return_value=[]):
+                        # Mock OSRM to succeed
+                        with patch.object(api_module, "_query_osrm_for_coords", return_value=[["_lon_", "_lat_"], ["_lon2_", "_lat2_"]]):
+                            res = client.get("/routes/line/100")
+
+        assert res.status_code == 200
+        variants = res.json()["variants"]
+        assert len(variants) == 2
+        # Assuming the fallback kicks in
+        assert variants[0].get("geometry_source") == "osrm"
+
+
 # â”€â”€ get_router_for_date tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 

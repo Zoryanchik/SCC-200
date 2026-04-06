@@ -38,6 +38,7 @@ from api_search_utils import geocode_locations, looks_like_street as _looks_like
 from api_geometry_utils import (
     fetch_journey_times_external as _fetch_journey_times_external,
     fetch_logged_journey_from_db as _fetch_logged_journey_from_db,
+    fetch_route_tracks as _fetch_route_tracks,
     query_osrm_for_coords as _query_osrm_for_coords,
     query_osrm_for_coords_profile as _query_osrm_for_coords_profile,
     sample_coords_for_osrm as _sample_coords_for_osrm,
