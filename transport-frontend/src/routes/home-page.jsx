@@ -1861,13 +1861,8 @@ export default function HomePage() {
     return [
       {
         id: 1,
-        severity: "warning",
-        message: "M6 delays between J33-J36: 15 mins",
-      },
-      {
-        id: 2,
         severity: "info",
-        message: "Bus route 2 diversion via King Street",
+        message: "loading",
       },
     ];
   }, [serviceAlerts, liveAlerts]);
