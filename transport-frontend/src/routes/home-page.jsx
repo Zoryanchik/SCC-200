@@ -1473,7 +1473,7 @@ export default function HomePage() {
     data: trainDepartures,
     loading: trainLoading,
     error: trainError,
-  } = useLiveDepartures("LAN", 180000);
+  } = useLiveDepartures(["LAN", "PRE", "MCM", "BPS", "BPB"], 180000);
 
   // Update markers when real bus API data arrives
   useEffect(() => {

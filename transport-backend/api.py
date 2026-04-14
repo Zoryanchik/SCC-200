@@ -4869,6 +4869,18 @@ async def route_rail_departures(station_code):
             content={"error": str(exc)},
         )
 
+    facilities_fetch_url = f"https://transport.scc.lancs.ac.uk/rail/facilities/{station_code}"
+
+    try:
+        resp = requests.get(facilities_fetch_url, headers={"User-Agent": "transport-backend/1.0"}, timeout=10)
+        resp.raise_for_status()
+        facilities_data = resp.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": str(exc)},
+        )
+
     location_name = None
     services = []
     messages = []
@@ -4892,9 +4904,9 @@ async def route_rail_departures(station_code):
     # Add station information to services
     def add_service_data(s):
         s["stationName"] = location_name + " Station"
-        # FIXME: Hardcoded Lancaster Station
-        s["lat"] = 54.0486361
-        s["lon"] = -2.80811389
+        
+        s["lat"] = facilities_data["location"]["latitude"]
+        s["lon"] = facilities_data["location"]["longitude"]
         return s
 
     return [add_service_data(s) for s in services]
