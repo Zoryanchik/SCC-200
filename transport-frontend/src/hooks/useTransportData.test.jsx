@@ -69,10 +69,10 @@ describe('useTransportData hooks', () => {
     vi.useRealTimers()
     api.fetchRailDepartures.mockResolvedValueOnce([{ id: 1, destination: 'Preston' }])
 
-    const { result } = renderHook(() => useLiveDepartures('LAN', 10000))
+    const { result } = renderHook(() => useLiveDepartures(['LAN'], 10000))
 
     await waitFor(() => {
-      expect(api.fetchRailDepartures).toHaveBeenCalledWith('LAN')
+      expect(api.fetchRailDepartures).toHaveBeenCalledWith(['LAN'])
       expect(result.current.data.length).toBeGreaterThan(0)
     })
   })
