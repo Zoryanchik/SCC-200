@@ -21,6 +21,9 @@ import psycopg
 import urllib.request
 
 
+NORTHWEST_ATCO_PREFIXES = ("250", "259", "258", "090", "180", "280", "060", "061", "062", "065", "320", "329")
+
+
 class AtcoLoader:
     """Manage ATCO stop metadata: coords, names, types."""
 
@@ -101,7 +104,7 @@ class AtcoLoader:
         rows = []
         
         # Filter regions to strictly Northwest UK + Cumbria + Yorkshire to cover operators like ARCT, BLAC, KLCO, SCCU, SCMY, NUTT
-        allow_list = ("250", "259", "258", "090", "180", "280", "060", "061", "062", "065", "320", "329")
+        allow_list = NORTHWEST_ATCO_PREFIXES
         
         try:
             import xml.etree.ElementTree as ET
