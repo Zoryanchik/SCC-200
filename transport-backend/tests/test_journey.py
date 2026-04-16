@@ -289,6 +289,80 @@ class TestJourneyPlanMultiLeg:
         },
     }
 
+
+class TestJourneyPlanStationPreference:
+    """Ensure station-to-station requests can surface train routes in both mode."""
+
+    def test_both_mode_prefers_train_for_station_to_station(self, client):
+        bus_route = {
+            0: {"arrival_time": 36000, "prev_stop": None, "mode": None, "journey": None, "day": None},
+            1: {
+                "arrival_time": 36600,
+                "prev_stop": 0,
+                "mode": "bus",
+                "journey": 11,
+                "day": None,
+                "journey_info": {"line_name": "NW:41"},
+                "journey_origin": "Bus Station",
+                "journey_destination": "Bus Station",
+                "board_departure": 36120,
+            },
+            "_meta": {},
+        }
+        train_route = {
+            0: {"arrival_time": 36000, "prev_stop": None, "mode": None, "journey": None, "day": None},
+            1: {
+                "arrival_time": 37200,
+                "prev_stop": 0,
+                "mode": "train",
+                "journey": 22,
+                "day": None,
+                "journey_info": {"line_name": "Lancaster to Morecambe"},
+                "journey_origin": "Lancaster Rail Station",
+                "journey_destination": "Morecambe Rail Station",
+                "board_departure": 36180,
+            },
+            "_meta": {},
+        }
+
+        mock_router = MagicMock()
+        mock_router.route.side_effect = [bus_route, train_route]
+
+        merged = MagicMock()
+        merged.stop_to_routes = [[], []]
+        merged.stop_type.side_effect = lambda _i: api_module.TRAIN
+        merged.get_atco_code.side_effect = lambda i: "STN_A" if i == 0 else "STN_B"
+        merged.stop_metadata = ["Lancaster Rail Station", "Morecambe Rail Station"]
+
+        walking = MagicMock()
+        walking._coords = {}
+
+        atco_loader = MagicMock()
+        atco_loader.get_all_stop_coords.return_value = {
+            "STN_A": (54.0, -2.8),
+            "STN_B": (54.1, -2.9),
+        }
+
+        payload = {
+            "fromStop": {"lat": 54.0, "lon": -2.8},
+            "toStop": {"lat": 54.1, "lon": -2.9},
+            "departureTime": "10:00:00",
+            "date": "2026-02-16",
+            "maxTransfers": 3,
+            "mode": "both",
+        }
+
+        with patch.object(api_module, "get_router_for_date", return_value=(merged, mock_router, walking)):
+            with patch.object(api_module, "_base_cache", {"atco_loader": atco_loader}):
+                resp = client.post("/journey/plan", json=payload)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        transit_legs = [l for l in data.get("legs", []) if l.get("mode") in ("bus", "train")]
+        assert transit_legs
+        assert transit_legs[0]["mode"] == "train"
+        assert mock_router.route.call_count == 2
+
     def _post(self, client):
         mock_router = MagicMock()
         mock_router.route.return_value = dict(self.MULTI_LEG_RESULT)
@@ -572,3 +646,37 @@ class TestBuildJourneyPlanResponse:
         }
         result = build_journey_plan_response(route, merged, {})
         assert result["success"] is True
+
+    def test_transit_mode_uses_journey_type_over_info_mode(self):
+        """Bus journey id should remain bus even if info['mode'] is stale/wrong."""
+        merged = MagicMock()
+        merged.stop_metadata = ["Start", "Station"]
+        merged.journey_type.return_value = api_module.BUS
+
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            1: {
+                "arrival_time": 36600,
+                "prev_stop": 0,
+                # Simulate an incorrect per-stop mode label.
+                "mode": "train",
+                "journey": 123,
+                "day": None,
+                "journey_info": {"line_name": "NW:5"},
+                "journey_origin": "Town Centre",
+                "journey_destination": "Railway Station",
+                "board_departure": 36100,
+            },
+            "_meta": {},
+        }
+
+        result = build_journey_plan_response(route, merged, {})
+        transit_legs = [l for l in result["legs"] if l.get("line_name")]
+        assert transit_legs, "Expected at least one transit leg"
+        assert transit_legs[0]["mode"] == "bus"
