@@ -176,6 +176,8 @@ class TrainLoader:
             if not route_stops or not arrival_times:
                 continue
 
+            arrival_times, departure_times = self._normalize_journey_times(arrival_times, departure_times)
+
             train_data.add_route_stop(route_id, route_stops)
             train_data.add_journey_times(journey_id, arrival_times, departure_times)
             route_to_journeys[route_id].append(journey_id)
@@ -321,6 +323,32 @@ class TrainLoader:
         return day_shift * 86400 + hours * 3600 + minutes * 60
 
     @staticmethod
+    def _normalize_journey_times(arrival_times, departure_times):
+        """Normalize stop times into a non-decreasing journey timeline."""
+        if not arrival_times:
+            return [], []
+
+        normalized_arrivals = []
+        normalized_departures = []
+        last_departure = None
+
+        for idx, (stop_code, arrival) in enumerate(arrival_times):
+            arr = int(arrival)
+            dep = int(departure_times[idx]) if idx < len(departure_times) else arr
+
+            while last_departure is not None and arr < last_departure:
+                arr += 86400
+
+            while dep < arr:
+                dep += 86400
+
+            normalized_arrivals.append((stop_code, arr))
+            normalized_departures.append(dep)
+            last_departure = dep
+
+        return normalized_arrivals, normalized_departures
+
+    @staticmethod
     def _stop_name(tiploc_info, code):
         info = tiploc_info.get(code) or {}
         return (
@@ -446,6 +474,8 @@ class TrainLoader:
 
                 if not all(self._is_allowed_atco(code) for code in stop_codes):
                     continue
+
+                arrival_times, departure_times = self._normalize_journey_times(arrival_times, departure_times)
 
                 route_id = self._schedule_identity(payload, route_count)
                 route_count += 1

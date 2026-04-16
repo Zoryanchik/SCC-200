@@ -312,7 +312,7 @@ def initialize_base():
     # in build_for_date(), so nothing expensive happens here.
 
     def _train_task():
-        tl = TrainLoader(TRAIN_DB_PATH)
+        tl = TrainLoader(TRAIN_DB_PATH, atco_db_path=WALK_DB_PATH)
         tl.ensure_db()
         tl.create_schema()
         print("  [train] ✓ Ready")
@@ -346,7 +346,7 @@ def initialize_base():
     print(f"\n  [merged] Pre-building timetable for {today_str}...")
 
     # Load all 3 days' data in parallel (shared between AM and PM)
-    train_loader = TrainLoader(TRAIN_DB_PATH)
+    train_loader = TrainLoader(TRAIN_DB_PATH, atco_db_path=WALK_DB_PATH)
     # Try to use per-date pickled caches to avoid rebuilding BusData when the
     # underlying DB hasn't changed. Fall back to building and save the cache
     # for future runs. Train loaders keep their existing behaviour.
@@ -544,7 +544,7 @@ def build_for_date(loader, walking_raw, date_str, mode="both",
     _t_total0 = _time.perf_counter() if timing_enabled else None
 
     from concurrent.futures import ThreadPoolExecutor
-    train_loader = TrainLoader(TRAIN_DB_PATH)
+    train_loader = TrainLoader(TRAIN_DB_PATH, atco_db_path=WALK_DB_PATH)
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         bus_a_f = ex.submit(_load_busdata_cached, loader, day_a_str, timing=timing_enabled)
