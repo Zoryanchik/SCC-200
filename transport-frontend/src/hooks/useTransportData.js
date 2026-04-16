@@ -158,9 +158,9 @@ export const useLiveDepartures = (stationCodes, refreshInterval = 180000) => {
 
   const fetchData = useCallback(async () => {
     if (!stationCodes) return;
+    const data = [];
     try {
       setLoading(true);
-      const data = [];
       for(const stationCode of stationCodes) {
         const result = await withRetry(
           () => fetchRailDepartures(stationCode),
@@ -168,12 +168,12 @@ export const useLiveDepartures = (stationCodes, refreshInterval = 180000) => {
         );
         data.push(...result);
       }
-      setData(data);
       setError(null);
     } catch (err) {
       setError(err);
       console.error('Error fetching departures:', err);
     } finally {
+      setData(data);
       setLoading(false);
     }
   }, [...stationCodes]);
