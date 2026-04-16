@@ -26,7 +26,7 @@ import asyncio
 from time_utils import seconds_since_midnight, seconds_to_time
 from ws_server import broker as ws_broker, websocket_endpoint as ws_live_endpoint
 from station_classifier import classify_all, classify_to_lookup
-from modes import name_to_int, all_transit_modes
+from modes import name_to_int, all_transit_modes, BUS, TRAIN
 from api_models import (
     AddressRouteRequest,
     JourneyPlanRequest,
@@ -3645,6 +3645,22 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             return None
         return seconds_to_time(int(secs))
 
+    def _mode_from_info(info: dict, default: str = "unknown") -> str:
+        """Resolve mode from canonical journey type when possible."""
+        try:
+            j_id = info.get("journey")
+            if j_id is not None:
+                j_mode = merged.journey_type(int(j_id))
+                if j_mode == BUS:
+                    return "bus"
+                if j_mode == TRAIN:
+                    return "train"
+        except Exception:
+            pass
+
+        mode = (info.get("mode") or info.get("type") or "").lower()
+        return mode or default
+
     _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#e53935"}
     legs = []
     geometries = []
@@ -3690,7 +3706,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         first_arrival_secs = ordered[0][1]["arrival_time"]
         if len(ordered) > 1:
             next_info = ordered[1][1]
-            next_mode = (next_info.get("mode") or "").lower()
+            next_mode = _mode_from_info(next_info, default="bus")
             board_dep = next_info.get("board_departure")
             if board_dep is not None and board_dep < float("inf"):
                 if next_mode == "bus":
@@ -3737,7 +3753,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     for i in range(1, len(ordered)):
         prev_int, prev_info = ordered[i - 1]
         curr_int, curr_info = ordered[i]
-        transport = curr_info.get("mode") or curr_info.get("type") or "unknown"
+        transport = _mode_from_info(curr_info)
         prev_name = _display_name(prev_int)
         curr_name = _display_name(curr_int)
         prev_coord = _get_stop_coord(prev_int)
@@ -4532,6 +4548,41 @@ async def journey_plan(request: JourneyPlanRequest):
     routeGeometries for map polyline rendering.
     """
     try:
+        def _route_has_mode(route_result, mode_name: str) -> bool:
+            if not isinstance(route_result, dict):
+                return False
+            for key, info in route_result.items():
+                if key == "_meta" or not isinstance(info, dict):
+                    continue
+                if str(info.get("mode") or info.get("type") or "").lower() == mode_name:
+                    return True
+            return False
+
+        def _is_near_train_stop(point, merged_obj, atco_coords, max_meters: float = 500.0) -> bool:
+            if not point or len(point) < 2:
+                return False
+            lat, lon = float(point[0]), float(point[1])
+            lat_tol = max_meters / 111000.0
+            lon_scale = max(0.1, math.cos(math.radians(lat)))
+            lon_tol = max_meters / (111000.0 * lon_scale)
+
+            for s_idx in range(len(getattr(merged_obj, "stop_to_routes", []))):
+                try:
+                    if merged_obj.stop_type(s_idx) != TRAIN:
+                        continue
+                    atco = merged_obj.get_atco_code(s_idx)
+                    if not atco:
+                        continue
+                    coord = atco_coords.get(atco)
+                    if not coord:
+                        continue
+                    s_lat, s_lon = float(coord[0]), float(coord[1])
+                    if abs(s_lat - lat) <= lat_tol and abs(s_lon - lon) <= lon_tol:
+                        return True
+                except Exception:
+                    continue
+            return False
+
         start_point = (request.fromStop.lat, request.fromStop.lon)
         destination = (request.toStop.lat, request.toStop.lon)
         date_str = request.date
@@ -4557,6 +4608,31 @@ async def journey_plan(request: JourneyPlanRequest):
             destination=destination,
             allowed_modes=allowed_modes,
         )
+
+        # If the request is station-to-station and mixed-mode routing found no
+        # train leg, try train-only routing so obvious rail options are not
+        # hidden behind frequent local bus alternatives.
+        if mode == "both" and not _route_has_mode(result, "train"):
+            atco_coords = {}
+            try:
+                if globals().get('_base_cache') and _base_cache.get("atco_loader"):
+                    atco_coords = _base_cache["atco_loader"].get_all_stop_coords() or {}
+            except Exception:
+                atco_coords = {}
+
+            if atco_coords and _is_near_train_stop(start_point, merged, atco_coords) and _is_near_train_stop(destination, merged, atco_coords):
+                train_result = await asyncio.to_thread(
+                    router.route,
+                    n_transfer_limit=max_transfers,
+                    walking=walking,
+                    start_time=start_seconds,
+                    start_point=start_point,
+                    destination=destination,
+                    allowed_modes={"train"},
+                )
+                if train_result and set(train_result.keys()) != {"_meta"}:
+                    result = train_result
+
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(
             result, merged, stop_coords, request_start_seconds=start_seconds)
