@@ -3320,16 +3320,16 @@ export default function HomePage() {
                     textTransform: "none",
                     fontWeight: 600,
                     whiteSpace: "nowrap",
-                    color: "#00BCD4",
-                    borderColor: "rgba(0,188,212,0.7)",
-                    backgroundColor: "rgba(0,188,212,0.08)",
+                    color: "#FFFFFF",
+                    borderColor: "rgba(255,255,255,0.62)",
+                    backgroundColor: "rgba(255,255,255,0.06)",
                     "&:hover": {
-                      borderColor: "#00BCD4",
-                      backgroundColor: "rgba(0,188,212,0.16)",
+                      borderColor: "#FFFFFF",
+                      backgroundColor: "rgba(255,255,255,0.14)",
                     },
                   }}
                 >
-                  My location
+                  Use current location
                 </Button>
               </Box>
 
