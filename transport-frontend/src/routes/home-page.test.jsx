@@ -302,13 +302,15 @@ describe("HomePage marker update logic", () => {
     });
   });
 
-  test("renders default alerts when no API alerts are available", async () => {
-    api.fetchServiceAlerts.mockResolvedValue([]);
+  test("shows alerts loading state instead of mock fallback alerts", async () => {
+    api.fetchServiceAlerts.mockImplementation(
+      () => new Promise(() => {})
+    );
     vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText(/M6 delays/)).toBeTruthy();
+      expect(screen.getAllByRole("progressbar").length).toBeGreaterThan(0);
     });
   });
 
