@@ -1857,19 +1857,7 @@ export default function HomePage() {
           }))
         : [];
     const combined = [...liveAlerts, ...apiAlerts];
-    if (combined.length > 0) return combined.slice(0, 3);
-    return [
-      {
-        id: 1,
-        severity: "warning",
-        message: "M6 delays between J33-J36: 15 mins",
-      },
-      {
-        id: 2,
-        severity: "info",
-        message: "Bus route 2 diversion via King Street",
-      },
-    ];
+    return combined.slice(0, 3);
   }, [serviceAlerts, liveAlerts]);
 
   const allStops = useMemo(() => {
