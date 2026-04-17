@@ -181,12 +181,14 @@ export default function AppLayout({ children }) {
 										to="/"
 										color={pathname === "/" ? "secondary" : "inherit"}
 										variant={pathname === "/" ? "contained" : "text"}
-										size="small"
+										size="medium"
 										sx={{ 
 											textTransform: "none", 
 											fontWeight: 600,
-											minWidth: { xs: 72, sm: 84 },
-											px: { xs: 1.25, sm: 1.75 },
+											minWidth: { xs: 92, sm: 96 },
+											minHeight: { xs: 44, sm: 38 },
+											px: { xs: 1.5, sm: 1.75 },
+											fontSize: { xs: "0.95rem", sm: "0.9rem" },
 											flex: { xs: 1, sm: "0 0 auto" },
 											'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
 										}}
@@ -199,12 +201,14 @@ export default function AppLayout({ children }) {
 										to="/map-view"
 										color={pathname.startsWith("/map-view") ? "secondary" : "inherit"}
 										variant={pathname.startsWith("/map-view") ? "contained" : "text"}
-										size="small"
+										size="medium"
 										sx={{ 
 											textTransform: "none", 
 											fontWeight: 600,
-											minWidth: { xs: 72, sm: 84 },
-											px: { xs: 1.25, sm: 1.75 },
+											minWidth: { xs: 92, sm: 96 },
+											minHeight: { xs: 44, sm: 38 },
+											px: { xs: 1.5, sm: 1.75 },
+											fontSize: { xs: "0.95rem", sm: "0.9rem" },
 											flex: { xs: 1, sm: "0 0 auto" },
 											'&:focus-visible': { outline: '2px solid', outlineOffset: 2 }
 										}}
