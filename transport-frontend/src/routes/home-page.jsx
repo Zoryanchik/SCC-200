@@ -3292,25 +3292,45 @@ export default function HomePage() {
             <Box
               sx={{
                 display: "grid",
-                gap: 1,
+                gap: { xs: 1.25, md: 1 },
                 gridTemplateColumns: {
                   xs: "1fr",
-                  md: "48px 1fr 56px 1fr auto",
+                  md: "auto 1fr 56px 1fr auto",
                 },
                 alignItems: "center",
                 width: "100%",
               }}
             >
-              {/* Icon */}
+              {/* Location action */}
               <Box sx={{ gridColumn: { md: 1 } }}>
-                <IconButton
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<Crosshair size={16} />}
                   aria-label="Use my location"
                   onClick={handleUseMyLocation}
-                  size="large"
-                  sx={{ alignSelf: "center" }}
+                  sx={{
+                    alignSelf: "center",
+                    justifySelf: { xs: "stretch", md: "center" },
+                    width: { xs: "100%", md: "auto" },
+                    minWidth: { xs: 0, md: 172 },
+                    height: 44,
+                    px: 1.75,
+                    borderRadius: "14px",
+                    textTransform: "none",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    color: "#00BCD4",
+                    borderColor: "rgba(0,188,212,0.7)",
+                    backgroundColor: "rgba(0,188,212,0.08)",
+                    "&:hover": {
+                      borderColor: "#00BCD4",
+                      backgroundColor: "rgba(0,188,212,0.16)",
+                    },
+                  }}
                 >
-                  <Crosshair size={18} />
-                </IconButton>
+                  My location
+                </Button>
               </Box>
 
               {/* From input */}
@@ -3507,6 +3527,8 @@ export default function HomePage() {
                       }}
                       sx={{
                         "& .MuiOutlinedInput-root": {
+                          borderRadius: "12px",
+                          minHeight: 56,
                           "& fieldset": { borderColor: "#00BCD4" },
                           "&:hover fieldset": { borderColor: "#00BCD4" },
                           "&.Mui-focused fieldset": { borderColor: "#00BCD4" },
@@ -3554,8 +3576,8 @@ export default function HomePage() {
                   }}
                   size="large"
                   sx={{
-                    width: 56,
-                    height: 56,
+                    width: { xs: 48, md: 56 },
+                    height: { xs: 48, md: 56 },
                     p: 0,
                     display: "flex",
                     alignItems: "center",
@@ -3756,6 +3778,8 @@ export default function HomePage() {
                       }}
                       sx={{
                         "& .MuiOutlinedInput-root": {
+                          borderRadius: "12px",
+                          minHeight: 56,
                           "& fieldset": { borderColor: "#00BCD4" },
                           "&:hover fieldset": { borderColor: "#00BCD4" },
                           "&.Mui-focused fieldset": { borderColor: "#00BCD4" },
@@ -3793,6 +3817,11 @@ export default function HomePage() {
                     minWidth: { xs: "100%", md: 180 },
                     height: 56,
                     flexShrink: 0,
+                    borderRadius: "12px",
+                    fontWeight: 700,
+                    textTransform: "none",
+                    fontSize: { xs: "1rem", sm: "1rem" },
+                    letterSpacing: "0.01em",
                   }}
                   onClick={handleSearch}
                   disabled={!fromCoords || !toCoords || isSearching}
@@ -3808,17 +3837,16 @@ export default function HomePage() {
               {/* Date/time group aligned under From */}
               <Box
                 sx={{
-                  gridColumn: { xs: "1 / -1", md: 2 },
-                  display: "flex",
-                  gap: 1,
+                  gridColumn: "1 / -1",
+                  display: { xs: "grid", sm: "flex" },
+                  gridTemplateColumns: { xs: "1fr 1fr", sm: "none" },
+                  gap: { xs: 1.1, sm: 1 },
                   alignItems: "stretch",
-                  flexWrap: { xs: "wrap", sm: "nowrap" },
-                  // keep Hour aligned with the From field start; on desktop the main grid
-                  // has a 48px icon column, so we shift the time row left by that amount
-                  // slight extra nudge left so the Now button sits more centered
-                  // relative to the locate icon, without moving the locate icon itself
-                  ml: { md: "-56px" },
-                  mt: { xs: 1, md: 0 },
+                  flexWrap: { sm: "wrap", md: "nowrap" },
+                  justifyContent: { xs: "stretch", sm: "center" },
+                  width: { xs: "100%", sm: "fit-content" },
+                  mx: { xs: 0, sm: "auto" },
+                  mt: { xs: 1.5, md: 1.25 },
                 }}
               >
                 <Button
@@ -3842,12 +3870,17 @@ export default function HomePage() {
                     setDepartureDate(`${String(y)}-${pad2(m)}-${pad2(d)}`);
                   }}
                   sx={{
-                    height: 40,
-                    minWidth: 44,
+                    height: 48,
+                    minWidth: 72,
                     px: 1,
                     flexShrink: 0,
+                    gridColumn: { xs: "1 / -1", sm: "auto" },
                     color: "#fff",
                     borderColor: "#fff",
+                    borderWidth: 1.5,
+                    fontWeight: 700,
+                    fontSize: { xs: "1rem", sm: "0.95rem" },
+                    textTransform: "none",
                     "&:hover": {
                       borderColor: "#fff",
                       backgroundColor: "rgba(255,255,255,0.08)",
@@ -3872,8 +3905,32 @@ export default function HomePage() {
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "100%", sm: 90 },
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.82)",
+                      fontWeight: 500,
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   {Array.from({ length: 24 }, (_, i) => i).map((h) => (
@@ -3916,8 +3973,32 @@ export default function HomePage() {
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "100%", sm: 90 },
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.82)",
+                      fontWeight: 500,
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   {Array.from({ length: 60 }, (_, i) => i).map((mm) => (
@@ -3961,8 +4042,32 @@ export default function HomePage() {
                   }}
                   sx={{
                     // keep this narrower than Month/Year, but aligned on the same row
-                    width: { xs: "calc(50% - 4px)", sm: 150 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "100%", sm: 150 },
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.82)",
+                      fontWeight: 500,
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   {Array.from(
@@ -4001,13 +4106,38 @@ export default function HomePage() {
                   }}
                   SelectProps={{
                     renderValue: () =>
-                      `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()}${"\u00A0\u00A0\u00A0\u00A0"}/${"\u00A0\u00A0\u00A0\u00A0"}${dateSelYear}`,
+                      `${new Date(dateSelYear, dateSelMonth - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()} / ${dateSelYear}`,
                     SelectDisplayProps: { sx: { textAlign: "center" } },
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 180 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    width: { xs: "100%", sm: 180 },
+                    gridColumn: "auto",
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.82)",
+                      fontWeight: 500,
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   {(() => {
@@ -4025,7 +4155,7 @@ export default function HomePage() {
                       const y = d.getFullYear();
                       const m = d.getMonth() + 1;
                       const val = `${y}-${pad2(m)}`;
-                      const label = `${new Date(y, m - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()}${"\u00A0\u00A0\u00A0\u00A0"}/${"\u00A0\u00A0\u00A0\u00A0"}${y}`;
+                      const label = `${new Date(y, m - 1, 1).toLocaleString(undefined, { month: "short" }).toUpperCase()} / ${y}`;
                       opts.push(
                         <MenuItem
                           key={val}
@@ -4039,21 +4169,8 @@ export default function HomePage() {
                     return opts;
                   })()}
                 </TextField>
-              </Box>
-
-              {/* Transfers/mode group aligned under To */}
-              <Box
-                sx={{
-                  gridColumn: { xs: "1 / -1", md: 4 },
-                  display: "flex",
-                  gap: 1,
-                  alignItems: "stretch",
-                  flexWrap: "wrap",
-                  mt: { xs: 1, md: 0 },
-                  justifyContent: { xs: "flex-start", md: "flex-end" },
-                }}
-              >
                 <TextField
+                  label="Mode"
                   select
                   size="small"
                   value={transportMode}
@@ -4072,8 +4189,44 @@ export default function HomePage() {
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    flex: { sm: "0 0 auto" },
+                    width: { xs: "100%", sm: 150 },
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                      backgroundColor: "rgba(255,255,255,0.03)",
+                      "& fieldset": {
+                        borderColor: "rgba(255,255,255,0.28)",
+                      },
+                      "&:hover fieldset": {
+                        borderColor: "rgba(255,255,255,0.42)",
+                      },
+                      "&.Mui-focused fieldset": {
+                        borderColor: "#00BCD4",
+                      },
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.74)",
+                      fontWeight: 500,
+                      fontSize: "0.92rem",
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   <MenuItem value="all" sx={{ textAlign: "center" }}>
@@ -4102,8 +4255,44 @@ export default function HomePage() {
                     MenuProps: { PaperProps: { sx: { maxHeight: 240 } } },
                   }}
                   sx={{
-                    width: { xs: "calc(50% - 4px)", sm: 90 },
-                    "& .MuiSelect-select": { textAlign: "center" },
+                    flex: { sm: "0 0 auto" },
+                    width: { xs: "100%", sm: 150 },
+                    "& .MuiOutlinedInput-root": {
+                      minHeight: 48,
+                      borderRadius: "12px",
+                      backgroundColor: "rgba(255,255,255,0.03)",
+                      "& fieldset": {
+                        borderColor: "rgba(255,255,255,0.28)",
+                      },
+                      "&:hover fieldset": {
+                        borderColor: "rgba(255,255,255,0.42)",
+                      },
+                      "&.Mui-focused fieldset": {
+                        borderColor: "#00BCD4",
+                      },
+                    },
+                    "& .MuiSelect-select": {
+                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      paddingLeft: "14px !important",
+                      paddingRight: "34px !important",
+                      fontSize: { xs: "1rem", sm: "0.95rem" },
+                      fontWeight: 600,
+                      letterSpacing: "0.01em",
+                    },
+                    "& .MuiSelect-icon": {
+                      right: 10,
+                    },
+                    "& .MuiInputLabel-root": {
+                      color: "rgba(255,255,255,0.74)",
+                      fontWeight: 500,
+                      fontSize: "0.92rem",
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: "rgba(255,255,255,0.92)",
+                    },
                   }}
                 >
                   {[0, 1, 2, 3, 4, 5].map((n) => (
