@@ -1,61 +1,102 @@
 # Transport App Frontend
 
-The frontend is a SPA built using React.
+This folder contains the React single-page application for the SCC-200 transport system.
 
-Stack/Libraries:
-- Vite - bundler
-- React - UI Framework
-- React-Router - Client-side routing
-- (MUI) Material UI - Component & Styling
-- React-Leaflet/Leaflet - Map Components
+## Tech stack
 
-## Routes:
-- / -> Home Page (possible Dashboard)
-- /map-view -> The primary map overview page
+- Vite (build and dev server)
+- React + React Router
+- Material UI
+- React Leaflet / Leaflet
 
-## Running
+## App routes
 
-First ensure dependencies are installed:
+- / : Home page
+- /map-view : Map-focused page
+
+## Prerequisites
+
+Install these before running locally:
+
+- Node.js 20 or newer (includes npm)
+- Backend API running on port 5050 for full functionality
+- Optional: OSRM service if you need direct OSRM integration
+
+## Run frontend only (local dev)
+
+1. Open a terminal in this folder.
+2. Install dependencies:
 
 ```bash
 npm install
 ```
 
-Then open a local server via:
+3. Start the dev server:
+
 ```bash
 npm run dev
 ```
 
-By default the development server binds to port 5075 for this project. To open the app in a browser use:
+4. Open:
 
-```bash
+```text
 http://localhost:5075
 ```
 
-### Run in a Podman container (port 5075)
+## Run full program (recommended)
 
-If you're already running the backend container on the default user network (`scc200-net-edillocnon`), you can start the frontend in a matching container too:
+Run backend and frontend in separate terminals from the repository root.
+
+1. Start backend:
+
+```bash
+cd transport-backend
+./run_backend.sh
+```
+
+2. Start frontend:
+
+```bash
+cd transport-frontend
+npm install
+npm run dev
+```
+
+3. Open the frontend:
+
+```text
+http://localhost:5075
+```
+
+The frontend expects the backend API at http://localhost:5050 unless overridden.
+
+## Container run (Podman or Docker)
+
+If the backend container is already running on the shared user network, you can run the frontend container with:
 
 ```bash
 cd transport-frontend
 ./run_frontend.sh
 ```
 
-Notes:
+Defaults used by the script:
 
-- The script will free host port **5075** if it’s already in use.
-- The container joins the same network as the backend (default: `scc200-net-edillocnon`).
-- By default it points the frontend at a host-reachable backend URL:
-	- `VITE_API_BASE_URL=http://localhost:5050`
-- OSRM road-snapping is performed via the backend proxy endpoint by default:
-	- the frontend calls `GET /osrm/route` on the backend
-	- the backend forwards to its configured `OSRM_URL` (can be a docker-only hostname)
+- Frontend port: 5075
+- Network name: scc200-net-edillocnon
+- API base URL: http://localhost:5050
+- OSRM base URL (optional direct mode): http://127.0.0.1:5012
 
-If you *really* want the browser to call OSRM directly, you can set:
-	- `VITE_OSRM_BASE=http://127.0.0.1:5012`
-
-You can override any of these with environment variables:
+Override defaults with environment variables:
 
 ```bash
 NETWORK_NAME=... VITE_API_BASE_URL=... VITE_OSRM_BASE=... ./run_frontend.sh
 ```
+
+## Common issues
+
+- npm command not found:
+  Install Node.js 20+ and restart the terminal.
+- Blank or partial live data:
+  Confirm backend is running and reachable at http://localhost:5050.
+- Port already in use:
+  Stop the process using port 5075, then restart npm run dev.
