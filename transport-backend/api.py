@@ -8,12 +8,13 @@ by the frontend.
 from contextlib import asynccontextmanager
 import json
 import logging
+import math
 import os
 import time
 import sys
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request as UrllibRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -3370,6 +3371,104 @@ def _filter_variants_near_point(
     return [], False
 
 
+def _stitch_route_variant_from_link_tracks(
+    merged,
+    route_int: int,
+    atcos: List[str],
+    *,
+    allow_partial: bool = True,
+) -> Optional[List[List[float]]]:
+    """Best-effort stitch for a route variant from route_link_tracks.
+
+    Why this helper exists:
+    - Some routes legitimately repeat the same ATCO code in a loop.
+    - Some providers publish stop order and section-link fragments that are
+      almost aligned but miss one terminal adjacency.
+
+    We therefore:
+    1) map requested ATCOs onto route_stops in forward order (duplicate-aware),
+    2) stitch direct fragment edges,
+    3) when a later edge is missing and ``allow_partial`` is true, keep the
+       stitched prefix instead of discarding everything.
+    """
+    try:
+        if not isinstance(route_int, int):
+            return None
+        if not isinstance(atcos, list) or len(atcos) < 2:
+            return None
+
+        # Access fragment map
+        try:
+            if hasattr(merged, 'get_route_link_tracks'):
+                link_map = merged.get_route_link_tracks(route_int)
+            else:
+                links = getattr(merged, 'route_link_tracks', None)
+                link_map = links[route_int] if (links and route_int < len(links)) else None
+        except Exception:
+            link_map = None
+        if not link_map or not isinstance(link_map, dict):
+            return None
+
+        route_stops = merged.route_stops[route_int] if route_int < len(getattr(merged, 'route_stops', []) or []) else []
+        if not route_stops or len(route_stops) < 2:
+            return None
+
+        # Build ATCO -> ordered list of positions in route_stops (not first-only).
+        atco_positions: Dict[str, List[int]] = {}
+        for pos, s_int in enumerate(route_stops):
+            try:
+                c = merged.get_atco_code(s_int)
+            except Exception:
+                c = None
+            if c:
+                atco_positions.setdefault(str(c).strip(), []).append(pos)
+
+        # Resolve requested ATCO sequence to concrete stop_int sequence in route order.
+        stop_ints: List[int] = []
+        cursor = -1
+        for a in atcos:
+            key = str(a).strip()
+            pos_list = atco_positions.get(key) or []
+            if not pos_list:
+                continue
+            chosen_pos = None
+            for p in pos_list:
+                if p > cursor:
+                    chosen_pos = p
+                    break
+            if chosen_pos is None:
+                # Wrap once for looping routes.
+                chosen_pos = pos_list[0]
+            stop_ints.append(route_stops[chosen_pos])
+            cursor = chosen_pos
+
+        if len(stop_ints) < 2:
+            return None
+
+        stitched_pts: List[Tuple[float, float]] = []
+        stitched_edges = 0
+        for a, b in zip(stop_ints, stop_ints[1:]):
+            seg = link_map.get((a, b))
+            if not seg:
+                rev = link_map.get((b, a))
+                if rev:
+                    seg = list(reversed(rev))
+            if not seg:
+                if allow_partial and stitched_edges > 0:
+                    break
+                return None
+            if stitched_pts and seg and stitched_pts[-1] == seg[0]:
+                stitched_pts.extend(seg[1:])
+            else:
+                stitched_pts.extend(seg)
+            stitched_edges += 1
+
+        coords = _normalize_latlon_coords(stitched_pts)
+        return coords if len(coords) >= 2 else None
+    except Exception:
+        return None
+
+
 @app.get("/routes/label/{line}")
 async def route_label(
     line: str,
@@ -3742,64 +3841,17 @@ async def routes_for_line(
             if not isinstance(r_int, int):
                 continue
 
-            # 1) try fragment stitching using route_link_tracks
-            stitched = None
-            try:
-                if hasattr(merged, 'get_route_link_tracks'):
-                    link_map = merged.get_route_link_tracks(r_int)
-                else:
-                    links = getattr(merged, 'route_link_tracks', None)
-                    link_map = links[r_int] if (links and r_int < len(links)) else None
-
-                if link_map and isinstance(link_map, dict):
-                    stops = v.get('stops') or []
-                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
-                    if len(atcos) >= 2:
-                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
-                        atco_to_stop = {}
-                        for s_int in route_stops or []:
-                            try:
-                                c = merged.get_atco_code(s_int)
-                            except Exception:
-                                c = None
-                            if c:
-                                atco_to_stop[str(c)] = s_int
-
-                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
-                        stop_ints = [x for x in stop_ints if x is not None]
-                        if len(stop_ints) >= 2:
-                            stitched_pts = []
-                            ok = True
-                            for a, b in zip(stop_ints, stop_ints[1:]):
-                                seg = link_map.get((a, b))
-                                if not seg:
-                                    rev = link_map.get((b, a))
-                                    if rev:
-                                        seg = list(reversed(rev))
-                                if not seg:
-                                    ok = False
-                                    break
-                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
-                                    stitched_pts.extend(seg[1:])
-                                else:
-                                    stitched_pts.extend(seg)
-                            if ok and len(stitched_pts) >= 2:
-                                stitched = stitched_pts
-            except Exception:
-                stitched = None
-
-            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
-                coords = []
-                for pt in stitched:
-                    try:
-                        lat_pt, lon_pt = pt
-                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
-                            coords.append([float(lat_pt), float(lon_pt)])
-                    except Exception:
-                        continue
-                if len(coords) >= 2:
-                    v['geometry'] = coords
-                    v['geometry_source'] = 'route_link_tracks'
+            stops = v.get('stops') or []
+            atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+            coords = _stitch_route_variant_from_link_tracks(
+                merged,
+                r_int,
+                atcos,
+                allow_partial=True,
+            )
+            if coords and len(coords) >= 2:
+                v['geometry'] = coords
+                v['geometry_source'] = 'route_link_tracks'
             else:
                 # Never fall back to a full-route polyline for line overlays.
                 # Full polylines can be jumbled (merged inbound/outbound/branches)
@@ -3968,63 +4020,17 @@ async def routes_for_stop(atco: str):
             if not isinstance(r_int, int):
                 continue
 
-            stitched = None
-            try:
-                if hasattr(merged, 'get_route_link_tracks'):
-                    link_map = merged.get_route_link_tracks(r_int)
-                else:
-                    links = getattr(merged, 'route_link_tracks', None)
-                    link_map = links[r_int] if (links and r_int < len(links)) else None
-
-                if link_map and isinstance(link_map, dict):
-                    stops = v.get('stops') or []
-                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
-                    if len(atcos) >= 2:
-                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
-                        atco_to_stop = {}
-                        for s_int in route_stops or []:
-                            try:
-                                c = merged.get_atco_code(s_int)
-                            except Exception:
-                                c = None
-                            if c:
-                                atco_to_stop[str(c)] = s_int
-
-                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
-                        stop_ints = [x for x in stop_ints if x is not None]
-                        if len(stop_ints) >= 2:
-                            stitched_pts = []
-                            ok = True
-                            for a, b in zip(stop_ints, stop_ints[1:]):
-                                seg = link_map.get((a, b))
-                                if not seg:
-                                    rev = link_map.get((b, a))
-                                    if rev:
-                                        seg = list(reversed(rev))
-                                if not seg:
-                                    ok = False
-                                    break
-                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
-                                    stitched_pts.extend(seg[1:])
-                                else:
-                                    stitched_pts.extend(seg)
-                            if ok and len(stitched_pts) >= 2:
-                                stitched = stitched_pts
-            except Exception:
-                stitched = None
-
-            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
-                coords = []
-                for pt in stitched:
-                    try:
-                        lat_pt, lon_pt = pt
-                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
-                            coords.append([float(lat_pt), float(lon_pt)])
-                    except Exception:
-                        continue
-                if len(coords) >= 2:
-                    v['geometry'] = coords
-                    v['geometry_source'] = 'route_link_tracks'
+            stops = v.get('stops') or []
+            atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+            coords = _stitch_route_variant_from_link_tracks(
+                merged,
+                r_int,
+                atcos,
+                allow_partial=True,
+            )
+            if coords and len(coords) >= 2:
+                v['geometry'] = coords
+                v['geometry_source'] = 'route_link_tracks'
             else:
                 try:
                     v.pop('geometry', None)
@@ -4223,64 +4229,18 @@ async def routes_for_line_at_stop(
             r_int = v.get('route_int')
             if not isinstance(r_int, int):
                 continue
-            stitched = None
 
-            try:
-                if hasattr(merged, 'get_route_link_tracks'):
-                    link_map = merged.get_route_link_tracks(r_int)
-                else:
-                    links = getattr(merged, 'route_link_tracks', None)
-                    link_map = links[r_int] if (links and r_int < len(links)) else None
-
-                if link_map and isinstance(link_map, dict):
-                    stops = v.get('stops') or []
-                    atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
-                    if len(atcos) >= 2:
-                        route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
-                        atco_to_stop = {}
-                        for s_int in route_stops or []:
-                            try:
-                                c = merged.get_atco_code(s_int)
-                            except Exception:
-                                c = None
-                            if c:
-                                atco_to_stop[str(c)] = s_int
-
-                        stop_ints = [atco_to_stop.get(str(a)) for a in atcos]
-                        stop_ints = [x for x in stop_ints if x is not None]
-                        if len(stop_ints) >= 2:
-                            stitched_pts = []
-                            ok = True
-                            for a, b in zip(stop_ints, stop_ints[1:]):
-                                seg = link_map.get((a, b))
-                                if not seg:
-                                    rev = link_map.get((b, a))
-                                    if rev:
-                                        seg = list(reversed(rev))
-                                if not seg:
-                                    ok = False
-                                    break
-                                if stitched_pts and seg and stitched_pts[-1] == seg[0]:
-                                    stitched_pts.extend(seg[1:])
-                                else:
-                                    stitched_pts.extend(seg)
-                            if ok and len(stitched_pts) >= 2:
-                                stitched = stitched_pts
-            except Exception:
-                stitched = None
-
-            if stitched and isinstance(stitched, list) and len(stitched) >= 2:
-                coords = []
-                for pt in stitched:
-                    try:
-                        lat_pt, lon_pt = pt
-                        if isinstance(lat_pt, (int, float)) and isinstance(lon_pt, (int, float)):
-                            coords.append([float(lat_pt), float(lon_pt)])
-                    except Exception:
-                        continue
-                if len(coords) >= 2:
-                    v['geometry'] = coords
-                    v['geometry_source'] = 'route_link_tracks'
+            stops = v.get('stops') or []
+            atcos = [s.get('atco_code') for s in stops if isinstance(s, dict) and s.get('atco_code')]
+            coords = _stitch_route_variant_from_link_tracks(
+                merged,
+                r_int,
+                atcos,
+                allow_partial=True,
+            )
+            if coords and len(coords) >= 2:
+                v['geometry'] = coords
+                v['geometry_source'] = 'route_link_tracks'
             else:
                 v.pop('geometry', None)
                 v.pop('geometry_source', None)

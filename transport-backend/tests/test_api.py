@@ -268,6 +268,93 @@ class TestRouteLineAtStopEndpoint:
         assert payload["variants"][0]["route_id"] == "R0"
         assert payload["variants"][0].get("geometry_source") == "route_link_tracks"
 
+    def test_line_at_stop_keeps_partial_geometry_when_tail_edge_missing(self, client: TestClient):
+        """If one later adjacency is missing, keep stitched prefix instead of dropping geometry."""
+        class FakeMerged:
+            def __init__(self):
+                self.stop_to_routes = [[0], [0], [0], [0]]
+                self.route_metadata = [{"route_id": "R0", "line_name": "PCX:18"}]
+                self.route_stops = [[0, 1, 2, 3]]
+                self.stop_metadata = ["S0", "S1", "S2", "S3"]
+
+            def get_atco_code(self, stop_int: int):
+                return ["STOP0", "STOP1", "STOP2", "STOP3"][stop_int]
+
+            def get_route_link_tracks(self, route_int: int):
+                # Missing tail edge (2->3) on purpose.
+                return {
+                    (0, 1): [(54.0, -2.8), (54.01, -2.81)],
+                    (1, 2): [(54.01, -2.81), (54.02, -2.82)],
+                }
+
+        fake_merged = FakeMerged()
+        fake_router = MagicMock()
+        fake_walking = MagicMock()
+
+        class FakeAtcoLoader:
+            def get_all_stop_coords(self):
+                return {
+                    "STOP0": (54.0, -2.8),
+                    "STOP1": (54.01, -2.81),
+                    "STOP2": (54.02, -2.82),
+                    "STOP3": (54.03, -2.83),
+                }
+
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "1"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(fake_merged, fake_router, fake_walking)):
+                with patch.object(api_module, "_base_cache", {"atco_loader": FakeAtcoLoader()}):
+                    res = client.get("/routes/line_at_stop/STOP0/18")
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert len(payload["variants"]) == 1
+        v0 = payload["variants"][0]
+        assert v0.get("geometry_source") == "route_link_tracks"
+        assert isinstance(v0.get("geometry"), list)
+        assert len(v0["geometry"]) >= 2
+
+    def test_line_at_stop_does_not_emit_geometry_when_first_edge_missing(self, client: TestClient):
+        """Safety: if stitching cannot start, keep geometry omitted."""
+        class FakeMerged:
+            def __init__(self):
+                self.stop_to_routes = [[0], [0], [0]]
+                self.route_metadata = [{"route_id": "R0", "line_name": "PCX:18"}]
+                self.route_stops = [[0, 1, 2]]
+                self.stop_metadata = ["S0", "S1", "S2"]
+
+            def get_atco_code(self, stop_int: int):
+                return ["STOP0", "STOP1", "STOP2"][stop_int]
+
+            def get_route_link_tracks(self, route_int: int):
+                # First edge (0->1) missing; only later edge exists.
+                return {
+                    (1, 2): [(54.01, -2.81), (54.02, -2.82)],
+                }
+
+        fake_merged = FakeMerged()
+        fake_router = MagicMock()
+        fake_walking = MagicMock()
+
+        class FakeAtcoLoader:
+            def get_all_stop_coords(self):
+                return {
+                    "STOP0": (54.0, -2.8),
+                    "STOP1": (54.01, -2.81),
+                    "STOP2": (54.02, -2.82),
+                }
+
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "1"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(fake_merged, fake_router, fake_walking)):
+                with patch.object(api_module, "_base_cache", {"atco_loader": FakeAtcoLoader()}):
+                    res = client.get("/routes/line_at_stop/STOP0/18")
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert len(payload["variants"]) == 1
+        v0 = payload["variants"][0]
+        assert v0.get("geometry") is None
+        assert v0.get("geometry_source") is None
+
     def test_line_at_stop_allows_coded_exact_match(self, client: TestClient):
         """If a coded line id is provided (contains ':'), match exactly."""
         class FakeMerged:
