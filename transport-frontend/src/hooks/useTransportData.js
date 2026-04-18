@@ -148,31 +148,35 @@ export const useLiveBusLocations = (
 
 /**
  * Hook for fetching and managing rail departures
- * @param {string} stationCode - Station CRS code
+ * @param {string} stationCodes - Station CRS codes
  * @param {number} refreshInterval - Refresh interval in milliseconds (default: 30000)
  */
-export const useLiveDepartures = (stationCode, refreshInterval = 180000) => {
+export const useLiveDepartures = (stationCodes, refreshInterval = 180000) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const fetchData = useCallback(async () => {
-    if (!stationCode) return;
+    if (!stationCodes) return;
+    const data = [];
     try {
       setLoading(true);
-      const result = await withRetry(
-        () => fetchRailDepartures(stationCode),
-        { retries: 2, baseDelay: 500 }
-      );
-      setData(result);
+      for(const stationCode of stationCodes) {
+        const result = await withRetry(
+          () => fetchRailDepartures(stationCode),
+          { retries: 2, baseDelay: 500 }
+        );
+        data.push(...result);
+      }
       setError(null);
     } catch (err) {
       setError(err);
       console.error('Error fetching departures:', err);
     } finally {
+      setData(data);
       setLoading(false);
     }
-  }, [stationCode]);
+  }, [...stationCodes]);
 
   useEffect(() => {
     fetchData();

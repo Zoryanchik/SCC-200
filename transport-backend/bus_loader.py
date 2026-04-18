@@ -215,7 +215,7 @@ class BusLoader:
                 atco_code  TEXT,
                 stop_order INTEGER NOT NULL,
                 revision   INTEGER,
-                PRIMARY KEY (route_id, atco_code)
+                PRIMARY KEY (route_id, stop_order)
             );
             -- Allow a single journey to map to multiple route sections.
             -- Use a composite primary key (journey_id, route_id) so a
@@ -1197,17 +1197,17 @@ class BusLoader:
                 cur.execute(f"INSERT INTO {table} ({col_list}) SELECT {col_list} FROM {temp_table}{on_conf}")
 
         _rs_cols = ['route_id', 'atco_code', 'stop_order']
-        _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order'
+        _rs_conflict = 'ON CONFLICT (route_id, stop_order) DO UPDATE SET atco_code = EXCLUDED.atco_code'
         if _rs_has_rev:
             _rs_cols.append('revision')
-            _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order, revision = EXCLUDED.revision'
+            _rs_conflict = 'ON CONFLICT (route_id, stop_order) DO UPDATE SET atco_code = EXCLUDED.atco_code, revision = EXCLUDED.revision'
         _chunked_multi_insert(
             cursor,
             'bus_route_stops',
             _rs_cols,
             route_stops,
             on_conflict=_rs_conflict,
-            key_indices=(0, 1),  # (route_id, atco_code)
+            key_indices=(0, 2),  # (route_id, stop_order)
         )
         # Journey rows now use a composite PK (journey_id, route_id) so a
         # single VehicleJourney can be associated with multiple section
@@ -1340,7 +1340,11 @@ class BusLoader:
             SELECT t.journey_id, t.atco_code, t.arrival_time
             FROM bus_journey_times t
             LEFT JOIN bus_journey_routes jr ON jr.journey_id = t.journey_id
-            LEFT JOIN bus_route_stops rs ON rs.route_id = jr.route_id AND rs.atco_code = t.atco_code
+            LEFT JOIN (
+                SELECT route_id, atco_code, MIN(stop_order) AS stop_order
+                FROM bus_route_stops
+                GROUP BY route_id, atco_code
+            ) rs ON rs.route_id = jr.route_id AND rs.atco_code = t.atco_code
             ORDER BY t.journey_id, COALESCE(rs.stop_order, 1000000), t.atco_code
             """
         )
@@ -1472,7 +1476,7 @@ class BusLoader:
         Args:
             date_str: 'YYYY-MM-DD'
         """
-        from datetime import date as _date
+        from datetime import date as _date, timedelta as _timedelta
         import os as _os
         import time as _time
         query_date = _date.fromisoformat(date_str)
@@ -1523,37 +1527,6 @@ class BusLoader:
             cache['service_ranges'] = service_ranges
         _log('phase_service_ranges', _t_ranges)
 
-
-        # 1b. Load service operating periods (coarse outer boundary)
-        _t_periods = _time.perf_counter() if timing_enabled else None
-        svc_periods = cache.get('svc_periods')
-        if svc_periods is None:
-            svc_periods = {}  # service_code -> (start_date | None, end_date | None)
-            for svc, sd, ed in cur.execute("SELECT service_code, start_date, end_date FROM bus_service_operating_period"):
-                try:
-                    sp_s = _date.fromisoformat(sd) if sd else None
-                    sp_e = _date.fromisoformat(ed) if ed else None
-                except ValueError:
-                    sp_s, sp_e = None, None
-                svc_periods[svc] = (sp_s, sp_e)
-            cache['svc_periods'] = svc_periods
-        _log('phase_svc_periods', _t_periods)
-    # timing log removed
-
-        # 1c. Hard ceiling for open-ended services: use the latest
-        #     explicitly-defined end date anywhere in the DB.
-        _t_ceiling = _time.perf_counter() if timing_enabled else None
-        hard_ceiling = cache.get('hard_ceiling')
-        if hard_ceiling is None:
-            row = cur.execute(
-                "SELECT MAX(end_date) FROM bus_journey_operating_profile WHERE end_date != ''"
-            ).fetchone()
-            max_end_str = row[0] if row and row[0] else None
-            hard_ceiling = _date.fromisoformat(max_end_str) if max_end_str else None
-            cache['hard_ceiling'] = hard_ceiling
-        _log('phase_hard_ceiling', _t_ceiling)
-    # timing log removed
-
         # 2. Determine which journeys operate on this date
         _t_op_fetch = _time.perf_counter() if timing_enabled else None
         valid_journeys = set()
@@ -1567,28 +1540,19 @@ class BusLoader:
 
         _t_op_filter = _time.perf_counter() if timing_enabled else None
         for j_id, svc_code, dow_mask, op_start, op_end, org_ref, org_working in rows:
-            # a) Date range check — journey-level, with service-period fallback
+            # a) Date range check — journey-level only.
+            # New rule: if journey end_date is missing, treat it as
+            # running for one year from start_date (or one year from
+            # query_date if start_date is also missing).
             try:
                 s = _date.fromisoformat(op_start) if op_start else None
                 e = _date.fromisoformat(op_end) if op_end else None
             except ValueError:
                 continue
 
-            # Fall back to service operating period for missing bounds.
-            # IMPORTANT: some feeds/loads create invalid service periods
-            # (e.g. empty end_date). Never let a malformed (start,end)
-            # exclude a journey that otherwise has valid operating dates.
-            svc_s, svc_e = svc_periods.get(svc_code, (None, None))
-            if svc_s and svc_e and svc_s > svc_e:
-                svc_s, svc_e = None, None
-            if s is None and svc_s is not None:
-                s = svc_s
-            if e is None and svc_e is not None:
-                e = svc_e
-
-            # If still no end date, apply the hard ceiling
             if e is None:
-                e = hard_ceiling
+                anchor = s if s is not None else query_date
+                e = anchor + _timedelta(days=365)
 
             if s and query_date < s:
                 continue

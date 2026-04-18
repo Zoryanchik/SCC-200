@@ -18,7 +18,11 @@ import shutil
 import ssl
 
 import psycopg
+import urllib.error
 import urllib.request
+
+
+NORTHWEST_ATCO_PREFIXES = ("250", "259", "258", "090", "180", "280", "060", "061", "062", "065", "320", "329")
 
 
 class AtcoLoader:
@@ -91,6 +95,11 @@ class AtcoLoader:
                 with urllib.request.urlopen(url, context=ctx, timeout=300) as resp, \
                      open(xml_path, "wb") as out:
                     shutil.copyfileobj(resp, out)
+            except urllib.error.HTTPError as e:
+                if getattr(e, "code", None) == 404:
+                    print(f"  ⚠ NaPTAN URL returned 404 — skipping download: {url}")
+                    return
+                raise RuntimeError(f"NaPTAN download failed: {e}")
             except Exception as e:
                 raise RuntimeError(f"NaPTAN download failed: {e}")
         else:
@@ -101,7 +110,7 @@ class AtcoLoader:
         rows = []
         
         # Filter regions to strictly Northwest UK + Cumbria + Yorkshire to cover operators like ARCT, BLAC, KLCO, SCCU, SCMY, NUTT
-        allow_list = ("250", "259", "258", "090", "180", "280", "060", "061", "062", "065", "320", "329")
+        allow_list = NORTHWEST_ATCO_PREFIXES
         
         try:
             import xml.etree.ElementTree as ET
