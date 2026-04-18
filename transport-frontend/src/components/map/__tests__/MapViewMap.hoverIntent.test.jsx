@@ -61,7 +61,7 @@ import MapViewMap from '../MapViewMap.jsx';
 
 describe('MapViewMap hover intent', () => {
 	beforeEach(() => {
-		vi.useFakeTimers();
+		vi.useRealTimers();
 		lastMarkerHandlers = [];
 		// MapViewMap reads debug flags from localStorage.
 		if (!globalThis.window) globalThis.window = /** @type {any} */ ({ });
@@ -105,10 +105,8 @@ describe('MapViewMap hover intent', () => {
 		);
 
 		// Map-level hover winner controller isn't exercised by this unit test.
-		// We keep a tiny timer advance to ensure nothing crashes with fake timers.
-		await act(async () => {
-			vi.advanceTimersByTime(1500);
-		});
+		// We keep an async tick to ensure render side-effects settle.
+		await act(async () => {});
 		expect(lastMarkerHandlers.length).toBeGreaterThan(0);
 	});
 
