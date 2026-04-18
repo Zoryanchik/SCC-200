@@ -152,7 +152,7 @@ const { data: busLocations, loading: busLoading, refreshing: busRefreshing, coun
   // Don't auto-refresh during zoom/pan; only refresh when the timer is up.
   debounceOnMove: false,
 });
-const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures('LAN', 180000);
+const { data: trainDepartures, loading: trainLoading, error: trainError } = useLiveDepartures(["LAN", "PRE", "MCM", "BPS", "BPB"], 180000);
 // STOMP/websocket is used only for train movements in this deployment.
 const { data: liveTrainUpdate, isConnected: trainLiveConnected } = useLiveUpdates('train');
 
