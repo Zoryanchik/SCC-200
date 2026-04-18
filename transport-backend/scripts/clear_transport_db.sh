@@ -15,7 +15,9 @@ PGUSER=${PGUSER:-pguser}
 PGPASS=${PGPASS:-pgpass}
 PGDB=${PGDB:-transport}
 CONTAINER_NAME=${CONTAINER_NAME:-transport-postgres-edillocnon}
-BACKUP_DIR="$(dirname "$0")/../backups"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BACKUP_DIR="$BACKEND_DIR/backups"
 
 DO_BACKUP=0
 AUTO_YES=0
@@ -76,11 +78,16 @@ PGPASSWORD="$PGPASS" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -c 
 
 if [ "$INIT_SCHEMA" -eq 1 ]; then
   echo "Initialising schema using transport-backend.BusLoader.create_schema()"
+  export BACKEND_DIR
+  export PGHOST PGPORT PGUSER PGPASS PGDB
   python3 - <<PY
 import sys, os
-sys.path.insert(0, os.path.join(os.getcwd(), 'transport-backend'))
+sys.path.insert(0, os.environ['BACKEND_DIR'])
 from bus_loader import BusLoader
-DSN=f'postgresql://{PGUSER}:{PGPASS}@{PGHOST}:{PGPORT}/{PGDB}'
+DSN = (
+    f"postgresql://{os.environ['PGUSER']}:{os.environ['PGPASS']}"
+    f"@{os.environ['PGHOST']}:{os.environ['PGPORT']}/{os.environ['PGDB']}"
+)
 ld=BusLoader(DSN)
 ld.create_schema()
 print('Schema created')

@@ -186,3 +186,24 @@ def test_revision_aware_ingest_ignores_missing_revision():
     # Cleanup
     _cleanup(conn, tag)
     conn.close()
+
+
+def test_bus_route_stops_primary_key_is_route_and_stop_order():
+    """Schema contract: repeated ATCOs in loops require PK(route_id, stop_order)."""
+    ld = BusLoader(BUS_DB_PATH)
+    conn = _connect_or_skip(ld)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT pg_get_constraintdef(oid)
+            FROM pg_constraint
+            WHERE conrelid = 'bus_route_stops'::regclass
+              AND contype = 'p'
+            """
+        )
+        row = cur.fetchone()
+        assert row is not None, "bus_route_stops primary key constraint missing"
+        assert "PRIMARY KEY (route_id, stop_order)" in row[0]
+    finally:
+        conn.close()

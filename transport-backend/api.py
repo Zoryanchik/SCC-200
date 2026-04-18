@@ -220,27 +220,19 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
                         except Exception:
                             route_stops = []
 
-                        # Build ATCO -> stop_int mapping restricted to this route
-                        atco_to_stop = {}
-                        for s_int in route_stops or []:
-                            try:
-                                c = merged.get_atco_code(s_int)
-                            except Exception:
-                                c = None
-                            if c:
-                                atco_to_stop[str(c).strip()] = s_int
-
-                        fs = atco_to_stop.get(str(from_atco).strip())
-                        ts = atco_to_stop.get(str(to_atco).strip())
+                        resolved = _resolve_route_stop_occurrences(
+                            merged,
+                            route_stops,
+                            str(from_atco).strip() if from_atco else None,
+                            str(to_atco).strip() if to_atco else None,
+                        )
+                        fs = resolved.get('from_stop_int')
+                        ts = resolved.get('to_stop_int')
+                        i = resolved.get('from_pos')
+                        j = resolved.get('to_pos')
 
                         if fs is not None and ts is not None and fs != ts:
                             # Stitch consecutive pairs between fs and ts along route order.
-                            try:
-                                i = route_stops.index(fs)
-                                j = route_stops.index(ts)
-                            except Exception:
-                                i = None
-                                j = None
                             if i is not None and j is not None:
                                 step = 1 if j > i else -1
                                 stitched_pts = []
@@ -2099,23 +2091,25 @@ def route_leg_geometry(from_lat: float, from_lon: float,
                                         diag['route_stops_len'] = len(route_stops) if isinstance(route_stops, list) else None
                                     except Exception:
                                         pass
+                                    i = None
+                                    j = None
                                     try:
                                         if route_stops and (from_stop_id or to_stop_id):
-                                            atco_to_stop = {}
-                                            for s in route_stops:
-                                                try:
-                                                    c = merged.get_atco_code(s)
-                                                except Exception:
-                                                    c = None
-                                                if c:
-                                                    atco_to_stop.setdefault(str(c).strip(), s)
-                                            if from_stop_id:
-                                                fs = atco_to_stop.get(str(from_stop_id).strip())
-                                            if to_stop_id:
-                                                ts = atco_to_stop.get(str(to_stop_id).strip())
+                                            resolved = _resolve_route_stop_occurrences(
+                                                merged,
+                                                route_stops,
+                                                str(from_stop_id).strip() if from_stop_id else None,
+                                                str(to_stop_id).strip() if to_stop_id else None,
+                                            )
+                                            fs = resolved.get('from_stop_int')
+                                            ts = resolved.get('to_stop_int')
+                                            i = resolved.get('from_pos')
+                                            j = resolved.get('to_pos')
                                     except Exception:
                                         fs = None
                                         ts = None
+                                        i = None
+                                        j = None
 
                                     diag['from_stop_mapped'] = bool(fs is not None)
                                     diag['to_stop_mapped'] = bool(ts is not None)
@@ -2125,9 +2119,7 @@ def route_leg_geometry(from_lat: float, from_lon: float,
 
                                         frag = None
                                         # Primary: chain along route stop order.
-                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
-                                            i = route_stops.index(fs)
-                                            j = route_stops.index(ts)
+                                        if route_stops and i is not None and j is not None and fs != ts:
                                             step = 1 if j > i else -1
                                             stitched = []
                                             ok = True
@@ -3469,6 +3461,153 @@ def _stitch_route_variant_from_link_tracks(
         return None
 
 
+def _resolve_route_stop_occurrences(
+    merged,
+    route_stops: List[int],
+    from_atco: Optional[str],
+    to_atco: Optional[str],
+) -> Dict[str, object]:
+    """Resolve ATCO endpoints onto duplicate-aware positions in route_stops."""
+    out: Dict[str, object] = {
+        'atco_positions': {},
+        'from_stop_int': None,
+        'to_stop_int': None,
+        'from_pos': None,
+        'to_pos': None,
+    }
+    try:
+        if not route_stops:
+            return out
+
+        atco_positions: Dict[str, List[int]] = {}
+        for pos, s_int in enumerate(route_stops or []):
+            try:
+                c = merged.get_atco_code(s_int)
+            except Exception:
+                c = None
+            if c:
+                atco_positions.setdefault(str(c).strip(), []).append(pos)
+
+        out['atco_positions'] = atco_positions
+
+        fk = str(from_atco).strip() if from_atco is not None else None
+        tk = str(to_atco).strip() if to_atco is not None else None
+        fpos = atco_positions.get(fk) if fk else []
+        tpos = atco_positions.get(tk) if tk else []
+
+        if fpos and tpos:
+            same_key = bool(fk and tk and fk == tk)
+            best = None
+            for i in fpos:
+                j = next((p for p in tpos if p > i), None) if same_key else next((p for p in tpos if p >= i), None)
+                if j is None:
+                    if same_key:
+                        continue
+                    j = tpos[-1]
+                cand = (0 if j >= i else 1, abs(j - i), i, j)
+                if best is None or cand < best:
+                    best = cand
+            if best is not None:
+                i, j = best[2], best[3]
+                out['from_pos'] = i
+                out['to_pos'] = j
+                out['from_stop_int'] = route_stops[i]
+                out['to_stop_int'] = route_stops[j]
+                return out
+
+        if fpos:
+            i = fpos[0]
+            out['from_pos'] = i
+            out['from_stop_int'] = route_stops[i]
+        if tpos:
+            j = tpos[0]
+            out['to_pos'] = j
+            out['to_stop_int'] = route_stops[j]
+        return out
+    except Exception:
+        return out
+
+
+def _build_stop_coord_maps(walking=None) -> tuple[Dict[str, tuple], Dict[int, tuple]]:
+    """Return coordinate maps keyed by ATCO code and by merged stop index.
+
+    Primary source is the NaPTAN-backed ``atco_loader`` map. When that source
+    is unavailable or incomplete, the walking graph's stop-int coordinate map
+    provides a local fallback for rendering ordered route variants.
+    """
+    atco_coord_map: Dict[str, tuple] = {}
+    stop_int_coord_map: Dict[int, tuple] = {}
+
+    # Primary map: ATCO -> (lat, lon)
+    try:
+        atco_loader = _base_cache.get("atco_loader") if _base_cache else None
+        if atco_loader:
+            raw = atco_loader.get_all_stop_coords() or {}
+            if isinstance(raw, dict):
+                atco_coord_map = raw
+    except Exception:
+        atco_coord_map = {}
+
+    # Fallback map: stop_int -> (lat, lon) from walking graph
+    try:
+        raw_walking_coords = getattr(walking, "_coords", None)
+        if isinstance(raw_walking_coords, dict):
+            for k, v in raw_walking_coords.items():
+                try:
+                    if not isinstance(v, (tuple, list)) or len(v) < 2:
+                        continue
+                    stop_int = int(k)
+                    lat0 = float(v[0])
+                    lon0 = float(v[1])
+                    stop_int_coord_map[stop_int] = (lat0, lon0)
+                except Exception:
+                    continue
+    except Exception:
+        stop_int_coord_map = {}
+
+    return atco_coord_map, stop_int_coord_map
+
+
+def _coords_for_route_stop(
+    merged,
+    stop_int: int,
+    atco_coord_map: Dict[str, tuple],
+    stop_int_coord_map: Dict[int, tuple],
+) -> tuple[Optional[str], Optional[tuple[float, float]]]:
+    """Resolve (atco_code, coords) for a merged stop index.
+
+    Preference order:
+    1) NaPTAN ATCO coordinate map (stable external code)
+    2) Walking graph stop-int coordinates (local fallback)
+    """
+    try:
+        atco_code = merged.get_atco_code(stop_int)
+    except Exception:
+        atco_code = None
+    if not atco_code:
+        return None, None
+
+    coords = None
+    try:
+        coords = atco_coord_map.get(atco_code)
+    except Exception:
+        coords = None
+
+    if not coords:
+        try:
+            coords = stop_int_coord_map.get(int(stop_int))
+        except Exception:
+            coords = None
+
+    if not coords:
+        return str(atco_code), None
+
+    try:
+        return str(atco_code), (float(coords[0]), float(coords[1]))
+    except Exception:
+        return str(atco_code), None
+
+
 @app.get("/routes/label/{line}")
 async def route_label(
     line: str,
@@ -3623,20 +3762,20 @@ async def routes_for_line(
     except Exception:
         pass
 
-    # NaPTAN coordinate lookup
-    atco = _base_cache.get("atco_loader") if _base_cache else None
-    coord_map: Dict[str, tuple] = {}
-    if atco:
-        t2 = time.time()
-        try:
-            coord_map = atco.get_all_stop_coords()
-        except Exception:
-            coord_map = {}
-        t3 = time.time()
-        try:
-            logger.info(f"routes_for_line: atco.get_all_stop_coords took {int((t3-t2)*1000)}ms for line={line_key}")
-        except Exception:
-            pass
+    # Coordinate lookup: ATCO map with walking stop-int fallback.
+    t2 = time.time()
+    atco_coord_map, stop_int_coord_map = _build_stop_coord_maps(_walking)
+    t3 = time.time()
+    try:
+        logger.info(
+            "routes_for_line: coord maps built in %dms (atco=%d, walking=%d) for line=%s",
+            int((t3 - t2) * 1000),
+            len(atco_coord_map),
+            len(stop_int_coord_map),
+            line_key,
+        )
+    except Exception:
+        pass
 
     # ── Collect candidate route_ints for this line ─────────────────────────
     # Keep everything indexed by mergeddata route_int to avoid mismatching a
@@ -3732,8 +3871,23 @@ async def routes_for_line(
         if ":" in line_key or (lat is not None and lon is not None):
             matching_routes = [r for r in range(len(merged.route_metadata)) if _route_matches_line(r)]
         else:
-            # No safe way to disambiguate.
-            matching_routes = []
+            # No geo hint for shorthand lines: only auto-resolve when all
+            # suffix matches belong to exactly one coded line id. This keeps
+            # the ambiguity guard while allowing safe lines like "74" in
+            # datasets where only one coded line uses that suffix.
+            suffix_matches: list[int] = []
+            coded_names: set[str] = set()
+            for r in range(len(merged.route_metadata)):
+                if not _route_matches_line(r):
+                    continue
+                suffix_matches.append(r)
+                try:
+                    raw = ((merged.route_metadata[r] or {}).get("line_name") or "").strip().upper()
+                    if raw:
+                        coded_names.add(raw)
+                except Exception:
+                    continue
+            matching_routes = suffix_matches if len(coded_names) == 1 else []
 
     # ── Build variants from route_stops (not journey_times) ───────────────
     # We now prefer route_stops because journey_times filtering depends on a
@@ -3751,13 +3905,14 @@ async def routes_for_line(
         stops = []
         route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
         for s_int in route_stops or []:
-            try:
-                atco_code = merged.get_atco_code(s_int)
-            except Exception:
-                atco_code = None
+            atco_code, coords = _coords_for_route_stop(
+                merged,
+                s_int,
+                atco_coord_map,
+                stop_int_coord_map,
+            )
             if not atco_code:
                 continue
-            coords = coord_map.get(atco_code)
             if not coords:
                 continue
             lat, lon = coords
@@ -3774,6 +3929,13 @@ async def routes_for_line(
         """Mean consecutive distance in metres (cheap Euclidean approx)."""
         if len(stops) < 2:
             return 0.0
+        total = 0.0
+        cos_lat = math.cos(math.radians(stops[0]["lat"]))
+        for i in range(len(stops) - 1):
+            dlat = (stops[i + 1]["lat"] - stops[i]["lat"]) * 111_320
+            dlon = (stops[i + 1]["lon"] - stops[i]["lon"]) * 111_320 * cos_lat
+            total += math.sqrt(dlat * dlat + dlon * dlon)
+        return total / (len(stops) - 1)
     variants = []
     for r_idx in matching_routes:
         s = _route_stops_variant(r_idx)
@@ -3925,26 +4087,21 @@ async def routes_for_stop(atco: str):
     # Prefer route_stops so the result set is entirely constrained by stop_to_routes.
     # This avoids any journey_times-based fallback accidentally pulling in a different
     # city's same-numbered line.
-    atco_loader = _base_cache.get("atco_loader") if _base_cache else None
-    coord_map: Dict[str, tuple] = {}
-    if atco_loader:
-        try:
-            coord_map = atco_loader.get_all_stop_coords()
-        except Exception:
-            coord_map = {}
+    atco_coord_map, stop_int_coord_map = _build_stop_coord_maps(_walking)
 
     def _route_stops_variant(r_int: int) -> list[dict]:
         """Build ordered stop dicts from merged.route_stops[r_int]."""
         stops = []
         route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
         for s_int in route_stops or []:
-            try:
-                code = merged.get_atco_code(s_int)
-            except Exception:
-                code = None
+            code, coords = _coords_for_route_stop(
+                merged,
+                s_int,
+                atco_coord_map,
+                stop_int_coord_map,
+            )
             if not code:
                 continue
-            coords = coord_map.get(code)
             if not coords:
                 continue
             lat, lon = coords
@@ -4116,13 +4273,7 @@ async def routes_for_line_at_stop(
         return {"line": line, "variants": []}
 
     # NaPTAN coordinate lookup
-    atco_loader = _base_cache.get("atco_loader") if _base_cache else None
-    coord_map: Dict[str, tuple] = {}
-    if atco_loader:
-        try:
-            coord_map = atco_loader.get_all_stop_coords()
-        except Exception:
-            coord_map = {}
+    atco_coord_map, stop_int_coord_map = _build_stop_coord_maps(_walking)
 
     def _route_stops_variant(r_int: int) -> list[dict]:
         """Build ordered stop dicts from merged.route_stops[r_int].
@@ -4134,13 +4285,14 @@ async def routes_for_line_at_stop(
         stops_with_pos: list[tuple[int, dict]] = []
         route_stops = merged.route_stops[r_int] if r_int < len(getattr(merged, 'route_stops', []) or []) else []
         for pos, s_int in enumerate(route_stops or []):
-            try:
-                code = merged.get_atco_code(s_int)
-            except Exception:
-                code = None
+            code, coords = _coords_for_route_stop(
+                merged,
+                s_int,
+                atco_coord_map,
+                stop_int_coord_map,
+            )
             if not code:
                 continue
-            coords = coord_map.get(code)
             if not coords:
                 continue
             lat0, lon0 = coords
@@ -8314,8 +8466,19 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 atcos = [s.get('atco_code') for s in stops if isinstance(s, dict)]
                 if from_atco not in atcos or to_atco not in atcos:
                     continue
-                i = atcos.index(from_atco)
-                j = atcos.index(to_atco)
+                from_positions = [idx for idx, code in enumerate(atcos) if code == from_atco]
+                to_positions = [idx for idx, code in enumerate(atcos) if code == to_atco]
+                if not from_positions or not to_positions:
+                    continue
+                i = None
+                j = None
+                for fp in from_positions:
+                    tj = next((tp for tp in to_positions if tp > fp), None)
+                    if tj is not None:
+                        i, j = fp, tj
+                        break
+                if i is None or j is None:
+                    continue
                 if j <= i:
                     continue
                 hops = j - i
@@ -8983,23 +9146,25 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                             })
                                         except Exception:
                                             pass
+                                    i = None
+                                    j = None
                                     try:
                                         if route_stops and (prev_atco or curr_atco):
-                                            atco_to_stop = {}
-                                            for s in route_stops:
-                                                try:
-                                                    c = merged.get_atco_code(s)
-                                                except Exception:
-                                                    c = None
-                                                if c:
-                                                    atco_to_stop.setdefault(c, s)
-                                            if prev_atco:
-                                                fs = atco_to_stop.get(prev_atco)
-                                            if curr_atco:
-                                                ts = atco_to_stop.get(curr_atco)
+                                            resolved = _resolve_route_stop_occurrences(
+                                                merged,
+                                                route_stops,
+                                                prev_atco,
+                                                curr_atco,
+                                            )
+                                            fs = resolved.get('from_stop_int')
+                                            ts = resolved.get('to_stop_int')
+                                            i = resolved.get('from_pos')
+                                            j = resolved.get('to_pos')
                                     except Exception:
                                         fs = None
                                         ts = None
+                                        i = None
+                                        j = None
 
                                     if trace:
                                         try:
@@ -9022,9 +9187,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                                         # This handles cases where section tracks are keyed by
                                         # intermediate timing points rather than the leg endpoints.
                                         # route_stops already resolved above.
-                                        if route_stops and fs in route_stops and ts in route_stops and fs != ts:
-                                            i = route_stops.index(fs)
-                                            j = route_stops.index(ts)
+                                        if route_stops and i is not None and j is not None and fs != ts:
                                             step = 1 if j > i else -1
                                             stitched = []
                                             ok = True

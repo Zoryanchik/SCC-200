@@ -220,6 +220,34 @@ class TestRouteEndpoint:
 
 
 class TestRouteLineAtStopEndpoint:
+    def test_resolve_route_stop_occurrences_prefers_later_repeat_for_same_atco(self):
+        """When from/to ATCO are the same and repeated, pick different occurrences."""
+        class FakeMerged:
+            def get_atco_code(self, stop_int: int):
+                return {0: "A", 1: "B", 2: "A", 3: "C"}.get(stop_int)
+
+        route_stops = [0, 1, 2, 3]
+        out = api_module._resolve_route_stop_occurrences(FakeMerged(), route_stops, "A", "A")
+
+        assert out["from_pos"] == 0
+        assert out["to_pos"] == 2
+        assert out["from_stop_int"] == 0
+        assert out["to_stop_int"] == 2
+
+    def test_resolve_route_stop_occurrences_prefers_short_forward_path(self):
+        """For duplicated from-stop ATCOs, choose the closest forward destination."""
+        class FakeMerged:
+            def get_atco_code(self, stop_int: int):
+                return {0: "A", 1: "X", 2: "A", 3: "C"}.get(stop_int)
+
+        route_stops = [0, 1, 2, 3]
+        out = api_module._resolve_route_stop_occurrences(FakeMerged(), route_stops, "A", "C")
+
+        assert out["from_pos"] == 2
+        assert out["to_pos"] == 3
+        assert out["from_stop_int"] == 2
+        assert out["to_stop_int"] == 3
+
     def test_line_at_stop_filters_by_stop_and_line(self, client: TestClient):
         """GET /routes/line_at_stop/{atco}/{line} should only consider routes serving that stop."""
         # Build a tiny merged-like object
@@ -387,6 +415,129 @@ class TestRouteLineAtStopEndpoint:
         # but our line matching for shorthand uses suffix; here it would match; ensure it does.
         # (This is intentional: shorthand suffix match is allowed; stop-scoping prevents ambiguity.)
         assert bad.status_code == 200
+
+
+class TestRoutesForLineEndpoint:
+    def test_routes_for_line_coded_line_does_not_error_with_valid_stops(self, client: TestClient):
+        """Regression: ensure mean-gap filtering never raises TypeError for valid variants."""
+
+        class FakeMerged:
+            def __init__(self):
+                self.route_metadata = [{"route_id": "RLOOP", "line_name": "TMP_REPEAT_FIX:LOOP"}]
+                self.route_stops = [[0, 1, 2, 3]]
+                self.stop_metadata = ["A", "B", "C", "D"]
+
+            def get_atco_code(self, stop_int: int):
+                return ["S0", "S1", "S2", "S3"][stop_int]
+
+            def get_route_link_tracks(self, route_int: int):
+                return {
+                    (0, 1): [(54.0, -2.8), (54.001, -2.801)],
+                    (1, 2): [(54.001, -2.801), (54.002, -2.802)],
+                    (2, 3): [(54.002, -2.802), (54.003, -2.803)],
+                }
+
+        class FakeAtcoLoader:
+            def get_all_stop_coords(self):
+                return {
+                    "S0": (54.0, -2.8),
+                    "S1": (54.001, -2.801),
+                    "S2": (54.002, -2.802),
+                    "S3": (54.003, -2.803),
+                }
+
+        fake_merged = FakeMerged()
+        fake_router = MagicMock()
+        fake_walking = MagicMock()
+
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(fake_merged, fake_router, fake_walking)):
+                with patch.object(api_module, "_base_cache", {"atco_loader": FakeAtcoLoader()}):
+                    res = client.get("/routes/line/TMP_REPEAT_FIX:LOOP")
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["line"] == "TMP_REPEAT_FIX:LOOP"
+        assert len(payload["variants"]) >= 1
+
+    def test_routes_for_line_falls_back_to_walking_coords_when_atco_missing(self, client: TestClient):
+        """When ATCO coords are unavailable, walking stop-int coords should still render variants."""
+
+        class FakeMerged:
+            def __init__(self):
+                self.route_metadata = [{"route_id": "R18", "line_name": "PCX:18"}]
+                self.route_stops = [[0, 1, 2]]
+                self.stop_metadata = ["S0", "S1", "S2"]
+
+            def get_atco_code(self, stop_int: int):
+                return ["STOP0", "STOP1", "STOP2"][stop_int]
+
+            def get_route_link_tracks(self, route_int: int):
+                return {
+                    (0, 1): [(54.0, -2.8), (54.001, -2.801)],
+                    (1, 2): [(54.001, -2.801), (54.002, -2.802)],
+                }
+
+        fake_merged = FakeMerged()
+        fake_router = MagicMock()
+        fake_walking = MagicMock()
+        fake_walking._coords = {
+            0: (54.0, -2.8),
+            1: (54.001, -2.801),
+            2: (54.002, -2.802),
+        }
+
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(fake_merged, fake_router, fake_walking)):
+                with patch.object(api_module, "_base_cache", {}):
+                    res = client.get("/routes/line/PCX:18")
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["line"] == "PCX:18"
+        assert len(payload["variants"]) == 1
+        assert payload["variants"][0]["route_id"] == "R18"
+
+    def test_routes_for_line_shorthand_unique_suffix_resolves_without_geo(self, client: TestClient):
+        """Shorthand line should resolve when it maps to exactly one coded line name."""
+
+        class FakeMerged:
+            def __init__(self):
+                self.route_metadata = [
+                    {"route_id": "R74A", "line_name": "PC1117070:46:74"},
+                    {"route_id": "R74B", "line_name": "PC1117070:46:74"},
+                ]
+                self.route_stops = [[0, 1, 2], [0, 1, 2]]
+                self.stop_metadata = ["S0", "S1", "S2"]
+
+            def get_atco_code(self, stop_int: int):
+                return ["STOP0", "STOP1", "STOP2"][stop_int]
+
+            def get_route_link_tracks(self, route_int: int):
+                return {
+                    (0, 1): [(54.0, -2.8), (54.001, -2.801)],
+                    (1, 2): [(54.001, -2.801), (54.002, -2.802)],
+                }
+
+        fake_merged = FakeMerged()
+        fake_router = MagicMock()
+        fake_walking = MagicMock()
+        fake_walking._coords = {
+            0: (54.0, -2.8),
+            1: (54.001, -2.801),
+            2: (54.002, -2.802),
+        }
+
+        with patch.dict(os.environ, {"ROUTE_MIN_STOPS": "2"}):
+            with patch.object(api_module, "get_router_for_date", return_value=(fake_merged, fake_router, fake_walking)):
+                with patch.object(api_module, "_base_cache", {}):
+                    res = client.get("/routes/line/74")
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["line"] == "74"
+        assert len(payload["variants"]) >= 1
+        assert payload["variants"][0]["route_id"] in {"R74A", "R74B"}
 
     def test_route_error_returns_failure(self, client: TestClient):
         """POST /api/route returns success=false on internal error."""

@@ -215,7 +215,7 @@ class BusLoader:
                 atco_code  TEXT,
                 stop_order INTEGER NOT NULL,
                 revision   INTEGER,
-                PRIMARY KEY (route_id, atco_code)
+                PRIMARY KEY (route_id, stop_order)
             );
             -- Allow a single journey to map to multiple route sections.
             -- Use a composite primary key (journey_id, route_id) so a
@@ -1197,17 +1197,17 @@ class BusLoader:
                 cur.execute(f"INSERT INTO {table} ({col_list}) SELECT {col_list} FROM {temp_table}{on_conf}")
 
         _rs_cols = ['route_id', 'atco_code', 'stop_order']
-        _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order'
+        _rs_conflict = 'ON CONFLICT (route_id, stop_order) DO UPDATE SET atco_code = EXCLUDED.atco_code'
         if _rs_has_rev:
             _rs_cols.append('revision')
-            _rs_conflict = 'ON CONFLICT (route_id, atco_code) DO UPDATE SET stop_order = EXCLUDED.stop_order, revision = EXCLUDED.revision'
+            _rs_conflict = 'ON CONFLICT (route_id, stop_order) DO UPDATE SET atco_code = EXCLUDED.atco_code, revision = EXCLUDED.revision'
         _chunked_multi_insert(
             cursor,
             'bus_route_stops',
             _rs_cols,
             route_stops,
             on_conflict=_rs_conflict,
-            key_indices=(0, 1),  # (route_id, atco_code)
+            key_indices=(0, 2),  # (route_id, stop_order)
         )
         # Journey rows now use a composite PK (journey_id, route_id) so a
         # single VehicleJourney can be associated with multiple section
@@ -1340,7 +1340,11 @@ class BusLoader:
             SELECT t.journey_id, t.atco_code, t.arrival_time
             FROM bus_journey_times t
             LEFT JOIN bus_journey_routes jr ON jr.journey_id = t.journey_id
-            LEFT JOIN bus_route_stops rs ON rs.route_id = jr.route_id AND rs.atco_code = t.atco_code
+            LEFT JOIN (
+                SELECT route_id, atco_code, MIN(stop_order) AS stop_order
+                FROM bus_route_stops
+                GROUP BY route_id, atco_code
+            ) rs ON rs.route_id = jr.route_id AND rs.atco_code = t.atco_code
             ORDER BY t.journey_id, COALESCE(rs.stop_order, 1000000), t.atco_code
             """
         )
