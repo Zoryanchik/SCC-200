@@ -72,7 +72,7 @@ describe('useTransportData hooks', () => {
     const { result } = renderHook(() => useLiveDepartures(['LAN'], 10000))
 
     await waitFor(() => {
-      expect(api.fetchRailDepartures).toHaveBeenCalledWith(['LAN'])
+      expect(api.fetchRailDepartures).toHaveBeenCalledWith('LAN')
       expect(result.current.data.length).toBeGreaterThan(0)
     })
   })

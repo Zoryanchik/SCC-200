@@ -307,10 +307,11 @@ describe("HomePage marker update logic", () => {
       () => new Promise(() => {})
     );
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    await renderPage();
+    const { container } = await renderPage();
 
     await waitFor(() => {
-      expect(screen.getAllByRole("progressbar").length).toBeGreaterThan(0);
+      expect(screen.queryByText("No service alerts right now.")).toBeNull();
+      expect(container.querySelectorAll(".MuiSkeleton-root").length).toBeGreaterThan(0);
     });
   });
 
