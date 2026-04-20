@@ -863,57 +863,75 @@ def _read_live_bus_rows(
             max_age_s = 300
     max_age_s = max(30, int(max_age_s))
 
-    conn = psycopg.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT
-                    line_ref,
-                    destination_name,
-                    lat,
-                    lon,
-                    operator_name,
-                    delay_seconds,
-                    origin_dep_secs,
-                    bearing,
-                    meta
-                FROM {_LIVE_BUS_DB_TABLE}
-                WHERE fetched_at >= NOW() - make_interval(secs => %s)
-                  AND (%s = 'all' OR lower(operator_code) = %s)
-                  AND (
-                                        %s = FALSE
-                                        OR (lat BETWEEN %s AND %s AND lon BETWEEN %s AND %s)
-                    OR (
-                        %s::text IS NOT NULL
-                        AND (
-                            vehicle_ref = %s::text
-                            OR vehicle_journey_code = %s::text
-                        )
-                    )
-                  )
-                ORDER BY fetched_at DESC
-                """,
-                (
-                    max_age_s,
-                    op,
-                    op,
-                    bool(apply_bbox),
-                    float(lat) - float(lat_tol),
-                    float(lat) + float(lat_tol),
-                    float(lon) - float(lon_tol),
-                    float(lon) + float(lon_tol),
-                    keep_id,
-                    keep_id,
-                    keep_id,
-                ),
-            )
-            rows = cur.fetchall()
-    finally:
+    rows = []
+    for attempt in range(2):
+        conn = psycopg.connect(dsn)
         try:
-            conn.close()
-        except Exception:
-            pass
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        line_ref,
+                        destination_name,
+                        lat,
+                        lon,
+                        operator_name,
+                        delay_seconds,
+                        origin_dep_secs,
+                        bearing,
+                        meta
+                    FROM {_LIVE_BUS_DB_TABLE}
+                    WHERE fetched_at >= NOW() - make_interval(secs => %s)
+                      AND (%s = 'all' OR lower(operator_code) = %s)
+                      AND (
+                                            %s = FALSE
+                                            OR (lat BETWEEN %s AND %s AND lon BETWEEN %s AND %s)
+                        OR (
+                            %s::text IS NOT NULL
+                            AND (
+                                vehicle_ref = %s::text
+                                OR vehicle_journey_code = %s::text
+                            )
+                        )
+                      )
+                    ORDER BY fetched_at DESC
+                    """,
+                    (
+                        max_age_s,
+                        op,
+                        op,
+                        bool(apply_bbox),
+                        float(lat) - float(lat_tol),
+                        float(lat) + float(lat_tol),
+                        float(lon) - float(lon_tol),
+                        float(lon) + float(lon_tol),
+                        keep_id,
+                        keep_id,
+                        keep_id,
+                    ),
+                )
+                rows = cur.fetchall()
+                break
+        except Exception as exc:
+            msg = str(exc).lower()
+            missing_table = (
+                attempt == 0
+                and _LIVE_BUS_DB_TABLE.lower() in msg
+                and ('does not exist' in msg or 'undefinedtable' in msg)
+            )
+            if missing_table:
+                try:
+                    _ensure_live_bus_db_table()
+                    logger.warning("Live DB table was missing; created %s and retrying read", _LIVE_BUS_DB_TABLE)
+                    continue
+                except Exception:
+                    pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     out = []
     for r in rows:
@@ -2084,6 +2102,237 @@ def _query_osrm_for_coords_profile(osrm_base: str, coords_lonlat: list, profile:
         return None
 
 
+# --- OSM rail geometry (best-effort) ------------------------------------------
+_OSM_RAIL_CACHE_LOCK = threading.Lock()
+_OSM_RAIL_CACHE: dict[str, tuple[float, list[list[float]]]] = {}
+
+
+def _query_overpass_rail_path(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> list[list[float]] | None:
+    """Best-effort rail-following polyline using OpenStreetMap Overpass data.
+
+    This fetches railway ways in a bbox around the endpoints, builds a simple
+    node graph, snaps endpoints to nearest rail nodes, and runs shortest path.
+    Returns [[lat, lon], ...] or None on any failure.
+    """
+    try:
+        enabled = str(os.environ.get('OSM_RAIL_GEOMETRY_ENABLED', '1')).lower() in ('1', 'true', 'yes')
+        if not enabled:
+            return None
+
+        # Rounded key keeps cache compact while stable for nearby repeats.
+        key = f"{round(float(from_lat),4)},{round(float(from_lon),4)}->{round(float(to_lat),4)},{round(float(to_lon),4)}"
+        now = time.time()
+        try:
+            ttl_s = int(os.environ.get('OSM_RAIL_CACHE_TTL_S', '1800'))
+        except Exception:
+            ttl_s = 1800
+        ttl_s = max(60, min(ttl_s, 24 * 3600))
+
+        with _OSM_RAIL_CACHE_LOCK:
+            hit = _OSM_RAIL_CACHE.get(key)
+            if hit and (now - float(hit[0])) <= float(ttl_s):
+                return hit[1]
+
+        # Query bbox around endpoints.
+        try:
+            pad = float(os.environ.get('OSM_RAIL_BBOX_PAD_DEG', '0.06'))
+        except Exception:
+            pad = 0.06
+        pad = max(0.01, min(pad, 0.5))
+
+        south = min(float(from_lat), float(to_lat)) - pad
+        north = max(float(from_lat), float(to_lat)) + pad
+        west = min(float(from_lon), float(to_lon)) - pad
+        east = max(float(from_lon), float(to_lon)) + pad
+
+        overpass_url = str(os.environ.get('OVERPASS_URL', 'https://overpass-api.de/api/interpreter')).strip()
+        query = (
+            "[out:json][timeout:12];"
+            f"(way[\"railway\"~\"rail|light_rail|subway|tram\"]({south},{west},{north},{east});>;);"
+            "out body;"
+        )
+
+        data = urlencode({'data': query}).encode('utf-8')
+        req = UrllibRequest(
+            overpass_url,
+            data=data,
+            headers={
+                'User-Agent': 'transport-backend/1.0',
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            method='POST',
+        )
+        try:
+            timeout_s = float(os.environ.get('OSM_RAIL_TIMEOUT_S', '8'))
+        except Exception:
+            timeout_s = 8.0
+        timeout_s = max(2.0, min(timeout_s, 20.0))
+
+        with urlopen(req, timeout=timeout_s) as resp:
+            payload = json.loads(resp.read().decode('utf-8', errors='ignore'))
+
+        elems = payload.get('elements') or []
+        if not elems:
+            return None
+
+        nodes: dict[int, tuple[float, float]] = {}
+        ways: list[list[int]] = []
+        for e in elems:
+            t = e.get('type')
+            if t == 'node':
+                try:
+                    nid = int(e.get('id'))
+                    nodes[nid] = (float(e.get('lat')), float(e.get('lon')))
+                except Exception:
+                    continue
+            elif t == 'way':
+                nlist = e.get('nodes') or []
+                if isinstance(nlist, list) and len(nlist) >= 2:
+                    try:
+                        ways.append([int(x) for x in nlist])
+                    except Exception:
+                        continue
+
+        if not nodes or not ways:
+            return None
+
+        # Build undirected graph along way sequences.
+        graph: dict[int, list[tuple[int, float]]] = {}
+        for wn in ways:
+            for a, b in zip(wn, wn[1:]):
+                ca = nodes.get(a)
+                cb = nodes.get(b)
+                if not ca or not cb:
+                    continue
+                try:
+                    w = float(_haversine_m(ca[0], ca[1], cb[0], cb[1]))
+                except Exception:
+                    continue
+                graph.setdefault(a, []).append((b, w))
+                graph.setdefault(b, []).append((a, w))
+
+        if not graph:
+            return None
+
+        try:
+            snap_max_m = float(os.environ.get('OSM_RAIL_SNAP_MAX_M', '2500'))
+        except Exception:
+            snap_max_m = 2500.0
+        snap_max_m = max(100.0, min(snap_max_m, 15000.0))
+
+        def _nearest_graph_node(lat: float, lon: float) -> int | None:
+            best = None
+            for nid in graph.keys():
+                c = nodes.get(nid)
+                if not c:
+                    continue
+                try:
+                    d = float(_haversine_m(lat, lon, c[0], c[1]))
+                except Exception:
+                    continue
+                if best is None or d < best[0]:
+                    best = (d, nid)
+            if best is None:
+                return None
+            if best[0] > snap_max_m:
+                return None
+            return best[1]
+
+        s = _nearest_graph_node(float(from_lat), float(from_lon))
+        t = _nearest_graph_node(float(to_lat), float(to_lon))
+        if s is None or t is None:
+            return None
+
+        # Dijkstra shortest path.
+        import heapq
+
+        pq: list[tuple[float, int]] = [(0.0, s)]
+        dist: dict[int, float] = {s: 0.0}
+        prev: dict[int, int] = {}
+        seen: set[int] = set()
+
+        while pq:
+            dcur, u = heapq.heappop(pq)
+            if u in seen:
+                continue
+            seen.add(u)
+            if u == t:
+                break
+            for v, w in graph.get(u, []):
+                nd = dcur + float(w)
+                if nd < dist.get(v, float('inf')):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(pq, (nd, v))
+
+        if t not in dist:
+            return None
+
+        path_nodes: list[int] = []
+        cur = t
+        path_nodes.append(cur)
+        while cur != s:
+            cur = prev.get(cur)
+            if cur is None:
+                return None
+            path_nodes.append(cur)
+        path_nodes.reverse()
+
+        coords = []
+        for nid in path_nodes:
+            c = nodes.get(nid)
+            if c:
+                coords.append([c[0], c[1]])
+
+        if len(coords) < 2:
+            return None
+
+        with _OSM_RAIL_CACHE_LOCK:
+            _OSM_RAIL_CACHE[key] = (now, coords)
+
+        return coords
+    except Exception:
+        return None
+
+
+def _query_overpass_rail_path_via(points_latlon: list[list[float]] | tuple[tuple[float, float], ...]) -> list[list[float]] | None:
+    """Best-effort rail polyline that passes through intermediate waypoints.
+
+    Args:
+        points_latlon: Ordered list of [lat, lon] waypoints.
+
+    Returns:
+        Stitched rail-following geometry [[lat, lon], ...] or None when any
+        segment cannot be resolved.
+    """
+    try:
+        pts = []
+        for p in (points_latlon or []):
+            if not isinstance(p, (list, tuple)) or len(p) < 2:
+                continue
+            pts.append([float(p[0]), float(p[1])])
+        if len(pts) < 2:
+            return None
+
+        stitched: list[list[float]] = []
+        for i in range(len(pts) - 1):
+            a = pts[i]
+            b = pts[i + 1]
+            seg = _query_overpass_rail_path(a[0], a[1], b[0], b[1])
+            if not seg or len(seg) < 2:
+                return None
+            if stitched and stitched[-1] == seg[0]:
+                stitched.extend(seg[1:])
+            else:
+                stitched.extend(seg)
+
+        if len(stitched) < 2:
+            return None
+        return stitched
+    except Exception:
+        return None
+
+
 @app.get("/route/walking")
 def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float):
     """Return walking geometry between two points by proxying OSRM foot profile.
@@ -2618,10 +2867,37 @@ def route_leg_geometry(from_lat: float, from_lon: float,
         pass
 
     # Fallback policy:
+    # - train legs: best-effort OSM rail path (Overpass)
     # - walking legs may use OSRM foot routing
     # - if caller provided a full stop sequence (stop_ids) and we couldn't stitch
     #   tracks, return those stop coordinates unsmoothed.
     # - all other non-walking cases return a straight line between endpoints.
+    if norm_mode == 'train':
+        try:
+            rail_coords = None
+            via_points = []
+            try:
+                if 'stop_fallback_coords' in locals() and isinstance(stop_fallback_coords, list) and len(stop_fallback_coords) >= 2:
+                    via_points = [[float(c[0]), float(c[1])] for c in stop_fallback_coords if isinstance(c, (list, tuple)) and len(c) >= 2]
+            except Exception:
+                via_points = []
+
+            if len(via_points) >= 2:
+                rail_coords = _query_overpass_rail_path_via(via_points)
+
+            if not rail_coords:
+                rail_coords = _query_overpass_rail_path(from_lat, from_lon, to_lat, to_lon)
+
+            if rail_coords and len(rail_coords) >= 2:
+                diag['ok'] = True
+                diag['stitch_kind'] = 'osm_rail_via_stops' if len(via_points) >= 3 else 'osm_rail'
+                if via_points:
+                    diag['via_points_count'] = len(via_points)
+                diag['coords_len'] = len(rail_coords)
+                return {"coords": rail_coords, "source": "osm_rail", "diag": diag}
+        except Exception:
+            pass
+
     if norm_mode == 'walking':
         osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
         try:
@@ -9886,7 +10162,11 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             # single missing track doesn't degrade the whole route.
             try:
                 if prev_coord and curr_coord:
-                    mode_hint = "walking" if transport == "walking" else "driving"
+                    mode_hint = (
+                        "walking"
+                        if transport == "walking"
+                        else ("train" if transport == "train" else "driving")
+                    )
 
                     # If this is a transit leg (bus/train), prefer passing the
                     # journey's own stop subsequence (hop-on -> hop-off) so

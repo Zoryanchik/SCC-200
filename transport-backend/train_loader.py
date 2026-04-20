@@ -420,10 +420,11 @@ class TrainLoader:
                 )
             today = date.today().isoformat()
             yesterday = (date.today() - timedelta(days=1)).isoformat()
+            tomorrow = (date.today() + timedelta(days=1)).isoformat()
             cur.execute(
                 '''DELETE FROM train_journey_cache
-                   WHERE service_date NOT IN (%s, %s)''',
-                (today, yesterday)
+                   WHERE service_date NOT IN (%s, %s, %s)''',
+                (today, yesterday, tomorrow)
             )
             conn.commit()
             conn.close()
@@ -438,24 +439,25 @@ class TrainLoader:
             date_str: Date string in YYYY-MM-DD format.
 
         Returns:
-            TrainData instance for the requested date. Non-today dates
-            currently return cached data when available, otherwise empty data.
+            TrainData instance for the requested date.
+
+            - For today's date: cache-first, then download/parse and cache.
+            - For non-today dates: cache-only; on miss returns empty TrainData.
+
+            This avoids incorrectly projecting today's schedule onto other dates.
         """
         # Ensure cache tables exist even when this loader is used directly.
         self.create_schema()
-
-        if date_str != datetime.today().strftime('%Y-%m-%d'):
-            cached = self._load_cached_traindata(date_str)
-            if cached is not None:
-                return cached
-            # Currently can only get data for current day
-            print(f"  [train]: Fetch {date_str}; Return zero-data")
-            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
 
         print(f"  [train]: Fetch {date_str}")
         cached = self._load_cached_traindata(date_str)
         if cached is not None:
             return cached
+
+        today_str = datetime.today().strftime('%Y-%m-%d')
+        if date_str != today_str:
+            print(f"  [train]: Cache miss for {date_str}; no non-today fallback")
+            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
 
         loaded = self.download_schedule_today()
         self._save_cached_traindata(date_str, loaded)
@@ -595,12 +597,14 @@ class TrainLoader:
             resp = urllib.request.urlopen(self.schedule_url, context=ctx, timeout=180)
             data = resp.read()
         except urllib.error.HTTPError as exc:
-            # Missing daily schedule should not abort backend startup.
+            # Schedule endpoint failures should not abort backend startup.
             # Return an empty timetable and continue initialization.
-            if getattr(exc, 'code', None) == 404:
-                print(f"  [train] ⚠ Schedule URL returned 404 — skipping: {self.schedule_url}")
-                return TrainData(num_routes=0, num_journeys=0, num_stops=0)
-            raise
+            code = getattr(exc, 'code', None)
+            print(f"  [train] ⚠ Schedule URL returned HTTP {code} — skipping: {self.schedule_url}")
+            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
+        except urllib.error.URLError as exc:
+            print(f"  [train] ⚠ Schedule URL unreachable ({exc}) — skipping: {self.schedule_url}")
+            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
         print(f'  [train] (schedule) Downloaded {len(data) / 1024 / 1024:.1f} MB')
 
         return self.load_schedule_file(data)

@@ -143,3 +143,22 @@ def test_download_schedule_today_skips_404(monkeypatch):
     td = loader.download_schedule_today()
     assert len(td.route_stops) == 0
     assert len(td.journey_times) == 0
+
+
+def test_download_schedule_today_skips_403(monkeypatch):
+    loader = TrainLoader("postgresql://unused")
+
+    def _raise_403(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            loader.schedule_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(train_loader_module.urllib.request, "urlopen", _raise_403)
+
+    td = loader.download_schedule_today()
+    assert len(td.route_stops) == 0
+    assert len(td.journey_times) == 0

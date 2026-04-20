@@ -491,7 +491,13 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
       const isBusLikeLeg =
         !isWalk &&
         (rawMode === "bus" || rawMode === "transit" || !!leg?.line_name);
-      const requestMode = isWalk ? "walking" : isBusLikeLeg ? "bus" : "driving";
+      const requestMode = isWalk
+        ? "walking"
+        : rawMode === "train"
+          ? "train"
+          : isBusLikeLeg
+            ? "bus"
+            : "driving";
       // If the leg carries an explicit route_id (or metadata with route_id)
       // include it so the backend can return stored track subsegments when
       // OSRM is unavailable. If no route_id but a line name is available,

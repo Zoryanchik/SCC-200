@@ -572,3 +572,45 @@ class TestBuildJourneyPlanResponse:
         }
         result = build_journey_plan_response(route, merged, {})
         assert result["success"] is True
+
+    def test_train_leg_geometry_uses_intermediate_stations_for_path(self, monkeypatch):
+        """Train leg geometry should route via intermediate station waypoints when present."""
+
+        class _AtcoLoader:
+            def get_all_stop_coords(self):
+                return {
+                    "ATCO_A": (54.0000, -2.8000),
+                    "ATCO_B": (54.0500, -2.8500),
+                    "ATCO_C": (54.1000, -2.9000),
+                }
+
+        calls = []
+
+        def _fake_overpass(from_lat, from_lon, to_lat, to_lon):
+            calls.append((from_lat, from_lon, to_lat, to_lon))
+            return [[from_lat, from_lon], [to_lat, to_lon]]
+
+        monkeypatch.setattr(api_module, "_query_overpass_rail_path", _fake_overpass)
+        monkeypatch.setattr(api_module, "_base_cache", {"atco_loader": _AtcoLoader()}, raising=False)
+
+        out = api_module.route_leg_geometry(
+            54.0,
+            -2.8,
+            54.1,
+            -2.9,
+            mode="train",
+            merged=MagicMock(),
+            stop_ids="ATCO_A,ATCO_B,ATCO_C",
+        )
+
+        assert out.get("source") == "osm_rail"
+        assert out.get("diag", {}).get("stitch_kind") == "osm_rail_via_stops"
+        assert out.get("coords") == [
+            [54.0000, -2.8000],
+            [54.0500, -2.8500],
+            [54.1000, -2.9000],
+        ]
+        assert calls == [
+            (54.0000, -2.8000, 54.0500, -2.8500),
+            (54.0500, -2.8500, 54.1000, -2.9000),
+        ]

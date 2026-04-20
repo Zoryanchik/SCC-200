@@ -35,6 +35,39 @@ class _FakeCursor:
         return list(self._rows)
 
 
+class _MissingThenOkCursor:
+    def __init__(self, calls, state):
+        self._calls = calls
+        self._state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def execute(self, query, params):
+        self._calls.append((query, params))
+        if not self._state.get("failed_once"):
+            self._state["failed_once"] = True
+            raise Exception('relation "bus_live_current" does not exist')
+
+    def fetchall(self):
+        return []
+
+
+class _MissingThenOkConn:
+    def __init__(self, calls, state):
+        self._calls = calls
+        self._state = state
+
+    def cursor(self):
+        return _MissingThenOkCursor(self._calls, self._state)
+
+    def close(self):
+        return None
+
+
 class _FakeConn:
     def __init__(self, rows, calls):
         self._rows = rows
@@ -107,3 +140,36 @@ def test_read_live_bus_rows_default_keeps_bbox_filter(monkeypatch):
     assert len(calls) == 1
     _query, params = calls[0]
     assert params[3] is True
+
+
+def test_read_live_bus_rows_creates_missing_table_and_retries(monkeypatch):
+    calls = []
+    state = {"failed_once": False}
+    ensure_calls = {"n": 0}
+
+    monkeypatch.setattr(api_module, "_live_bus_db_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(
+        api_module.psycopg,
+        "connect",
+        lambda _dsn: _MissingThenOkConn(calls, state),
+    )
+
+    def _ensure():
+        ensure_calls["n"] += 1
+
+    monkeypatch.setattr(api_module, "_ensure_live_bus_db_table", _ensure)
+
+    out = api_module._read_live_bus_rows(
+        operator="SCCU",
+        lat=53.64,
+        lon=-2.28,
+        lat_tol=0.2,
+        lon_tol=0.2,
+        keep_vehicle_id=None,
+        max_age_s=120,
+    )
+
+    assert out == []
+    assert ensure_calls["n"] == 1
+    # first attempt raises undefined-table, second attempt succeeds
+    assert len(calls) == 2
