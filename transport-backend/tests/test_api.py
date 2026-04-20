@@ -611,6 +611,27 @@ class TestGetRouterForDate:
         mock_init.assert_called_once()
 
 
+class TestRoutingWarmupGate:
+    def test_api_route_returns_503_while_warmup_pending(self, client: TestClient):
+        with patch.object(api_module, "_routing_warmup_pending", return_value=True):
+            with patch.object(api_module, "get_router_for_date") as mocked_get_router:
+                response = client.post("/api/route", json={
+                    "start_lat": 53.48,
+                    "start_lon": -2.24,
+                    "end_lat": 53.38,
+                    "end_lon": -2.15,
+                    "date": "2026-02-16",
+                    "time": "10:00:00",
+                    "mode": "both",
+                })
+
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload.get("success") is False
+        assert payload.get("error") == "routing_warmup_in_progress"
+        mocked_get_router.assert_not_called()
+
+
 # â”€â”€ format_route_text tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 

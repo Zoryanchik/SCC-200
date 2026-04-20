@@ -434,6 +434,28 @@ async def lifespan(app: FastAPI):
     when the heavy backend is unavailable (e.g. during testing).
     """
     global _base_cache
+    # Reset startup warmup gates on each app start.
+    _first_live_cycle_done.clear()
+    _first_delay_round_done.clear()
+    live_poller_started = False
+
+    # Start DB-backed live bus poller as early as possible so first-cycle
+    # warmup can overlap with heavy base initialization.
+    if os.environ.get('BUS_DISABLE_DB_LIVE_POLLER') == '1':
+        logger.info('BUS_DISABLE_DB_LIVE_POLLER=1 set — not starting DB live poller')
+        _first_live_cycle_done.set()
+    else:
+        try:
+            _ensure_live_bus_db_table()
+            live_stop_event = threading.Event()
+            live_thread = threading.Thread(target=_live_bus_db_poller_loop, args=(live_stop_event,), daemon=True)
+            live_thread.start()
+            globals()['_live_db_poller_stop_event'] = live_stop_event
+            globals()['_live_db_poller_thread'] = live_thread
+            live_poller_started = True
+            logger.info('DB live poller started early (overlapping base initialization)')
+        except Exception as exc:
+            logger.warning("Early DB live poller startup failed: %s", exc)
     try:
         # Optionally auto-create the Postgres database and schema in dev
         # environments when BUS_AUTO_CREATE_DB=1. This keeps creation as an
@@ -499,24 +521,31 @@ async def lifespan(app: FastAPI):
     # respond to lightweight endpoints like /health.
     if init_failed:
         logger.warning('Backend initialisation failed — skipping background services')
+        # Keep previous semantics: no background services when base init fails.
+        if live_poller_started:
+            try:
+                ev = globals().get('_live_db_poller_stop_event')
+                th = globals().get('_live_db_poller_thread')
+                if ev:
+                    ev.set()
+                if th and isinstance(th, threading.Thread):
+                    th.join(timeout=3.0)
+            except Exception:
+                pass
         yield
         return
-    # Ensure DB table for persisted live bus snapshots exists.
-    try:
-        _ensure_live_bus_db_table()
-    except Exception as exc:
-        logger.warning("Live DB table init failed: %s", exc)
 
-    # Start DB-backed live bus poller (HTTP -> DB).
-    if os.environ.get('BUS_DISABLE_DB_LIVE_POLLER') == '1':
-        logger.info('BUS_DISABLE_DB_LIVE_POLLER=1 set — not starting DB live poller')
-    else:
+    # Fallback: if early start failed and poller is enabled, try once more now.
+    if os.environ.get('BUS_DISABLE_DB_LIVE_POLLER') != '1' and not live_poller_started:
         try:
+            _ensure_live_bus_db_table()
             live_stop_event = threading.Event()
             live_thread = threading.Thread(target=_live_bus_db_poller_loop, args=(live_stop_event,), daemon=True)
             live_thread.start()
             globals()['_live_db_poller_stop_event'] = live_stop_event
             globals()['_live_db_poller_thread'] = live_thread
+            live_poller_started = True
+            logger.info('DB live poller started after base initialization (fallback path)')
         except Exception as exc:
             logger.warning("DB live poller startup failed: %s", exc)
 
@@ -533,6 +562,7 @@ async def lifespan(app: FastAPI):
     # Start background delay updater thread (today-only updates)
     if os.environ.get('BUS_DISABLE_DELAY_UPDATER') == '1':
         logger.info('BUS_DISABLE_DELAY_UPDATER=1 set — not starting delay updater thread')
+        _first_delay_round_done.set()
     else:
         stop_event = threading.Event()
         delay_thread = threading.Thread(target=_delay_updater_loop, args=(stop_event,), daemon=True)
@@ -540,6 +570,26 @@ async def lifespan(app: FastAPI):
         # Expose so shutdown can stop it
         globals()['_delay_updater_stop_event'] = stop_event
         globals()['_delay_updater_thread'] = delay_thread
+
+    # Startup warmup barrier: hold serving until first live poll cycle and
+    # first delay recompute round complete (or are explicitly disabled).
+    try:
+        warmup_timeout_s = float(os.environ.get('BUS_STARTUP_WARMUP_TIMEOUT_S', '90'))
+    except Exception:
+        warmup_timeout_s = 90.0
+    warmup_timeout_s = max(1.0, warmup_timeout_s)
+    warmup_deadline = time.time() + warmup_timeout_s
+    while time.time() < warmup_deadline:
+        if _is_first_live_cycle_done() and _is_first_delay_round_done():
+            break
+        await asyncio.sleep(0.1)
+
+    if not (_is_first_live_cycle_done() and _is_first_delay_round_done()):
+        logger.warning(
+            "Startup warmup timeout after %.1fs; routing remains blocked until warmup finishes",
+            warmup_timeout_s,
+        )
+
     yield  # — server is running
     # Shutdown: stop the live-updates poll loop
     try:
@@ -591,6 +641,63 @@ _bus_live_snapshot: dict[tuple, dict] = {}
 # Poller fetches live HTTP feeds in the background and stores latest vehicle
 # state per operator+vehicle in Postgres. /bus/live then reads from DB.
 _LIVE_BUS_DB_TABLE = "bus_live_current"
+
+# --- Startup warmup gates ----------------------------------------------------
+# Runtime policy:
+# 1) Live DB reads become available only after the first full poll cycle
+#    (one attempt per configured operator).
+# 2) Routing becomes available only after the first delay refresh round.
+_first_live_cycle_done = threading.Event()
+_first_delay_round_done = threading.Event()
+# Default-open for non-lifespan contexts (unit tests importing module directly).
+# Lifespan startup clears and enforces warmup gates for real runtime.
+_first_live_cycle_done.set()
+_first_delay_round_done.set()
+
+
+def _is_first_live_cycle_done() -> bool:
+    """Whether first live poll cycle is completed (or intentionally bypassed)."""
+    if not globals().get('_base_init_attempted', False):
+        return True
+    try:
+        if os.environ.get('BUS_DISABLE_DB_LIVE_POLLER') == '1':
+            return True
+    except Exception:
+        pass
+    return _first_live_cycle_done.is_set()
+
+
+def _is_first_delay_round_done() -> bool:
+    """Whether first delay refresh round is completed (or intentionally bypassed)."""
+    if not globals().get('_base_init_attempted', False):
+        return True
+    try:
+        if os.environ.get('BUS_DISABLE_DELAY_UPDATER') == '1':
+            return True
+    except Exception:
+        pass
+    return _first_delay_round_done.is_set()
+
+
+def _routing_warmup_pending() -> bool:
+    """True while startup warmup constraints for routing are not yet met."""
+    return (not _is_first_live_cycle_done()) or (not _is_first_delay_round_done())
+
+
+def _routing_warmup_response() -> JSONResponse:
+    """Standard payload while routing is blocked by startup warmup."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "success": False,
+            "error": "routing_warmup_in_progress",
+            "detail": "Routing is available after first live poll cycle and first delay refresh round complete.",
+            "warmup": {
+                "live_cycle_ready": _is_first_live_cycle_done(),
+                "delay_round_ready": _is_first_delay_round_done(),
+            },
+        },
+    )
 
 
 def _bus_live_snapshot_get(key: tuple, max_age_s: float) -> Optional[list]:
@@ -855,6 +962,9 @@ def _read_live_bus_rows(
     apply_bbox: bool = True,
 ) -> list:
     """Read latest live-bus rows from DB and map to bus_live tuple shape."""
+    if not _is_first_live_cycle_done():
+        return []
+
     dsn = _live_bus_db_dsn()
     op = str(operator or "all").strip().lower()
     keep_id = str(keep_vehicle_id).strip() if keep_vehicle_id else None
@@ -990,6 +1100,7 @@ def _live_bus_db_poller_loop(stop_event: threading.Event) -> None:
     operators = _live_bus_operators_from_env()
     if not operators:
         logger.warning("Live DB poller: no operators configured")
+        _first_live_cycle_done.set()
         return
 
     logger.info(
@@ -1001,6 +1112,7 @@ def _live_bus_db_poller_loop(stop_event: threading.Event) -> None:
     )
 
     next_due = {op: 0.0 for op in operators}
+    first_cycle_pending = {str(op).upper() for op in operators}
     while not stop_event.is_set():
         if _live_endpoints_disabled() or is_routing_active():
             stop_event.wait(1.0)
@@ -1035,6 +1147,15 @@ def _live_bus_db_poller_loop(stop_event: threading.Event) -> None:
             logger.debug("Live DB poller: operator=%s polled=%d stored=%d", op, len(raw or []), stored)
         except Exception as exc:
             logger.warning("Live DB poller failed for operator=%s: %s", op, exc)
+        finally:
+            try:
+                if op in first_cycle_pending:
+                    first_cycle_pending.discard(op)
+                if (not first_cycle_pending) and (not _first_live_cycle_done.is_set()):
+                    _first_live_cycle_done.set()
+                    logger.info("Live DB poller warmup complete: first operator cycle finished")
+            except Exception:
+                pass
 
         jitter_s = random.uniform(0.0, poll_jitter_s) if poll_jitter_s > 0.0 else 0.0
         next_due[op] = time.time() + operator_period_s + jitter_s
@@ -8070,6 +8191,25 @@ async def debug_live_match_contract(
     # matcher on only a small sample, returning just the contract violations.
     from fastapi.responses import JSONResponse
 
+    # During active routing, do not perform direct live feed reads.
+    # This endpoint is diagnostic-only, so return a paused marker payload.
+    try:
+        if is_routing_active():
+            return {
+                'operator': operator,
+                'lat': lat,
+                'lon': lon,
+                'latTol': latTol,
+                'lonTol': lonTol,
+                'sample': max(0, int(sample)) if isinstance(sample, int) or str(sample).isdigit() else sample,
+                'limit': max(0, int(limit)) if isinstance(limit, int) or str(limit).isdigit() else limit,
+                'raw_total': 0,
+                'violations': [],
+                'paused': True,
+            }
+    except Exception:
+        pass
+
     if _live_endpoints_disabled():
         return {
             'operator': operator,
@@ -8598,15 +8738,25 @@ def _recompute_journey_delay_map_once() -> None:
 def _delay_updater_loop(stop_event: threading.Event):
     """Background loop to periodically refresh the delay map."""
     # Run once immediately, then sleep interval
+    first_round_done = False
     while not stop_event.is_set():
         # When routing is running, pause delay recomputation/prebuilds.
         if is_routing_active():
+            time.sleep(0.25)
+            continue
+        # Delay refresh should start only after initial live poll cycle.
+        if not _is_first_live_cycle_done():
             time.sleep(0.25)
             continue
         try:
             _recompute_journey_delay_map_once()
         except Exception:
             pass
+        finally:
+            if not first_round_done:
+                first_round_done = True
+                _first_delay_round_done.set()
+                logger.info("Delay updater warmup complete: first delay round finished")
         # Sleep in small increments so we can exit promptly
         sleep_for = _DELAY_UPDATE_INTERVAL
         for _ in range(int(max(1, sleep_for))):
@@ -10574,6 +10724,9 @@ async def journey_plan(request: JourneyPlanRequest):
     routeGeometries for map polyline rendering.
     """
     try:
+        if _routing_warmup_pending():
+            return _routing_warmup_response()
+
         def _route_has_mode(route_result, mode_name: str) -> bool:
             if not isinstance(route_result, dict):
                 return False
@@ -10683,6 +10836,9 @@ async def compare_routers(request: JourneyPlanRequest):
     human-readable summaries and timings in seconds.
     """
     try:
+        if _routing_warmup_pending():
+            return _routing_warmup_response()
+
         start_point = (request.fromStop.lat, request.fromStop.lon)
         destination = (request.toStop.lat, request.toStop.lon)
         date_str = request.date
@@ -10816,6 +10972,9 @@ async def get_route(request: RouteRequest):
     RAPTOR data structures (fixes P7).
     """
     try:
+        if _routing_warmup_pending():
+            return _routing_warmup_response()
+
         date_str = request.date
         time_str = request.time
         start_point = (request.start_lat, request.start_lon)
@@ -10985,6 +11144,12 @@ def parse_nrcc_messages(root: ElementTree):
 async def route_rail_departures(station_code):
     if _live_endpoints_disabled():
         return JSONResponse(status_code=200, content={"locationName": station_code, "services": [], "messages": []})
+    # Pause direct rail feed reads during routing to prioritize route computations.
+    try:
+        if is_routing_active():
+            return []
+    except Exception:
+        pass
     if station_code is None:
         return JSONResponse(
             status_code=400,

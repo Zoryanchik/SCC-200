@@ -173,3 +173,25 @@ def test_read_live_bus_rows_creates_missing_table_and_retries(monkeypatch):
     assert ensure_calls["n"] == 1
     # first attempt raises undefined-table, second attempt succeeds
     assert len(calls) == 2
+
+
+def test_read_live_bus_rows_skips_db_before_first_live_cycle(monkeypatch):
+    monkeypatch.setattr(api_module, "_is_first_live_cycle_done", lambda: False)
+
+    def _should_not_connect(_dsn):
+        raise AssertionError("DB connect should not be called before first live cycle")
+
+    monkeypatch.setattr(api_module, "_live_bus_db_dsn", lambda: "postgres://fake")
+    monkeypatch.setattr(api_module.psycopg, "connect", _should_not_connect)
+
+    out = api_module._read_live_bus_rows(
+        operator="all",
+        lat=54.0,
+        lon=-2.8,
+        lat_tol=0.5,
+        lon_tol=0.5,
+        keep_vehicle_id=None,
+        max_age_s=120,
+    )
+
+    assert out == []
