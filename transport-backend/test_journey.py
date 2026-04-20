@@ -613,8 +613,8 @@ class TestBuildJourneyPlanResponse:
         assert result["success"] is True
         # Should not crash
 
-    def test_train_geometry_color_is_red(self):
-        """Train leg geometry should use red color."""
+    def test_train_geometry_color_is_green(self):
+        """Train leg geometry should use green color."""
         merged = MagicMock()
         merged.stop_metadata = ["A", "B"]
         stop_coords = {0: (54.0, -2.8), 1: (54.1, -2.9)}
@@ -633,7 +633,7 @@ class TestBuildJourneyPlanResponse:
         train_geos = [g for g in result["routeGeometries"]
                       if "train" in g["id"].lower()]
         assert len(train_geos) >= 1
-        assert train_geos[0]["color"] == "#e53935"
+        assert train_geos[0]["color"] == "#2e7d32"
 
     def test_inf_arrival_handled(self):
         """Infinite arrival time produces None in the response."""

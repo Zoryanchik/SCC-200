@@ -448,11 +448,12 @@ const fetchGeometryForLegs = async (legs, opts = {}) => {
     if (typeof toLat === "number" && typeof toLon === "number")
       fallbackCoords.push([toLat, toLon]);
 
+    const isTrain = rawMode === "train";
     const segment = {
       id: isWalk ? `walk-${i}` : `seg-${i}`,
       name: leg.line_name || mode || `Segment ${i}`,
       coords: fallbackCoords,
-      color: isWalk ? "#000000" : "#1a73e8",
+      color: isWalk ? "#000000" : isTrain ? "#2e7d32" : "#1a73e8",
       mode,
     };
 
@@ -1003,6 +1004,7 @@ export default function HomePage() {
           const leg = legs[i];
           const rawMode = (leg?.mode && String(leg.mode).toLowerCase()) || "";
           const isWalk = rawMode === "walking" || rawMode === "walk";
+          const isTrain = rawMode === "train";
           const mode = rawMode || (leg?.line_name ? "transit" : "walking");
           const fromPt =
             leg?.from_stop &&
@@ -1027,7 +1029,7 @@ export default function HomePage() {
             id: isWalk ? `walk-${i}` : `seg-${i}`,
             name: leg?.line_name || mode || `Segment ${i}`,
             coords: norm,
-            color: isWalk ? "#888888" : "#1a73e8",
+            color: isWalk ? "#888888" : isTrain ? "#2e7d32" : "#1a73e8",
             mode,
             isWalk,
             // These are used by the map to clip full-route tracks to the leg
@@ -1130,6 +1132,9 @@ export default function HomePage() {
             rawMode === "walking" ||
             rawMode === "walk" ||
             (typeof g?.id === "string" && g.id.startsWith("walk-"));
+          const isTrain =
+            rawMode === "train" ||
+            (typeof g?.id === "string" && g.id.startsWith("train-"));
 
           // Prefer explicit per-segment endpoints if attachEndpoints() added them,
           // otherwise fall back to the geometry endpoints.
@@ -1148,7 +1153,9 @@ export default function HomePage() {
             coords: norm,
             mode: rawMode || (isWalk ? "walking" : "transit"),
             isWalk,
-            color: isWalk ? "#888888" : g?.color || "#1a73e8",
+            color: isWalk
+              ? "#888888"
+              : g?.color || (isTrain ? "#2e7d32" : "#1a73e8"),
             _from: fromPt || (geoFrom ? [geoFrom[0], geoFrom[1]] : null),
             _to: toPt || (geoTo ? [geoTo[0], geoTo[1]] : null),
           });

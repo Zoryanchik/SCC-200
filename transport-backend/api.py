@@ -9265,7 +9265,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         mode = (info.get("mode") or info.get("type") or "").lower()
         return mode or default
 
-    _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#e53935"}
+    _COLOR = {"walking": "#888888", "bus": "#1a73e8", "train": "#2e7d32"}
     legs = []
     geometries = []
     geo_idx = 0
