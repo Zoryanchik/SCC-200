@@ -1,7 +1,7 @@
 ﻿"""Tests for the /bus/live/{operator} endpoint.
 
-Mocks bus_live.get_bus_live to avoid network requests and
-validates response shape and query parameter handling.
+Mocks the DB-read seam (``api._read_live_bus_rows``) and validates response
+shape plus query parameter handling.
 """
 import sys
 from unittest.mock import MagicMock
@@ -50,15 +50,23 @@ from fastapi.testclient import TestClient  # noqa: E402
 def client():
     """Provide a TestClient that does NOT trigger lifespan/startup events."""
     with TestClient(app, raise_server_exceptions=True) as c:
+        # Lifespan startup may call _read_live_bus_rows from background init.
+        # Reset here so tests assert only the calls made by the request under test.
+        try:
+            api_module._read_live_bus_rows.reset_mock()
+        except Exception:
+            pass
         yield c
 
 
 
 @pytest.fixture(autouse=True)
-def reset_get_bus_live():
-    """Reset get_bus_live mock between tests."""
-    api_module.get_bus_live.reset_mock()
-    api_module.get_bus_live.return_value = []
+def reset_live_bus_mocks(monkeypatch):
+    """Ensure live endpoint seams are fresh mocks for every test."""
+    mocked_rows = MagicMock(return_value=[])
+    monkeypatch.setattr(api_module, "_read_live_bus_rows", mocked_rows)
+    # Keep matcher deterministic and in-memory for response-shape tests.
+    monkeypatch.setattr(api_module, "_compute_delay_from_timetable", MagicMock(return_value=(None, None)))
     yield
 
 class TestBusLiveOperatorEndpoint:
@@ -69,7 +77,7 @@ class TestBusLiveOperatorEndpoint:
         assert response.status_code == 400
 
     def test_returns_expected_shape(self, client: TestClient):
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("10", "City Centre", 53.48, -2.24, "Stagecoach", None, None, None),
             ("42", "Airport", 53.35, -2.27, "Transpora", 150, None, None),
         ]
@@ -98,58 +106,58 @@ class TestBusLiveOperatorEndpoint:
         }
 
     def test_operator_builds_url(self, client: TestClient):
-        api_module.get_bus_live.return_value = []
+        api_module._read_live_bus_rows.return_value = []
 
         client.get(
             "/bus/live/ARCT",
             params={"lat": 53.48, "lon": -2.24},
         )
 
-        api_module.get_bus_live.assert_called_once_with(
-            53.48,
-            -2.24,
-            urls=["https://transport.scc.lancs.ac.uk/bus/live/ARCT"],
+        api_module._read_live_bus_rows.assert_called_once_with(
+            operator="ARCT",
+            lat=53.48,
+            lon=-2.24,
             lat_tol=0.0003,
             lon_tol=0.0003,
             keep_vehicle_id=None,
         )
 
     def test_all_operator_uses_default_urls(self, client: TestClient):
-        api_module.get_bus_live.return_value = []
+        api_module._read_live_bus_rows.return_value = []
 
         client.get(
             "/bus/live/all",
             params={"lat": 53.48, "lon": -2.24},
         )
 
-        api_module.get_bus_live.assert_called_once_with(
-            53.48,
-            -2.24,
-            urls=None,
+        api_module._read_live_bus_rows.assert_called_once_with(
+            operator="all",
+            lat=53.48,
+            lon=-2.24,
             lat_tol=0.0003,
             lon_tol=0.0003,
             keep_vehicle_id=None,
         )
 
     def test_passes_tolerances(self, client: TestClient):
-        api_module.get_bus_live.return_value = []
+        api_module._read_live_bus_rows.return_value = []
 
         client.get(
             "/bus/live/SCCU",
             params={"lat": 53.48, "lon": -2.24, "latTol": 0.01, "lonTol": 0.02},
         )
 
-        api_module.get_bus_live.assert_called_once_with(
-            53.48,
-            -2.24,
-            urls=["https://transport.scc.lancs.ac.uk/bus/live/SCCU"],
+        api_module._read_live_bus_rows.assert_called_once_with(
+            operator="SCCU",
+            lat=53.48,
+            lon=-2.24,
             lat_tol=0.01,
             lon_tol=0.02,
             keep_vehicle_id=None,
         )
 
     def test_empty_results_return_empty_list(self, client: TestClient):
-        api_module.get_bus_live.return_value = []
+        api_module._read_live_bus_rows.return_value = []
 
         response = client.get(
             "/bus/live/ARCT",
@@ -164,7 +172,7 @@ class TestBusDelayHandling:
 
     def test_no_delay_data_returns_none_and_on_time(self, client: TestClient):
         """When delay_seconds is None the response should have delay_minutes=None and status='On time'."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("1A", "Lancaster", 54.05, -2.80, "Stagecoach", None, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -173,7 +181,7 @@ class TestBusDelayHandling:
 
     def test_delay_within_threshold_is_on_time(self, client: TestClient):
         """Delay < 1 min (59 s) should be reported as 'On time'."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("2", "Morecambe", 54.05, -2.80, "Stagecoach", 30, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -182,7 +190,7 @@ class TestBusDelayHandling:
 
     def test_delay_above_threshold_reports_delayed(self, client: TestClient):
         """Delay >= 1 min (60 s) should report 'Delayed N min'."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("100", "Blackpool", 54.05, -2.80, "Blackpool Transport", 300, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -191,7 +199,7 @@ class TestBusDelayHandling:
 
     def test_large_delay_rounds_correctly(self, client: TestClient):
         """630 s = 10.5 min → Python round() (banker's rounding) → 10 min."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("X2", "Preston", 54.05, -2.80, "Stagecoach", 630, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -200,7 +208,7 @@ class TestBusDelayHandling:
 
     def test_early_bus_reports_early(self, client: TestClient):
         """Negative delay (early) should be treated as 'On time' in the status string."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("44", "Carnforth", 54.05, -2.80, "Stagecoach", -120, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -209,7 +217,7 @@ class TestBusDelayHandling:
 
     def test_delay_minutes_rounds_to_one_decimal(self, client: TestClient):
         """delay_minutes should be rounded to 1 decimal place."""
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("7", "Fylde", 54.05, -2.80, "Stagecoach", 155, None, None),
         ]
         data = client.get("/bus/live/SCCU", params={"lat": 54.05, "lon": -2.80}).json()
@@ -221,7 +229,7 @@ class TestBusLiveNoDbContract:
 
     def test_live_matching_does_not_touch_db_modules(self, client: TestClient, monkeypatch):
         # Force the endpoint down the timetable-matching path.
-        api_module.get_bus_live.return_value = [
+        api_module._read_live_bus_rows.return_value = [
             ("10", "City Centre", 53.48, -2.24, "SCCU", None, None, None, {"operator_ref": "SCCU"}),
         ]
 

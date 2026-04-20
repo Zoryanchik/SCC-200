@@ -4897,7 +4897,7 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
-def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False, origin_dep_secs: int = None, operator_ref: str = None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0, allow_offtrack: bool = False, allow_abs_delay: bool = False, return_debug: bool = False):
+def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool = False, origin_dep_secs: int = None, destination_arrival_secs: int = None, operator_ref: str = None, strict_tol: int = 600, feed_origin_atco: str = None, feed_destination_atco: str = None, origin_tz_offset_secs: int = 0, allow_offtrack: bool = False, allow_abs_delay: bool = False, return_debug: bool = False):
     """Compute a delay (seconds) by matching a live vehicle to a timetable journey.
 
     Stable algorithm – designed to return consistent results across
@@ -4951,6 +4951,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
         'line': (line_ref or '').split(':')[-1].strip() if line_ref else None,
         'operator_ref': operator_ref,
         'origin_dep_secs': origin_dep_secs,
+        'destination_arrival_secs': destination_arrival_secs,
         'origin_atco': (str(feed_origin_atco).strip() if feed_origin_atco else None),
         'destination_atco': (str(feed_destination_atco).strip() if feed_destination_atco else None),
     }
@@ -5035,6 +5036,7 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
                 feed_origin_atco=feed_origin_atco,
                 feed_destination_atco=feed_destination_atco,
                 origin_dep_secs=origin_dep_secs,
+                destination_arrival_secs=destination_arrival_secs,
                 origin_tz_offset_secs=origin_tz_offset_secs,
                 strict_tol=strict_tol,
                 return_debug=True,
@@ -5491,6 +5493,16 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             except Exception:
                 od_adj = None
 
+    da_adj = None
+    if destination_arrival_secs is not None:
+        try:
+            da_adj = int(destination_arrival_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                da_adj = int(destination_arrival_secs)
+            except Exception:
+                da_adj = None
+
     # Iterate only journeys for this short line name.
     j_ids_for_line = _journeys_for_line_short(line_q)
     _dbg_cand_dist('line_index_j_ids', j_ids_for_line)
@@ -5557,11 +5569,25 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
             except Exception:
                 origin_time_aligned = False
 
+        destination_time_aligned = False
+        if dest_atco_match and da_adj is not None:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_destination_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        if stop_time is not None and abs(int(stop_time) - int(da_adj)) <= int(strict_tol):
+                            destination_time_aligned = True
+                            break
+            except Exception:
+                destination_time_aligned = False
+
         staged_flags[j_id] = {
             'origin_atco': origin_atco_match,
             'dest_atco': dest_atco_match,
             'weak_dest_text': weak_dest_text_match,
             'origin_time_aligned': origin_time_aligned,
+            'destination_time_aligned': destination_time_aligned,
         }
 
         # Strict operator/service match: require journey's recorded service_code
@@ -5832,19 +5858,28 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # SAFE SOFT-GATE: if we can't find any time-aligned candidates but we *do*
     # have a strong anchor (origin ATCO exists in the journey), we keep those
     # as candidates rather than dropping everything.
-    if feed_origin_atco_n and od_adj is not None:
+    if (feed_origin_atco_n and od_adj is not None) or (feed_destination_atco_n and da_adj is not None):
         aligned = set()
         origin_only = set()
+        destination_only = set()
         for j_id in cand_ids:
             f = staged_flags.get(j_id) or {}
             if f.get('origin_atco'):
                 origin_only.add(j_id)
-                if f.get('origin_time_aligned'):
-                    aligned.add(j_id)
+            if f.get('dest_atco'):
+                destination_only.add(j_id)
+
+            if (feed_origin_atco_n and od_adj is not None and f.get('origin_time_aligned')) or (
+                feed_destination_atco_n and da_adj is not None and f.get('destination_time_aligned')
+            ):
+                aligned.add(j_id)
+
         if aligned:
             latched = aligned
-        elif origin_only:
+        elif feed_origin_atco_n and od_adj is not None and origin_only:
             latched = origin_only
+        elif feed_destination_atco_n and da_adj is not None and destination_only:
+            latched = destination_only
 
     _dbg_cand_dist('after_stage2_latched', latched if latched else cand_ids)
 
@@ -5860,26 +5895,14 @@ def _compute_delay_from_timetable(line_ref, dest, lat_v, lon_v, return_jid: bool
     # Stage 4: for destination-latched candidates, require origin ATCO to
     # exist in the journey and compare origin time against ARRIVAL time at
     # that stop (arrival preferred; fallback to departure).
-    if latched and feed_destination_atco_n and feed_origin_atco_n and od_adj is not None:
+    if latched and feed_destination_atco_n and ((feed_origin_atco_n and od_adj is not None) or (da_adj is not None)):
         refined = set()
         for j_id in latched:
-            try:
-                jt = merged.journey_times[j_id]
-            except Exception:
-                continue
-            try:
-                stop_time = None
-                for stop_int, arr_t, dep_t in jt:
-                    s_atco = merged.get_atco_code(stop_int)
-                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
-                        stop_time = arr_t if arr_t is not None else dep_t
-                        break
-                if stop_time is None:
-                    continue
-                if abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
-                    refined.add(j_id)
-            except Exception:
-                continue
+            f = staged_flags.get(j_id) or {}
+            origin_ok = bool(feed_origin_atco_n and od_adj is not None and f.get('origin_time_aligned'))
+            dest_ok = bool(feed_destination_atco_n and da_adj is not None and f.get('destination_time_aligned'))
+            if origin_ok or dest_ok:
+                refined.add(j_id)
         if refined:
             latched = refined
 
@@ -6674,6 +6697,7 @@ def _stage_filter_journeys_for_live_bus(
     feed_origin_atco: str | None = None,
     feed_destination_atco: str | None = None,
     origin_dep_secs: int | None = None,
+    destination_arrival_secs: int | None = None,
     origin_tz_offset_secs: int = 0,
     strict_tol: int = 600,
     return_debug: bool = False,
@@ -6707,6 +6731,16 @@ def _stage_filter_journeys_for_live_bus(
                 od_adj = int(origin_dep_secs)
             except Exception:
                 od_adj = None
+
+    da_adj = None
+    if destination_arrival_secs is not None:
+        try:
+            da_adj = int(destination_arrival_secs) + int(origin_tz_offset_secs or 0)
+        except Exception:
+            try:
+                da_adj = int(destination_arrival_secs)
+            except Exception:
+                da_adj = None
 
     # stop name map for weak destination matching.
     stop_name_map = {}
@@ -6780,8 +6814,10 @@ def _stage_filter_journeys_for_live_bus(
             'feed_origin_atco': feed_origin_atco,
             'feed_destination_atco': feed_destination_atco,
             'origin_dep_secs': origin_dep_secs,
+            'destination_arrival_secs': destination_arrival_secs,
             'origin_tz_offset_secs': origin_tz_offset_secs,
             'od_adj': od_adj,
+            'da_adj': da_adj,
             'strict_tol': strict_tol,
             'stages': [],
         }
@@ -6867,11 +6903,25 @@ def _stage_filter_journeys_for_live_bus(
             except Exception:
                 origin_time_aligned = False
 
+        destination_time_aligned = False
+        if dest_atco_match and da_adj is not None:
+            try:
+                for stop_int, arr_t, dep_t in jt:
+                    s_atco = merged.get_atco_code(stop_int)
+                    if s_atco and str(s_atco).strip() == feed_destination_atco_n:
+                        stop_time = arr_t if arr_t is not None else dep_t
+                        if stop_time is not None and abs(int(stop_time) - int(da_adj)) <= int(strict_tol):
+                            destination_time_aligned = True
+                            break
+            except Exception:
+                destination_time_aligned = False
+
         staged_flags[j_id] = {
             'origin_atco': origin_atco_match,
             'dest_atco': dest_atco_match,
             'weak_dest_text': weak_dest_text_match,
             'origin_time_aligned': origin_time_aligned,
+            'destination_time_aligned': destination_time_aligned,
         }
 
         candidates.append(j_id)
@@ -6888,24 +6938,32 @@ def _stage_filter_journeys_for_live_bus(
     latched: set[int] = set()
 
     # Stage 2 latch: origin ATCO + origin start time match.
-    if feed_origin_atco_n and od_adj is not None:
+    if (feed_origin_atco_n and od_adj is not None) or (feed_destination_atco_n and da_adj is not None):
         aligned = set()
         origin_only = set()
+        destination_only = set()
         for j_id in candidates:
             f = staged_flags.get(j_id) or {}
             if f.get('origin_atco'):
                 origin_only.add(j_id)
-                if f.get('origin_time_aligned'):
-                    aligned.add(j_id)
+            if f.get('dest_atco'):
+                destination_only.add(j_id)
+            if (feed_origin_atco_n and od_adj is not None and f.get('origin_time_aligned')) or (
+                feed_destination_atco_n and da_adj is not None and f.get('destination_time_aligned')
+            ):
+                aligned.add(j_id)
         if return_debug:
             debug['stages'].append(_dist_snapshot(origin_only, label='stage2_origin_only'))
+            debug['stages'].append(_dist_snapshot(destination_only, label='stage2_destination_only'))
             debug['stages'].append(_dist_snapshot(aligned, label='stage2_aligned'))
         # If we have any aligned origin matches, they win outright.
         if aligned:
             latched = aligned
         # Otherwise, restrict to journeys that at least contain the origin ATCO.
-        elif origin_only:
+        elif feed_origin_atco_n and od_adj is not None and origin_only:
             latched = origin_only
+        elif feed_destination_atco_n and da_adj is not None and destination_only:
+            latched = destination_only
 
     if return_debug:
         debug['stages'].append(_dist_snapshot(latched if latched else candidates, label='after_stage2_latch_effective'))
@@ -6922,29 +6980,14 @@ def _stage_filter_journeys_for_live_bus(
 
     # Stage 4: for destination-latched candidates, require origin ATCO to exist
     # and compare origin time against the arrival/departure time at that stop.
-    if latched and feed_destination_atco_n and feed_origin_atco_n and od_adj is not None:
+    if latched and feed_destination_atco_n and ((feed_origin_atco_n and od_adj is not None) or (da_adj is not None)):
         refined: set[int] = set()
         for j_id in latched:
-            try:
-                jt = merged.journey_times[j_id]
-            except Exception:
-                continue
-            stop_time = None
-            try:
-                for stop_int, arr_t, dep_t in jt:
-                    s_atco = merged.get_atco_code(stop_int)
-                    if s_atco and str(s_atco).strip() == feed_origin_atco_n:
-                        stop_time = arr_t if arr_t is not None else dep_t
-                        break
-            except Exception:
-                stop_time = None
-            if stop_time is None:
-                continue
-            try:
-                if abs(int(stop_time) - int(od_adj)) <= int(strict_tol):
-                    refined.add(j_id)
-            except Exception:
-                continue
+            f = staged_flags.get(j_id) or {}
+            origin_ok = bool(feed_origin_atco_n and od_adj is not None and f.get('origin_time_aligned'))
+            dest_ok = bool(feed_destination_atco_n and da_adj is not None and f.get('destination_time_aligned'))
+            if origin_ok or dest_ok:
+                refined.add(j_id)
         if refined:
             latched = refined
 
@@ -7236,6 +7279,7 @@ def _get_live_delay_for_line(line_name: str) -> Optional[int]:
                 computed = _compute_delay_from_timetable(
                     line_ref, dest, lat_v, lon_v,
                     origin_dep_secs=origin_dep,
+                    destination_arrival_secs=(meta.get('destination_arrival_secs') if meta and isinstance(meta, dict) else None),
                     origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
                     operator_ref=op_for_match,
                     strict_tol=600,
@@ -7414,6 +7458,7 @@ async def bus_live_operator(
                 line_ref, dest, lat_v, lon_v,
                 return_jid=True,
                 origin_dep_secs=origin_dep,
+                destination_arrival_secs=(meta.get('destination_arrival_secs') if meta and isinstance(meta, dict) else None),
                 origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
                 operator_ref=op_for_match,
                 strict_tol=600,
@@ -7813,6 +7858,7 @@ async def debug_live_match_contract(
                 lon_v,
                 return_jid=True,
                 origin_dep_secs=origin_dep,
+                destination_arrival_secs=(meta.get('destination_arrival_secs') if meta and isinstance(meta, dict) else None),
                 origin_tz_offset_secs=(meta.get('origin_tz_offset_s') if meta and isinstance(meta, dict) else 0),
                 operator_ref=op_for_match,
                 strict_tol=600,
@@ -8116,6 +8162,7 @@ def _recompute_journey_delay_map_once() -> None:
                 line_ref, dest, lat_v, lon_v,
                 return_jid=True,
                 origin_dep_secs=origin_dep,
+                destination_arrival_secs=(meta.get('destination_arrival_secs') if meta and isinstance(meta, dict) else None),
                 operator_ref=op_for_match,
                 # Allow the background recompute to accept off-track
                 # vehicles and large delays so the delay map reflects

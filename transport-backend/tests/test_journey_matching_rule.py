@@ -169,3 +169,109 @@ def test_staged_matching_falls_back_to_destination_then_origin_stop_time(monkeyp
         origin_tz_offset_secs=0,
     )
     assert latched == [0]
+
+
+def test_staged_matching_accepts_destination_arrival_time_when_origin_not_provided(monkeypatch):
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 3, 16, 10, 0, 0)
+
+    merged = _DummyMerged(
+        journey_metadata=[
+            {"line_name": "100", "operator_national_code": "SCCU", "journey_id": "J0"},
+            {"line_name": "100", "operator_national_code": "SCCU", "journey_id": "J1"},
+        ],
+        journey_times=[
+            # J0 destination arrival aligns to feed DestinationAimedArrivalTime.
+            [(0, 29100, 29100), (2, 31200, 31200)],
+            # J1 destination arrival does not align.
+            [(0, 30600, 30600), (2, 32400, 32400)],
+        ],
+        journey_to_route=[0, 0],
+        journey_stop_index=[{0: 0, 2: 1}, {0: 0, 2: 1}],
+        legacy_full_route_polyline=[[(54.0, -2.8), (54.01, -2.79)]],
+        route_stops=[[0, 2]],
+        stop_metadata=["Origin", "Mid", "DestA", "DestB"],
+    )
+
+    walking = _DummyWalking(
+        stop_coords={
+            0: (54.0000, -2.8000),
+            1: (54.0005, -2.7995),
+            2: (54.0010, -2.7990),
+            3: (54.0015, -2.7985),
+        }
+    )
+
+    def _fake_get_router_for_date(_today, start_time=None, apply_delay=False):
+        return merged, SimpleNamespace(), walking
+
+    monkeypatch.setattr(api_module, "get_router_for_date", _fake_get_router_for_date)
+    monkeypatch.setattr(api_module, "datetime", _FixedDatetime)
+
+    latched = api_module._stage_filter_journeys_for_live_bus(
+        merged,
+        walking,
+        line_ref="100",
+        operator_ref="SCCU",
+        destination_arrival_secs=31200,
+        strict_tol=600,
+        feed_destination_atco="ATCO_DEST_A",
+        origin_tz_offset_secs=0,
+    )
+    assert latched == [0]
+
+
+def test_staged_matching_allows_origin_or_destination_time_alignment(monkeypatch):
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 3, 16, 10, 0, 0)
+
+    merged = _DummyMerged(
+        journey_metadata=[
+            {"line_name": "100", "operator_national_code": "SCCU", "journey_id": "J0"},
+            {"line_name": "100", "operator_national_code": "SCCU", "journey_id": "J1"},
+        ],
+        journey_times=[
+            # J0 aligns by origin aimed departure only.
+            [(0, 29100, 29100), (2, 32000, 32000)],
+            # J1 aligns by destination aimed arrival only.
+            [(0, 30500, 30500), (2, 31200, 31200)],
+        ],
+        journey_to_route=[0, 0],
+        journey_stop_index=[{0: 0, 2: 1}, {0: 0, 2: 1}],
+        legacy_full_route_polyline=[[(54.0, -2.8), (54.01, -2.79)]],
+        route_stops=[[0, 2]],
+        stop_metadata=["Origin", "Mid", "DestA", "DestB"],
+    )
+
+    walking = _DummyWalking(
+        stop_coords={
+            0: (54.0000, -2.8000),
+            1: (54.0005, -2.7995),
+            2: (54.0010, -2.7990),
+            3: (54.0015, -2.7985),
+        }
+    )
+
+    def _fake_get_router_for_date(_today, start_time=None, apply_delay=False):
+        return merged, SimpleNamespace(), walking
+
+    monkeypatch.setattr(api_module, "get_router_for_date", _fake_get_router_for_date)
+    monkeypatch.setattr(api_module, "datetime", _FixedDatetime)
+
+    latched = api_module._stage_filter_journeys_for_live_bus(
+        merged,
+        walking,
+        line_ref="100",
+        operator_ref="SCCU",
+        origin_dep_secs=29100,
+        destination_arrival_secs=31200,
+        strict_tol=600,
+        feed_origin_atco="ATCO_ORIGIN",
+        feed_destination_atco="ATCO_DEST_A",
+        origin_tz_offset_secs=0,
+    )
+    assert latched == [0, 1]

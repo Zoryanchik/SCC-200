@@ -269,7 +269,7 @@ class BusLive:
                             delay_seconds = int(diff)
                     # --------------------------------------------------------
 
-                    # ── OriginAimedDepartureTime → seconds since midnight (with day-shift) ──
+                    # ── OriginAimedDepartureTime → seconds since midnight ──
                     # Prefer a full ISO datetime when present and compute a seconds
                     # value relative to UTC 'today'. If the parsed date differs from
                     # today, include a day-offset (±86400 seconds) so callers can
@@ -313,6 +313,31 @@ class BusLive:
                                         origin_tz_offset_s = 0
                                 except Exception:
                                     origin_tz_offset_s = 0
+
+                        # ── DestinationAimedArrivalTime → seconds since midnight ──
+                        destination_arrival_secs: Optional[int] = None
+                        destination_arrival_raw = (
+                            self._get_text(mvj, 'destinationaimedarrivaltime') or
+                            self._get_text(mvj, 'DestinationAimedArrivalTime')
+                        )
+                        if destination_arrival_raw:
+                            s = destination_arrival_raw.strip()
+                            if re.match(r'^-?\d+$', s):
+                                try:
+                                    destination_arrival_secs = int(s)
+                                except Exception:
+                                    destination_arrival_secs = None
+                            else:
+                                destination_dt = _parse_iso_dt(destination_arrival_raw)
+                                if destination_dt is not None:
+                                    try:
+                                        destination_arrival_secs = (
+                                            destination_dt.hour * 3600
+                                            + destination_dt.minute * 60
+                                            + destination_dt.second
+                                        )
+                                    except Exception:
+                                        destination_arrival_secs = None
                     # --------------------------------------------------------
 
                     # extract optional bearing (may be present under VehicleLocation or elsewhere)
@@ -376,6 +401,12 @@ class BusLive:
                         # include origin timezone offset if we parsed one earlier
                         try:
                             meta.setdefault('origin_tz_offset_s', origin_tz_offset_s)
+                        except Exception:
+                            pass
+                        # include DestinationAimedArrivalTime (seconds since midnight)
+                        try:
+                            if destination_arrival_secs is not None:
+                                meta.setdefault('destination_arrival_secs', int(destination_arrival_secs))
                         except Exception:
                             pass
                     except Exception:
