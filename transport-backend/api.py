@@ -232,35 +232,38 @@ def _compute_vehicle_track_coords_for_live(entry: dict) -> list[list[float]] | N
                         i = resolved.get('from_pos')
                         j = resolved.get('to_pos')
 
-                        if fs is not None and ts is not None and fs != ts:
+                        # Circular routes may legitimately have the same stop_int
+                        # at start/end (same ATCO appears multiple times in route order).
+                        # In that case, use position inequality (i != j) to allow
+                        # stitching around the loop segment.
+                        if i is not None and j is not None and i != j:
                             # Stitch consecutive pairs between fs and ts along route order.
-                            if i is not None and j is not None:
-                                step = 1 if j > i else -1
-                                stitched_pts = []
-                                ok = True
-                                k = i
-                                while k != j:
-                                    a = route_stops[k]
-                                    b = route_stops[k + step]
-                                    seg2 = link_map.get((a, b))
-                                    if not seg2:
-                                        rev2 = link_map.get((b, a))
-                                        if rev2:
-                                            seg2 = list(reversed(rev2))
-                                    if not seg2:
-                                        ok = False
-                                        break
-                                    if stitched_pts and seg2 and stitched_pts[-1] == seg2[0]:
-                                        stitched_pts.extend(seg2[1:])
-                                    else:
-                                        stitched_pts.extend(seg2)
-                                    k += step
+                            step = 1 if j > i else -1
+                            stitched_pts = []
+                            ok = True
+                            k = i
+                            while k != j:
+                                a = route_stops[k]
+                                b = route_stops[k + step]
+                                seg2 = link_map.get((a, b))
+                                if not seg2:
+                                    rev2 = link_map.get((b, a))
+                                    if rev2:
+                                        seg2 = list(reversed(rev2))
+                                if not seg2:
+                                    ok = False
+                                    break
+                                if stitched_pts and seg2 and stitched_pts[-1] == seg2[0]:
+                                    stitched_pts.extend(seg2[1:])
+                                else:
+                                    stitched_pts.extend(seg2)
+                                k += step
 
-                                if ok:
-                                    coords = _normalize_latlon_coords(stitched_pts)
-                                    if len(coords) >= 2:
-                                        _put_cached_bus_track(entry, coords)
-                                        return coords
+                            if ok:
+                                coords = _normalize_latlon_coords(stitched_pts)
+                                if len(coords) >= 2:
+                                    _put_cached_bus_track(entry, coords)
+                                    return coords
         except Exception:
             pass
         # If we already computed/cached it recently, reuse.
@@ -2800,7 +2803,12 @@ def route_leg_geometry(from_lat: float, from_lon: float,
 
                                         frag = None
                                         # Primary: chain along route stop order.
-                                        if route_stops and i is not None and j is not None and fs != ts:
+                                        # Circular routes can legitimately have the same
+                                        # stop_int at both ends (same ATCO appearing multiple
+                                        # times in route order). Use position inequality
+                                        # rather than stop_int inequality so loop segments
+                                        # can still be stitched.
+                                        if route_stops and i is not None and j is not None and i != j:
                                             step = 1 if j > i else -1
                                             stitched = []
                                             ok = True
