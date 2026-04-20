@@ -4725,7 +4725,11 @@ async def routes_for_line(
                 merged,
                 r_int,
                 atcos,
-                allow_partial=True,
+                # Stop-popup line overlays should show the full route shape.
+                # If stitching can only produce a fragment, prefer no geometry
+                # so the frontend falls back to full stop-to-stop rendering
+                # instead of drawing a misleading partial track.
+                allow_partial=False,
             )
             if coords and len(coords) >= 2:
                 v['geometry'] = coords
@@ -4899,7 +4903,11 @@ async def routes_for_stop(atco: str):
                 merged,
                 r_int,
                 atcos,
-                allow_partial=True,
+                # Stop-label overlays should represent the full variant shape.
+                # If link stitching is incomplete, return no stitched geometry
+                # so the frontend can render full stop-to-stop fallback instead
+                # of a misleading stitched fragment.
+                allow_partial=False,
             )
             if coords and len(coords) >= 2:
                 v['geometry'] = coords
