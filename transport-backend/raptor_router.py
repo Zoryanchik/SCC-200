@@ -424,6 +424,9 @@ class RaptorRouter:
         # first_journey will use *prev_arrival* for boarding-eligibility
         # checks while writing improvements into *reach_stops*.
         prev_arrival = [row[1] for row in reach_stops]
+        # Snapshot previous-round mode per stop so walking-transfer expansion
+        # can avoid re-expanding from stops that were already walking-reached.
+        prev_mode = [row[2] for row in reach_stops]
 
         # Scan every route passing through each improved stop.
         # Process stops in ascending arrival-time order (nearest first)
@@ -471,6 +474,11 @@ class RaptorRouter:
         # considered from the soonest originating stop first.
         ordered_switch_b = sorted(list(switch_b), key=lambda s: reach_stops[s][1])
         for stop in ordered_switch_b:
+            # Snapshot rule: do not chain walking expansion from a stop that
+            # was already WALKING in the previous round, or has already
+            # become WALKING earlier in this round.
+            if prev_mode[stop] == WALKING or reach_stops[stop][2] == WALKING:
+                continue
             # For any improved stop, propagate walking transfers from the stop's
             # arrival time. Use the stop itself as the origin of the subsequent
             # walking transfer (not its predecessor). This avoids creating

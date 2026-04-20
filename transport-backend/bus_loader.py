@@ -6,6 +6,7 @@ import psycopg
 import ssl
 import tempfile
 import json
+import time
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
@@ -128,21 +129,42 @@ class BusLoader:
                 'modified': latest.get('modified', ''),
             }]
 
-        max_workers = int(os.getenv('BUS_TIMETABLE_SOURCE_WORKERS', '6') or '6')
+        try:
+            http_interval_s = float(os.getenv('BUS_TIMETABLE_HTTP_INTERVAL_S', '10') or '10')
+        except Exception:
+            http_interval_s = 10.0
+        http_interval_s = max(0.0, http_interval_s)
 
         datasets = []
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = []
-            for src in sources:
-                futs.append(ex.submit(_fetch_one_src, src))
-            for src, desc in desc_sources:
-                futs.append(ex.submit(_fetch_one_desc_src, src, desc))
-            for fut in as_completed(futs):
+        # Default behavior: stagger timetable HTTP source requests to avoid
+        # hammering upstream and blocking local startup I/O.
+        if http_interval_s > 0:
+            plan = [("src", src, None) for src in sources] + [("desc", src, desc) for src, desc in desc_sources]
+            for i, (kind, src, desc) in enumerate(plan):
+                if i > 0:
+                    time.sleep(http_interval_s)
                 try:
-                    datasets.extend(fut.result() or [])
+                    if kind == "src":
+                        datasets.extend(_fetch_one_src(src) or [])
+                    else:
+                        datasets.extend(_fetch_one_desc_src(src, desc) or [])
                 except Exception as e:
                     # Keep non-fatal: a single broken source shouldn't prevent startup.
-                    print(f"  [bus] ⚠ Skipping source (worker error): {e}")
+                    print(f"  [bus] ⚠ Skipping source {src} (sequential error): {e}")
+        else:
+            max_workers = int(os.getenv('BUS_TIMETABLE_SOURCE_WORKERS', '6') or '6')
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = []
+                for src in sources:
+                    futs.append(ex.submit(_fetch_one_src, src))
+                for src, desc in desc_sources:
+                    futs.append(ex.submit(_fetch_one_desc_src, src, desc))
+                for fut in as_completed(futs):
+                    try:
+                        datasets.extend(fut.result() or [])
+                    except Exception as e:
+                        # Keep non-fatal: a single broken source shouldn't prevent startup.
+                        print(f"  [bus] ⚠ Skipping source (worker error): {e}")
 
         return datasets
 

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import random
 import time
 import sys
 import threading
@@ -497,6 +498,25 @@ async def lifespan(app: FastAPI):
         logger.warning('Backend initialisation failed — skipping background services')
         yield
         return
+    # Ensure DB table for persisted live bus snapshots exists.
+    try:
+        _ensure_live_bus_db_table()
+    except Exception as exc:
+        logger.warning("Live DB table init failed: %s", exc)
+
+    # Start DB-backed live bus poller (HTTP -> DB).
+    if os.environ.get('BUS_DISABLE_DB_LIVE_POLLER') == '1':
+        logger.info('BUS_DISABLE_DB_LIVE_POLLER=1 set — not starting DB live poller')
+    else:
+        try:
+            live_stop_event = threading.Event()
+            live_thread = threading.Thread(target=_live_bus_db_poller_loop, args=(live_stop_event,), daemon=True)
+            live_thread.start()
+            globals()['_live_db_poller_stop_event'] = live_stop_event
+            globals()['_live_db_poller_thread'] = live_thread
+        except Exception as exc:
+            logger.warning("DB live poller startup failed: %s", exc)
+
     # Configure and start the WebSocket/STOMP live-updates broker
     try:
         if os.environ.get('BUS_DISABLE_LIVE_POLLING') == '1':
@@ -522,6 +542,16 @@ async def lifespan(app: FastAPI):
     try:
         await ws_broker.stop_polling()
     except Exception:  # pragma: no cover
+        pass
+    # Stop DB live poller thread
+    try:
+        ev = globals().get('_live_db_poller_stop_event')
+        th = globals().get('_live_db_poller_thread')
+        if ev:
+            ev.set()
+        if th and isinstance(th, threading.Thread):
+            th.join(timeout=3.0)
+    except Exception:
         pass
     # Stop the delay updater thread
     try:
@@ -553,6 +583,11 @@ _routing_active_count = 0
 # per operator+query params and serve it while routing computations run.
 _bus_live_snapshot_lock = threading.Lock()
 _bus_live_snapshot: dict[tuple, dict] = {}
+
+# --- Live bus DB store (polled snapshots) -----------------------------------
+# Poller fetches live HTTP feeds in the background and stores latest vehicle
+# state per operator+vehicle in Postgres. /bus/live then reads from DB.
+_LIVE_BUS_DB_TABLE = "bus_live_current"
 
 
 def _bus_live_snapshot_get(key: tuple, max_age_s: float) -> Optional[list]:
@@ -586,6 +621,403 @@ def _bus_live_snapshot_set(key: tuple, data: list, max_entries: int = 2000) -> N
                     _bus_live_snapshot.pop(k, None)
     except Exception:
         pass
+
+
+def _live_bus_db_dsn() -> str:
+    """Resolve DSN used for live-bus DB storage."""
+    from main import BUS_DB_PATH as _bus_dsn
+    return _bus_dsn
+
+
+def _ensure_live_bus_db_table() -> None:
+    """Create live-bus storage table/indexes if they do not exist."""
+    dsn = _live_bus_db_dsn()
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {_LIVE_BUS_DB_TABLE} (
+                    operator_code TEXT NOT NULL,
+                    vehicle_key TEXT NOT NULL,
+                    line_ref TEXT,
+                    destination_name TEXT,
+                    lat DOUBLE PRECISION NOT NULL,
+                    lon DOUBLE PRECISION NOT NULL,
+                    operator_name TEXT,
+                    delay_seconds INTEGER,
+                    origin_dep_secs INTEGER,
+                    bearing DOUBLE PRECISION,
+                    vehicle_ref TEXT,
+                    vehicle_journey_code TEXT,
+                    framed_journey_ref TEXT,
+                    dated_journey_ref TEXT,
+                    meta JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (operator_code, vehicle_key)
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{_LIVE_BUS_DB_TABLE}_op_time
+                ON {_LIVE_BUS_DB_TABLE} (operator_code, fetched_at DESC)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{_LIVE_BUS_DB_TABLE}_geo
+                ON {_LIVE_BUS_DB_TABLE} (lat, lon)
+                """
+            )
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _default_live_bus_operators() -> list[str]:
+    ops: list[str] = []
+    try:
+        for u in (BusLive.DEFAULT_URLS or []):
+            code = str(u).rstrip('/').split('/')[-1].strip().upper()
+            if code and code not in ops:
+                ops.append(code)
+    except Exception:
+        pass
+    if not ops:
+        try:
+            ops = [str(k).upper() for k in (BusLive.OPERATOR_NAMES or {}).keys()]
+        except Exception:
+            ops = []
+    return ops
+
+
+def _live_bus_operators_from_env() -> list[str]:
+    raw = str(os.environ.get("BUS_LIVE_OPERATORS") or "").strip()
+    if not raw:
+        return _default_live_bus_operators()
+    out: list[str] = []
+    for p in raw.split(','):
+        code = p.strip().upper()
+        if code and code not in out:
+            out.append(code)
+    return out or _default_live_bus_operators()
+
+
+def _live_bus_vehicle_key(
+    line_ref: Any,
+    dest: Any,
+    lat_v: Any,
+    lon_v: Any,
+    meta: dict,
+) -> str:
+    """Build stable per-operator vehicle key for DB upsert."""
+    for k in ("vehicle_ref", "vehicle_journey_code", "framed_journey_ref", "dated_journey_ref"):
+        v = meta.get(k) if isinstance(meta, dict) else None
+        if v:
+            return str(v).strip()
+    try:
+        return f"{str(line_ref or '').strip()}|{str(dest or '').strip()}|{float(lat_v):.5f}|{float(lon_v):.5f}"
+    except Exception:
+        return f"{str(line_ref or '').strip()}|{str(dest or '').strip()}"
+
+
+def _store_live_bus_rows(operator_code: str, results: list) -> int:
+    """Persist latest polled live-bus rows for one operator into DB."""
+    dsn = _live_bus_db_dsn()
+    op = str(operator_code or '').strip().upper()
+    if not op:
+        return 0
+
+    conn = psycopg.connect(dsn)
+    stored = 0
+    try:
+        with conn.cursor() as cur:
+            for item in (results or []):
+                meta = {}
+                base = item
+                try:
+                    if isinstance(item[-1], dict):
+                        meta = item[-1]
+                        base = item[:-1]
+                except Exception:
+                    base = item
+
+                if len(base) == 7:
+                    line_ref, dest, lat_v, lon_v, operator_name, delay_s, origin_dep = base
+                    bearing = None
+                elif len(base) >= 8:
+                    line_ref, dest, lat_v, lon_v, operator_name, delay_s, origin_dep, bearing = base[:8]
+                else:
+                    continue
+
+                try:
+                    lat_f = float(lat_v)
+                    lon_f = float(lon_v)
+                except Exception:
+                    continue
+
+                if not isinstance(meta, dict):
+                    meta = {}
+
+                vehicle_ref = meta.get("vehicle_ref")
+                vehicle_journey_code = meta.get("vehicle_journey_code")
+                framed_journey_ref = meta.get("framed_journey_ref")
+                dated_journey_ref = meta.get("dated_journey_ref")
+                vehicle_key = _live_bus_vehicle_key(line_ref, dest, lat_f, lon_f, meta)
+
+                cur.execute(
+                    f"""
+                    INSERT INTO {_LIVE_BUS_DB_TABLE} (
+                        operator_code, vehicle_key, line_ref, destination_name,
+                        lat, lon, operator_name, delay_seconds, origin_dep_secs,
+                        bearing, vehicle_ref, vehicle_journey_code,
+                        framed_journey_ref, dated_journey_ref, meta, fetched_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s::jsonb, NOW()
+                    )
+                    ON CONFLICT (operator_code, vehicle_key)
+                    DO UPDATE SET
+                        line_ref = EXCLUDED.line_ref,
+                        destination_name = EXCLUDED.destination_name,
+                        lat = EXCLUDED.lat,
+                        lon = EXCLUDED.lon,
+                        operator_name = EXCLUDED.operator_name,
+                        delay_seconds = EXCLUDED.delay_seconds,
+                        origin_dep_secs = EXCLUDED.origin_dep_secs,
+                        bearing = EXCLUDED.bearing,
+                        vehicle_ref = EXCLUDED.vehicle_ref,
+                        vehicle_journey_code = EXCLUDED.vehicle_journey_code,
+                        framed_journey_ref = EXCLUDED.framed_journey_ref,
+                        dated_journey_ref = EXCLUDED.dated_journey_ref,
+                        meta = EXCLUDED.meta,
+                        fetched_at = EXCLUDED.fetched_at
+                    """,
+                    (
+                        op,
+                        vehicle_key,
+                        line_ref,
+                        dest,
+                        lat_f,
+                        lon_f,
+                        operator_name,
+                        int(delay_s) if delay_s is not None else None,
+                        int(origin_dep) if origin_dep is not None else None,
+                        float(bearing) if bearing is not None else None,
+                        vehicle_ref,
+                        vehicle_journey_code,
+                        framed_journey_ref,
+                        dated_journey_ref,
+                        json.dumps(meta or {}),
+                    ),
+                )
+                stored += 1
+
+            # Keep table bounded: remove stale rows (for all operators).
+            try:
+                ttl_s = int(os.environ.get("BUS_LIVE_DB_RETENTION_S", "900"))
+            except Exception:
+                ttl_s = 900
+            ttl_s = max(60, ttl_s)
+            cur.execute(
+                f"DELETE FROM {_LIVE_BUS_DB_TABLE} WHERE fetched_at < NOW() - make_interval(secs => %s)",
+                (ttl_s,),
+            )
+
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return stored
+
+
+def _read_live_bus_rows(
+    operator: str,
+    lat: float,
+    lon: float,
+    lat_tol: float,
+    lon_tol: float,
+    keep_vehicle_id: Optional[str],
+    max_age_s: Optional[int] = None,
+    apply_bbox: bool = True,
+) -> list:
+    """Read latest live-bus rows from DB and map to bus_live tuple shape."""
+    dsn = _live_bus_db_dsn()
+    op = str(operator or "all").strip().lower()
+    keep_id = str(keep_vehicle_id).strip() if keep_vehicle_id else None
+
+    if max_age_s is None:
+        try:
+            max_age_s = int(os.environ.get("BUS_LIVE_DB_MAX_AGE_S", "300"))
+        except Exception:
+            max_age_s = 300
+    max_age_s = max(30, int(max_age_s))
+
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    line_ref,
+                    destination_name,
+                    lat,
+                    lon,
+                    operator_name,
+                    delay_seconds,
+                    origin_dep_secs,
+                    bearing,
+                    meta
+                FROM {_LIVE_BUS_DB_TABLE}
+                WHERE fetched_at >= NOW() - make_interval(secs => %s)
+                  AND (%s = 'all' OR lower(operator_code) = %s)
+                  AND (
+                                        %s = FALSE
+                                        OR (lat BETWEEN %s AND %s AND lon BETWEEN %s AND %s)
+                    OR (
+                        %s::text IS NOT NULL
+                        AND (
+                            vehicle_ref = %s::text
+                            OR vehicle_journey_code = %s::text
+                        )
+                    )
+                  )
+                ORDER BY fetched_at DESC
+                """,
+                (
+                    max_age_s,
+                    op,
+                    op,
+                    bool(apply_bbox),
+                    float(lat) - float(lat_tol),
+                    float(lat) + float(lat_tol),
+                    float(lon) - float(lon_tol),
+                    float(lon) + float(lon_tol),
+                    keep_id,
+                    keep_id,
+                    keep_id,
+                ),
+            )
+            rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    out = []
+    for r in rows:
+        try:
+            line_ref, dest, lat_v, lon_v, op_name, delay_s, origin_dep, bearing, meta = r
+            if meta is None:
+                meta = {}
+            elif isinstance(meta, str):
+                meta = json.loads(meta)
+            elif not isinstance(meta, dict):
+                meta = {}
+            out.append((line_ref, dest, lat_v, lon_v, op_name, delay_s, origin_dep, bearing, meta))
+        except Exception:
+            continue
+    return out
+
+
+def _live_bus_db_poller_loop(stop_event: threading.Event) -> None:
+    """Poll live HTTP feeds operator-by-operator and persist to DB."""
+    try:
+        poll_stagger_s = float(os.environ.get("BUS_LIVE_DB_STAGGER_S", "10"))
+    except Exception:
+        poll_stagger_s = 10.0
+    poll_stagger_s = max(1.0, poll_stagger_s)
+
+    try:
+        poll_jitter_s = float(os.environ.get("BUS_LIVE_DB_CYCLE_JITTER_S", "2"))
+    except Exception:
+        poll_jitter_s = 2.0
+    poll_jitter_s = max(0.0, poll_jitter_s)
+
+    try:
+        operator_period_s = float(os.environ.get("BUS_LIVE_DB_OPERATOR_PERIOD_S", "60"))
+    except Exception:
+        operator_period_s = 60.0
+    operator_period_s = max(poll_stagger_s, operator_period_s)
+
+    try:
+        timeout_s = float(os.environ.get("BUS_LIVE_DB_HTTP_TIMEOUT_S", "20"))
+    except Exception:
+        timeout_s = 20.0
+    timeout_s = max(3.0, timeout_s)
+
+    try:
+        # Full-feed defaults for ingestion; can be overridden via env.
+        poll_lat = float(os.environ.get("BUS_LIVE_DB_POLL_LAT", "0.0"))
+        poll_lon = float(os.environ.get("BUS_LIVE_DB_POLL_LON", "0.0"))
+        poll_lat_tol = float(os.environ.get("BUS_LIVE_DB_POLL_LATTOL", "90.0"))
+        poll_lon_tol = float(os.environ.get("BUS_LIVE_DB_POLL_LONTOL", "180.0"))
+    except Exception:
+        poll_lat, poll_lon, poll_lat_tol, poll_lon_tol = 0.0, 0.0, 90.0, 180.0
+
+    operators = _live_bus_operators_from_env()
+    if not operators:
+        logger.warning("Live DB poller: no operators configured")
+        return
+
+    logger.info(
+        "Live DB poller started: operators=%s period=%.1fs stagger=%.1fs jitter<=%.1fs",
+        operators,
+        operator_period_s,
+        poll_stagger_s,
+        poll_jitter_s,
+    )
+
+    next_due = {op: 0.0 for op in operators}
+    while not stop_event.is_set():
+        if _live_endpoints_disabled() or is_routing_active():
+            stop_event.wait(1.0)
+            continue
+
+        now = time.time()
+        due_op = None
+        for op in operators:
+            if next_due.get(op, 0.0) <= now:
+                due_op = op
+                break
+
+        if due_op is None:
+            nearest = min(next_due.values()) if next_due else (now + poll_stagger_s)
+            sleep_s = max(0.5, min(poll_stagger_s, nearest - now))
+            stop_event.wait(sleep_s)
+            continue
+
+        op = str(due_op).upper()
+        try:
+            urls = [f"https://transport.scc.lancs.ac.uk/bus/live/{op}"]
+            raw = get_bus_live(
+                poll_lat,
+                poll_lon,
+                urls=urls,
+                lat_tol=poll_lat_tol,
+                lon_tol=poll_lon_tol,
+                keep_vehicle_id=None,
+                timeout=timeout_s,
+            )
+            stored = _store_live_bus_rows(op, raw)
+            logger.debug("Live DB poller: operator=%s polled=%d stored=%d", op, len(raw or []), stored)
+        except Exception as exc:
+            logger.warning("Live DB poller failed for operator=%s: %s", op, exc)
+
+        jitter_s = random.uniform(0.0, poll_jitter_s) if poll_jitter_s > 0.0 else 0.0
+        next_due[op] = time.time() + operator_period_s + jitter_s
+        stop_event.wait(poll_stagger_s)
 
 
 def is_routing_active() -> bool:
@@ -6735,7 +7167,7 @@ _LIVE_DELAY_TTL = 30  # seconds
 
 
 def _fetch_all_live_buses() -> list:
-    """Return all live bus records from all operators (cached)."""
+    """Return all live bus records from DB-backed live snapshots (cached)."""
     if _live_endpoints_disabled():
         return []
     import time as _time
@@ -6743,10 +7175,16 @@ def _fetch_all_live_buses() -> list:
     if now - _live_delay_cache["ts"] < _LIVE_DELAY_TTL and _live_delay_cache["data"]:
         return _live_delay_cache["data"]
     try:
-        from bus_live import BusLive
-        bl = BusLive(timeout=20)
-        # Fetch with a very wide bounding box to get everything
-        results = bl.get_bus_live(54.0, -2.8, lat_tol=2.0, lon_tol=2.0)
+        results = _read_live_bus_rows(
+            operator='all',
+            lat=54.0,
+            lon=-2.8,
+            lat_tol=2.0,
+            lon_tol=2.0,
+            keep_vehicle_id=None,
+            max_age_s=max(_LIVE_DELAY_TTL, 120),
+            apply_bbox=False,
+        )
         _live_delay_cache["data"] = results
         _live_delay_cache["ts"] = now
         return results
@@ -6868,15 +7306,11 @@ async def bus_live_operator(
             content={"error": "lat and lon are required"},
         )
 
-    urls = None
-    if operator.lower() != "all":
-        urls = [f"https://transport.scc.lancs.ac.uk/bus/live/{operator}"]
-
     try:
-        results = get_bus_live(
-            lat,
-            lon,
-            urls=urls,
+        results = _read_live_bus_rows(
+            operator=operator,
+            lat=lat,
+            lon=lon,
             lat_tol=latTol,
             lon_tol=lonTol,
             keep_vehicle_id=keep_vehicle_id,
@@ -7617,7 +8051,7 @@ def _set_router_cache(key, value):
 
 
 def _recompute_journey_delay_map_once() -> None:
-    """Compute the per-journey delay map from live feeds.
+    """Compute the per-journey delay map from DB-backed live snapshots.
 
     Uses feed-supplied delay when present; otherwise falls back to
     timetable matching. Results are written atomically to
@@ -7625,9 +8059,27 @@ def _recompute_journey_delay_map_once() -> None:
     """
     global _journey_delay_map, _delay_map_ts, _delay_map_version
     try:
-        buses = _fetch_all_live_buses()
+        try:
+            max_age_s = int(os.environ.get('BUS_DELAY_THREAD_LIVE_MAX_AGE_S', '180'))
+        except Exception:
+            max_age_s = 180
+        max_age_s = max(30, max_age_s)
+        buses = _read_live_bus_rows(
+            operator='all',
+            lat=54.0,
+            lon=-2.8,
+            lat_tol=2.0,
+            lon_tol=2.0,
+            keep_vehicle_id=None,
+            max_age_s=max_age_s,
+            apply_bbox=False,
+        )
     except Exception:
-        return
+        # Fallback to cached helper (also DB-backed) on transient DB read issues.
+        try:
+            buses = _fetch_all_live_buses()
+        except Exception:
+            return
 
     temp_map: Dict[int, int] = {}
     # We will need raw merged/router data to match vehicles; request
@@ -9369,40 +9821,136 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 if prev_coord and curr_coord:
                     mode_hint = "walking" if transport == "walking" else "driving"
 
-                    # If this is a transit leg (bus/train) and we know the route's
-                    # stop sequence, pass it through so /route/leg-geometry can
-                    # fall back to stop-derived geometry (all intermediate stops)
-                    # instead of a misleading 2-point linear segment.
+                    # If this is a transit leg (bus/train), prefer passing the
+                    # journey's own stop subsequence (hop-on -> hop-off) so
+                    # /route/leg-geometry can fall back to stop-derived geometry
+                    # even when route-level variant stop lists don't contain both
+                    # endpoints. If that can't be resolved, try route-level fallback.
                     stop_seq_atcos: str | None = None
                     try:
-                        if transport != "walking" and route_int is not None:
-                            # Slice only the stop sub-sequence between the leg
-                            # endpoints (hop-on -> hop-off) so we don't draw the
-                            # entire route as the fallback geometry.
-                            rs = merged.route_stops[route_int] if route_int < len(getattr(merged, 'route_stops', []) or []) else []
-                            if rs and len(rs) >= 2:
-                                # prev_int/curr_int are the merged stop_ints for this leg
-                                if prev_int in rs and curr_int in rs and prev_int != curr_int:
-                                    i0 = rs.index(prev_int)
-                                    i1 = rs.index(curr_int)
-                                    if i1 >= i0:
-                                        sub = rs[i0:i1 + 1]
-                                    else:
-                                        # Reverse travel along stop order
-                                        sub = list(reversed(rs[i1:i0 + 1]))
-                                else:
-                                    sub = rs
+                        if transport != "walking":
+                            # 1) Preferred: journey-specific stop subsequence.
+                            try:
+                                j_id_leg = curr_info.get("journey")
+                                if (
+                                    j_id_leg is not None
+                                    and getattr(merged, "journey_times", None)
+                                    and getattr(merged, "journey_stop_index", None)
+                                ):
+                                    jt = merged.journey_times[j_id_leg]
+                                    jsi = merged.journey_stop_index[j_id_leg]
+                                    ji0 = jsi.get(prev_int)
+                                    ji1 = jsi.get(curr_int)
+                                    if ji0 is not None and ji1 is not None and ji0 != ji1:
+                                        if ji1 >= ji0:
+                                            jsub = jt[ji0:ji1 + 1]
+                                        else:
+                                            jsub = list(reversed(jt[ji1:ji0 + 1]))
+                                        jatcos = []
+                                        for row in jsub:
+                                            try:
+                                                s_int = row[0]
+                                            except Exception:
+                                                continue
+                                            try:
+                                                c = merged.get_atco_code(s_int)
+                                            except Exception:
+                                                c = None
+                                            if c:
+                                                jatcos.append(str(c).strip())
+                                        if len(jatcos) >= 2:
+                                            stop_seq_atcos = ",".join(jatcos)
+                            except Exception:
+                                stop_seq_atcos = None
 
-                                atcos = []
-                                for s_int in sub:
-                                    try:
-                                        c = merged.get_atco_code(s_int)
-                                    except Exception:
-                                        c = None
-                                    if c:
-                                        atcos.append(str(c).strip())
-                                if len(atcos) >= 2:
-                                    stop_seq_atcos = ",".join(atcos)
+                            # 2) Fallback: route-level stop subsequence.
+                            if not stop_seq_atcos and route_int is not None:
+                                # Slice only the stop sub-sequence between the leg
+                                # endpoints (hop-on -> hop-off) so we don't draw the
+                                # entire route as the fallback geometry.
+                                rs = merged.route_stops[route_int] if route_int < len(getattr(merged, 'route_stops', []) or []) else []
+                                if rs and len(rs) >= 2:
+                                    # Resolve the route-stop indices for leg endpoints.
+                                    # IMPORTANT: when prev_int/curr_int are not present in this
+                                    # route (common around transfers), do NOT fall back to the
+                                    # entire route sequence — that can draw obviously wrong tracks.
+                                    i0 = None
+                                    i1 = None
+
+                                    # 1) Exact stop-int match on this route.
+                                    if prev_int in rs:
+                                        i0 = rs.index(prev_int)
+                                    if curr_int in rs:
+                                        i1 = rs.index(curr_int)
+
+                                    # 2) ATCO-code match on this route.
+                                    if i0 is None and prev_atco:
+                                        for idx, s_int in enumerate(rs):
+                                            try:
+                                                if str(merged.get_atco_code(s_int) or '').strip() == str(prev_atco).strip():
+                                                    i0 = idx
+                                                    break
+                                            except Exception:
+                                                continue
+                                    if i1 is None and curr_atco:
+                                        for idx, s_int in enumerate(rs):
+                                            try:
+                                                if str(merged.get_atco_code(s_int) or '').strip() == str(curr_atco).strip():
+                                                    i1 = idx
+                                                    break
+                                            except Exception:
+                                                continue
+
+                                    # 3) Nearest route stop by coordinate (best-effort).
+                                    if i0 is None and prev_coord:
+                                        best = None
+                                        for idx, s_int in enumerate(rs):
+                                            try:
+                                                c = stop_coords.get(s_int)
+                                                if not c or len(c) < 2:
+                                                    continue
+                                                d = _haversine_m(float(prev_coord[0]), float(prev_coord[1]), float(c[0]), float(c[1]))
+                                                if best is None or d < best[0]:
+                                                    best = (d, idx)
+                                            except Exception:
+                                                continue
+                                        if best is not None:
+                                            i0 = best[1]
+
+                                    if i1 is None and curr_coord:
+                                        best = None
+                                        for idx, s_int in enumerate(rs):
+                                            try:
+                                                c = stop_coords.get(s_int)
+                                                if not c or len(c) < 2:
+                                                    continue
+                                                d = _haversine_m(float(curr_coord[0]), float(curr_coord[1]), float(c[0]), float(c[1]))
+                                                if best is None or d < best[0]:
+                                                    best = (d, idx)
+                                            except Exception:
+                                                continue
+                                        if best is not None:
+                                            i1 = best[1]
+
+                                    sub = None
+                                    if i0 is not None and i1 is not None and i0 != i1:
+                                        if i1 >= i0:
+                                            sub = rs[i0:i1 + 1]
+                                        else:
+                                            # Reverse travel along stop order
+                                            sub = list(reversed(rs[i1:i0 + 1]))
+
+                                    if sub:
+                                        atcos = []
+                                        for s_int in sub:
+                                            try:
+                                                c = merged.get_atco_code(s_int)
+                                            except Exception:
+                                                c = None
+                                            if c:
+                                                atcos.append(str(c).strip())
+                                        if len(atcos) >= 2:
+                                            stop_seq_atcos = ",".join(atcos)
                     except Exception:
                         stop_seq_atcos = None
 

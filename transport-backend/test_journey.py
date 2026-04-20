@@ -680,3 +680,85 @@ class TestBuildJourneyPlanResponse:
         transit_legs = [l for l in result["legs"] if l.get("line_name")]
         assert transit_legs, "Expected at least one transit leg"
         assert transit_legs[0]["mode"] == "bus"
+
+    def test_leg_geometry_prefers_journey_stop_sequence_for_stop_ids(self):
+        """When route-level stops don't map, use journey stop sequence for stop_ids fallback."""
+        merged = MagicMock()
+        merged.stop_metadata = ["A", "B", "C"]
+        merged.bucket = "AM"
+        merged.journey_type.return_value = api_module.BUS
+
+        # Journey 5 serves stops 0 -> 1 -> 2
+        merged.journey_times = [None] * 6
+        merged.journey_stop_index = [None] * 6
+        merged.journey_to_route = [None] * 6
+        merged.journey_times[5] = [
+            (0, 36010, 36000),
+            (1, 36120, 36110),
+            (2, 36230, 36220),
+        ]
+        merged.journey_stop_index[5] = {0: 0, 1: 1, 2: 2}
+        merged.journey_to_route[5] = 0
+
+        # Route-level stops intentionally do not include endpoints 0/2.
+        merged.route_stops = [[9, 10]]
+
+        atco_map = {
+            0: "ATCO_A",
+            1: "ATCO_B",
+            2: "ATCO_C",
+            9: "ATCO_X",
+            10: "ATCO_Y",
+        }
+        merged.get_atco_code.side_effect = lambda s: atco_map.get(s)
+
+        stop_coords = {
+            0: (54.00, -2.80),
+            1: (54.01, -2.81),
+            2: (54.02, -2.82),
+            9: (54.10, -2.90),
+            10: (54.11, -2.91),
+        }
+
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            2: {
+                "arrival_time": 36230,
+                "prev_stop": 0,
+                "mode": "bus",
+                "journey": 5,
+                "day": None,
+                "journey_info": {"line_name": "OP:14", "route_id": "R14"},
+                "journey_origin": "A",
+                "journey_destination": "C",
+                "board_departure": 36000,
+            },
+            "_meta": {
+                "start_point": (),
+                "destination": (),
+                "start_walk_seconds": 0,
+                "end_walk_seconds": 0,
+                "total_arrival": 36230,
+            },
+        }
+
+        with patch.object(
+            api_module,
+            "route_leg_geometry",
+            return_value={
+                "coords": [[54.00, -2.80], [54.02, -2.82]],
+                "source": "stops",
+                "diag": {},
+            },
+        ) as mock_leg_geom:
+            result = build_journey_plan_response(route, merged, stop_coords)
+
+        assert result["success"] is True
+        assert mock_leg_geom.called
+        assert mock_leg_geom.call_args.kwargs.get("stop_ids") == "ATCO_A,ATCO_B,ATCO_C"
