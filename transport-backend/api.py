@@ -7996,8 +7996,8 @@ _journey_delay_map: Dict[int, int] = {}
 _journey_delay_lock = threading.Lock()
 _delay_map_ts: float = 0.0
 _delay_map_version: int = 0
-# Update interval in seconds (default 180s == 3min)
-_DELAY_UPDATE_INTERVAL = int(os.environ.get('DELAY_UPDATE_INTERVAL', '180'))
+# Update interval in seconds (default 100s)
+_DELAY_UPDATE_INTERVAL = int(os.environ.get('DELAY_UPDATE_INTERVAL', '100'))
 # How many historical delay-aware router versions to keep in the in-memory
 # cache. Older versions will be pruned to avoid unbounded memory growth when
 # the live delay map increments frequently. Set via env var
@@ -8854,6 +8854,26 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             pass
         return None
 
+    def _coords_has_segment(coords) -> bool:
+        """Return True when coords contain at least two distinct valid points."""
+        try:
+            uniq = set()
+            for p in (coords or []):
+                if not isinstance(p, (list, tuple)) or len(p) < 2:
+                    continue
+                lat, lon = p[0], p[1]
+                if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                    continue
+                if not (-90.0 <= float(lat) <= 90.0 and -180.0 <= float(lon) <= 180.0):
+                    continue
+                # Round to avoid tiny floating-point jitter appearing as unique points.
+                uniq.add((round(float(lat), 7), round(float(lon), 7)))
+                if len(uniq) >= 2:
+                    return True
+            return False
+        except Exception:
+            return False
+
     # Best-effort: resolve a canonical route_id for a bus leg when routers
     # didn't provide journey_info.route_id. This allows geometry to use
     # stored timetable fragment geometry instead of falling back to OSRM/linear.
@@ -9031,7 +9051,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "name": "Walking",
             "coords": coords,
             "color": "#888888",
-        }] if coords else [])
+        }] if _coords_has_segment(coords) else [])
 
         # Compute a human-friendly duration for the walking-only route
         walk_dur_secs = total_walk
@@ -9295,7 +9315,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
             "from_stop_name": "Start",
             "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
-        })
+        }) if _coords_has_segment(wc) else None
         geo_idx += 1
         leg_idx += 1
 
@@ -10008,8 +10028,10 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         # Optionally embed geometry directly into the leg. This keeps the
         # /journey/* endpoints self-contained for map rendering (no secondary
         # /route/leg-geometry calls needed).
+        coords_has_segment = _coords_has_segment(coords)
+
         try:
-            if include_geometry and coords and len(coords) >= 2:
+            if include_geometry and coords_has_segment:
                 leg["geometry"] = {
                     "coords": coords,
                     "source": geom_source or "linear",
@@ -10028,19 +10050,20 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         except Exception:
             pass
 
-        geometries.append({
-            "id": f"{transport}-{geo_idx}",
-            "name": geo_name,
-            "coords": coords,
-            "color": color,
-            "mode": transport,
-            "leg_idx": leg_idx,
-            "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
-            "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
-            "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
-            "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
-            "source": geom_source,
-        })
+        if coords_has_segment:
+            geometries.append({
+                "id": f"{transport}-{geo_idx}",
+                "name": geo_name,
+                "coords": coords,
+                "color": color,
+                "mode": transport,
+                "leg_idx": leg_idx,
+                "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
+                "to_stop_id": (to_loc.get("id") if isinstance(to_loc, dict) else None),
+                "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
+                "to_stop_name": (to_loc.get("name") if isinstance(to_loc, dict) else None),
+                "source": geom_source,
+            })
         geo_idx += 1
         leg_idx += 1
 
@@ -10077,18 +10100,19 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         if last_coord:
             wc.append([last_coord[0], last_coord[1]])
         wc.append([destination_point[0], destination_point[1]])
-        geometries.append({
-            "id": f"walk-{geo_idx}",
-            "name": "Walk to destination",
-            "coords": wc,
-            "color": "#888888",
-            "mode": "walking",
-            "leg_idx": leg_idx,
-            "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
-            "to_stop_id": None,
-            "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
-            "to_stop_name": "Destination",
-        })
+        if _coords_has_segment(wc):
+            geometries.append({
+                "id": f"walk-{geo_idx}",
+                "name": "Walk to destination",
+                "coords": wc,
+                "color": "#888888",
+                "mode": "walking",
+                "leg_idx": leg_idx,
+                "from_stop_id": (from_loc.get("id") if isinstance(from_loc, dict) else None),
+                "to_stop_id": None,
+                "from_stop_name": (from_loc.get("name") if isinstance(from_loc, dict) else None),
+                "to_stop_name": "Destination",
+            })
 
     # Compute the total real-time delay for the route.
     # The router already used delay-adjusted journey_times, so

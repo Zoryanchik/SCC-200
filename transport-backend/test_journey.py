@@ -762,3 +762,47 @@ class TestBuildJourneyPlanResponse:
         assert result["success"] is True
         assert mock_leg_geom.called
         assert mock_leg_geom.call_args.kwargs.get("stop_ids") == "ATCO_A,ATCO_B,ATCO_C"
+
+    def test_degenerate_same_point_geometry_is_omitted(self):
+        """Point-only geometry (same start/end coord) should not be emitted."""
+        merged = MagicMock()
+        merged.stop_metadata = ["A", "B"]
+        merged.get_atco_code.return_value = None
+
+        # Walking leg between two stop-ints that share identical coordinates.
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            1: {
+                "arrival_time": 36100,
+                "prev_stop": 0,
+                "mode": "walking",
+                "journey": None,
+                "day": None,
+            },
+            "_meta": {
+                "start_point": (),
+                "destination": (),
+                "start_walk_seconds": 0,
+                "end_walk_seconds": 0,
+                "total_arrival": 36100,
+            },
+        }
+
+        stop_coords = {
+            0: (54.0000, -2.8000),
+            1: (54.0000, -2.8000),
+        }
+
+        result = build_journey_plan_response(route, merged, stop_coords, include_geometry=True)
+        assert result["success"] is True
+        # The walking leg still exists as itinerary data.
+        assert len(result["legs"]) == 1
+        assert result["legs"][0]["mode"] == "walking"
+        # But no point-only polyline should be emitted.
+        assert result["routeGeometries"] == []
