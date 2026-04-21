@@ -3602,7 +3602,7 @@ export default function HomePage() {
                     },
                   }}
                 >
-                  <span style={{ fontSize: 22, lineHeight: 1 }}>⇄</span>
+                  <span style={{ fontSize: "1.375rem", lineHeight: 1 }}>⇄</span>
                 </IconButton>
               </Box>
 
@@ -4522,7 +4522,7 @@ export default function HomePage() {
                   variant="contained"
                   onClick={() => setSuggestedFolded(false)}
                   aria-label="Unfold suggested routes"
-                  startIcon={<span style={{ fontWeight: 900, lineHeight: 1, fontSize: 18 }}>&lt;</span>}
+                  startIcon={<span style={{ fontWeight: 900, lineHeight: 1, fontSize: "1.125rem" }}>&lt;</span>}
                   sx={{
                     position: "absolute",
                     top: 12,
@@ -4531,7 +4531,7 @@ export default function HomePage() {
                     zIndex: 900,
                     textTransform: "none",
                     fontWeight: 700,
-                    fontSize: 15,
+                    fontSize: "0.9375rem",
                     py: 1,
                     px: 2,
                     minHeight: 44,
