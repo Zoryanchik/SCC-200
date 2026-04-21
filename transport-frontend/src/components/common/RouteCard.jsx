@@ -345,10 +345,12 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                             px: 0.6,
                             py: 0.15,
                             borderRadius: 1,
-                            backgroundColor: isSelected ? theme.palette.primary.main : 'transparent',
+                            backgroundColor: isSelected
+                              ? (theme.palette.mode === 'light' ? '#334155' : theme.palette.primary.main)
+                              : 'transparent',
                             color: theme.palette.mode === 'dark'
                               ? (isSelected ? '#ffffff' : theme.palette.grey[400])
-                              : (isSelected ? theme.palette.text.primary : theme.palette.grey[800]),
+                              : (isSelected ? '#ffffff' : theme.palette.grey[800]),
                           })}
                         >
                           Line {step.route}
