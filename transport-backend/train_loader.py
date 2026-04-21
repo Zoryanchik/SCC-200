@@ -11,6 +11,7 @@ import urllib.request
 import gzip
 import io
 import json
+import hashlib
 
 class TrainLoader:
     """Load, normalize, and cache train timetable data for routing.
@@ -88,51 +89,6 @@ class TrainLoader:
         conn.close()
 
     @staticmethod
-    def _normalize_station_text(text):
-        """Normalize free-text station labels for dictionary matching.
-
-        Args:
-            text: Raw station-like label value.
-
-        Returns:
-            Normalized lowercase label with extra whitespace removed and
-            the word station stripped, or empty string when text is empty.
-        """
-        if not text:
-            return ''
-        normalized = str(text).strip().lower()
-        normalized = re.sub(r'\bstation\b', '', normalized)
-        normalized = re.sub(r'\s+', ' ', normalized)
-        return normalized.strip()
-
-    @staticmethod
-    def _rail_place_alias(text):
-        """Return a place-name alias for rail-station labels.
-
-        Example: "Lancaster Railway Station" -> "lancaster".
-        Returns empty string for non-rail labels so broad town aliases are not
-        generated for unrelated stops.
-
-        Args:
-            text: Raw stop/station label.
-
-        Returns:
-            Relaxed place alias for rail labels, otherwise empty string.
-        """
-        normalized = TrainLoader._normalize_station_text(text)
-        if not normalized:
-            return ''
-
-        if not re.search(r'\b(rail|railway|train|station)\b', normalized):
-            return ''
-
-        alias = re.sub(r'\b(rail|railway|train|station)\b', ' ', normalized)
-        alias = re.sub(r'\s+', ' ', alias).strip()
-        if len(alias) < 3:
-            return ''
-        return alias
-
-    @staticmethod
     def _is_allowed_atco(atco_code):
         """Check whether an ATCO code belongs to allowed regional prefixes.
 
@@ -153,7 +109,7 @@ class TrainLoader:
 
         Returns:
             Tuple of:
-            - label_to_atcos: mapping of normalized labels to candidate ATCOs
+            - label_to_atcos: mapping of ATCO-like identifiers to candidate ATCOs
             - atco_to_label: mapping of ATCO code to display label
             - atco_meta: mapping of ATCO code to metadata dict
         """
@@ -185,17 +141,12 @@ class TrainLoader:
                 'town': town or '',
                 'stop_type': (stop_type or '').strip().lower(),
             }
-            candidates = {atco_code}
-            # Match train TIPLOCs by stop-specific labels only.
-            # Including town-level aliases (e.g. "Lancaster") can map a
-            # rail TIPLOC to unrelated same-town stops such as bus stands.
-            for candidate in (name,):
-                normalized = self._normalize_station_text(candidate)
-                if normalized:
-                    candidates.add(normalized)
-                relaxed = self._rail_place_alias(candidate)
-                if relaxed:
-                    candidates.add(relaxed)
+            # ATCO-only lookup keys. Do not index by stop names.
+            candidates = {
+                str(atco_code),
+                str(atco_code).upper(),
+                str(atco_code).lower(),
+            }
             for candidate in candidates:
                 if atco_code not in label_to_atcos[candidate]:
                     label_to_atcos[candidate].append(atco_code)
@@ -233,30 +184,35 @@ class TrainLoader:
         return score
 
     def _resolve_tiploc_to_atco(self, tiploc_info, tiploc_code, label_to_atcos, atco_meta):
-        """Resolve a TIPLOC code to the best ATCO stop candidate.
+        """Resolve a TIPLOC code to an ATCO stop using ATCO-coded fields only.
 
         Args:
             tiploc_info: Mapping of TIPLOC code to TIPLOC metadata.
             tiploc_code: TIPLOC code to resolve.
-            label_to_atcos: Normalized label to candidate ATCO list map.
+            label_to_atcos: ATCO-keyed candidate ATCO list map.
             atco_meta: Candidate ATCO metadata for scoring.
 
         Returns:
             Selected ATCO code string, or None when no candidate is found.
         """
         info = tiploc_info.get(tiploc_code) or {}
-        candidates = [
-            info.get('tps_description'),
-            info.get('description'),
-            info.get('crs_code'),
+        direct_candidates = [
+            info.get('atco_code'),
+            info.get('atco'),
+            info.get('naptan_atco'),
+            info.get('naptan_code'),
+            info.get('NaPTANAtcoCode'),
             tiploc_code,
         ]
-        for candidate in candidates:
-            normalized = self._normalize_station_text(candidate)
-            if not normalized:
+        for candidate in direct_candidates:
+            token = str(candidate or '').strip()
+            if not token:
                 continue
-            matches = label_to_atcos.get(normalized)
-            if matches:
+            keys = (token, token.upper(), token.lower())
+            for key in keys:
+                matches = label_to_atcos.get(key)
+                if not matches:
+                    continue
                 allowed = [code for code in matches if self._is_allowed_atco(code)]
                 if allowed:
                     return max(allowed, key=lambda code: self._train_stop_score(code, atco_meta))
@@ -270,10 +226,10 @@ class TrainLoader:
             route_stops: Ordered list of ATCO stop codes for one route.
 
         Returns:
-            True when the route has at least one stop and all stops are
-            in the allowed region; otherwise False.
+            True when the route has at least one stop and at least one stop
+            is in the allowed region; otherwise False.
         """
-        return bool(route_stops) and all(self._is_allowed_atco(code) for code in route_stops)
+        return bool(route_stops) and any(self._is_allowed_atco(code) for code in route_stops)
 
     def _load_cached_traindata(self, service_date):
         """Load cached TrainData for a specific service date.
@@ -418,14 +374,6 @@ class TrainLoader:
                        VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)''',
                     rows
                 )
-            today = date.today().isoformat()
-            yesterday = (date.today() - timedelta(days=1)).isoformat()
-            tomorrow = (date.today() + timedelta(days=1)).isoformat()
-            cur.execute(
-                '''DELETE FROM train_journey_cache
-                   WHERE service_date NOT IN (%s, %s, %s)''',
-                (today, yesterday, tomorrow)
-            )
             conn.commit()
             conn.close()
             print(f"  [train] Cache saved for {service_date}: {len(rows)} journeys")
@@ -444,7 +392,8 @@ class TrainLoader:
             - For today's date: cache-first, then download/parse and cache.
             - For non-today dates: cache-only; on miss returns empty TrainData.
 
-            This avoids incorrectly projecting today's schedule onto other dates.
+            This keeps startup and adjacent-day prebuilds fast and avoids
+            network fetches for non-today dates.
         """
         # Ensure cache tables exist even when this loader is used directly.
         self.create_schema()
@@ -456,10 +405,20 @@ class TrainLoader:
 
         today_str = datetime.today().strftime('%Y-%m-%d')
         if date_str != today_str:
-            print(f"  [train]: Cache miss for {date_str}; no non-today fallback")
+            print(f"  [train]: Cache miss for {date_str}; no non-today download")
             return TrainData(num_routes=0, num_journeys=0, num_stops=0)
 
-        loaded = self.download_schedule_today()
+        data = self.download_schedule_raw()
+        if data is None:
+            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
+        loaded = self.load_schedule_file(data, target_date=date_str)
+        if len(getattr(loaded, 'journey_times', []) or []) == 0:
+            print(
+                f"  [train] ⚠ Download returned empty timetable for {date_str}; "
+                "skipping cache overwrite"
+            )
+            return loaded
+
         self._save_cached_traindata(date_str, loaded)
         return loaded
 
@@ -555,15 +514,15 @@ class TrainLoader:
         )
 
     @staticmethod
-    def _schedule_identity(schedule, index):
-        """Build a stable synthetic route/journey id for one schedule entry.
+    def _journey_identity(schedule, index):
+        """Build a stable synthetic journey id for one schedule entry.
 
         Args:
             schedule: JsonScheduleV1 payload dictionary.
             index: Monotonic index used to guarantee uniqueness.
 
         Returns:
-            Deterministic train-prefixed identifier string.
+            Deterministic train-prefixed journey identifier string.
         """
         segment = schedule.get('schedule_segment') or {}
         parts = [
@@ -576,19 +535,60 @@ class TrainLoader:
         label = '::'.join(str(part).strip() for part in parts if part)
         if not label:
             label = f'schedule-{index}'
-        return f'train::{label}::{index}'
+        return f'train_j::{label}::{index}'
 
-    def download_schedule_today(self):
+    @staticmethod
+    def _route_identity(schedule, stop_codes):
+        """Build a route-pattern id shared by journeys with same stop sequence.
+
+        Args:
+            schedule: JsonScheduleV1 payload dictionary.
+            stop_codes: Ordered resolved ATCO code sequence for this schedule.
+
+        Returns:
+            Deterministic train-prefixed route identifier string.
+        """
+        segment = schedule.get('schedule_segment') or {}
+        origin = (stop_codes[0] if stop_codes else '')
+        destination = (stop_codes[-1] if stop_codes else '')
+        signature = '|'.join(str(code).strip() for code in (stop_codes or []) if code)
+        sig_hash = hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12] if signature else 'nosig'
+        parts = [
+            schedule.get('atoc_code'),
+            origin,
+            destination,
+            segment.get('signalling_id'),
+            str(len(stop_codes or [])),
+            sig_hash,
+        ]
+        label = '::'.join(str(part).strip() for part in parts if str(part).strip())
+        if not label:
+            label = f'route-{sig_hash}'
+        return f'train_r::{label}'
+
+    def download_schedule_today(self, target_date=None):
         """Download today's compressed rail schedule and parse it.
 
         Args:
-            None.
+            target_date: Optional YYYY-MM-DD. When provided, applies
+                operational-day filtering for that date.
 
         Returns:
             TrainData built from the downloaded schedule content.
         """
         # Get https://transport.scc.lancs.ac.uk/rail/schedule
         # Then unzip, parse it, and cache it
+        data = self.download_schedule_raw()
+        if data is None:
+            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
+        return self.load_schedule_file(data, target_date=target_date)
+
+    def download_schedule_raw(self):
+        """Download raw gzipped schedule bytes from the schedule URL.
+
+        Returns:
+            Raw bytes on success, or None on failure.
+        """
         print(f'  [train] Downloading schedule...')
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -597,19 +597,16 @@ class TrainLoader:
             resp = urllib.request.urlopen(self.schedule_url, context=ctx, timeout=180)
             data = resp.read()
         except urllib.error.HTTPError as exc:
-            # Schedule endpoint failures should not abort backend startup.
-            # Return an empty timetable and continue initialization.
             code = getattr(exc, 'code', None)
             print(f"  [train] ⚠ Schedule URL returned HTTP {code} — skipping: {self.schedule_url}")
-            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
+            return None
         except urllib.error.URLError as exc:
             print(f"  [train] ⚠ Schedule URL unreachable ({exc}) — skipping: {self.schedule_url}")
-            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
+            return None
         print(f'  [train] (schedule) Downloaded {len(data) / 1024 / 1024:.1f} MB')
+        return data
 
-        return self.load_schedule_file(data)
-
-    def load_schedule_file(self, file_content):
+    def load_schedule_file(self, file_content, target_date=None):
         """Parse gzipped line-delimited schedule content into TrainData.
 
         Args:
@@ -621,8 +618,21 @@ class TrainLoader:
         train_data = TrainData(num_routes=0, num_journeys=0, num_stops=0)
         tiploc_info = {}
         label_to_atcos, atco_to_label, atco_meta = self._load_atco_lookup()
-        route_count = 0
+        route_to_journeys = defaultdict(list)
+        route_meta_by_id = {}
+        route_seen = set()
         journey_count = 0
+        # Optional target-date filtering (YYYY-MM-DD). When provided, only
+        # include schedules that are valid for that date (start/end/runs).
+        target_dt = None
+        target_wd = None
+        if target_date:
+            try:
+                target_dt = datetime.fromisoformat(target_date).date()
+                target_wd = target_dt.weekday()  # Mon=0
+            except Exception:
+                target_dt = None
+                target_wd = None
 
         print('  [train] (schedule) Unzipping..')
         with gzip.GzipFile(fileobj=io.BytesIO(file_content), mode='rb') as gzf:
@@ -654,6 +664,31 @@ class TrainLoader:
                     continue
 
                 segment = payload.get('schedule_segment') or {}
+                # If a target date was requested, validate schedule applicability
+                if target_dt is not None:
+                    s_str = payload.get('schedule_start_date')
+                    e_str = payload.get('schedule_end_date')
+                    runs = (payload.get('schedule_days_runs') or '').strip()
+                    try:
+                        s_dt = datetime.fromisoformat(s_str).date() if s_str else None
+                    except Exception:
+                        s_dt = None
+                    try:
+                        e_dt = datetime.fromisoformat(e_str).date() if e_str else None
+                    except Exception:
+                        e_dt = None
+
+                    # If end date missing, treat as one year from start (or from target)
+                    if e_dt is None:
+                        anchor = s_dt if s_dt is not None else target_dt
+                        e_dt = anchor + timedelta(days=365)
+
+                    if s_dt and target_dt < s_dt:
+                        continue
+                    if e_dt and target_dt > e_dt:
+                        continue
+                    if len(runs) == 7 and target_wd is not None and runs[target_wd] != '1':
+                        continue
                 locations = segment.get('schedule_location') or []
                 if not locations:
                     continue
@@ -669,8 +704,11 @@ class TrainLoader:
 
                     atco_code = self._resolve_tiploc_to_atco(tiploc_info, tiploc_code, label_to_atcos, atco_meta)
                     if not atco_code:
-                        stop_codes = []
-                        break
+                        # Keep parsing the schedule even when a TIPLOC cannot be
+                        # mapped (common for junction-only timing points). This
+                        # preserves full passenger-stop routes instead of
+                        # collapsing to endpoints due to one unmapped location.
+                        continue
 
                     arrival = self._parse_cif_time(
                         location.get('arrival')
@@ -695,27 +733,38 @@ class TrainLoader:
                     if departure is None:
                         departure = arrival
 
+                    # Some timing points can resolve to the same ATCO as the
+                    # previous location; collapse consecutive duplicates while
+                    # keeping the latest timestamp pair.
+                    if stop_codes and stop_codes[-1] == atco_code:
+                        arrival_times[-1] = (atco_code, arrival)
+                        departure_times[-1] = departure
+                        continue
+
                     stop_codes.append(atco_code)
                     arrival_times.append((atco_code, arrival))
                     departure_times.append(departure)
 
-                if not stop_codes:
+                if len(stop_codes) < 2:
                     continue
 
-                if not all(self._is_allowed_atco(code) for code in stop_codes):
+                if not self._route_stays_in_nw(stop_codes):
                     continue
 
                 arrival_times, departure_times = self._normalize_journey_times(arrival_times, departure_times)
 
-                route_id = self._schedule_identity(payload, route_count)
-                route_count += 1
+                journey_id = self._journey_identity(payload, journey_count)
+                route_id = self._route_identity(payload, stop_codes)
 
-                train_data.add_route_stop(route_id, stop_codes)
-                train_data.add_route_journeys(route_id, [route_id])
-                train_data.add_journey_times(route_id, arrival_times, departure_times)
+                if route_id not in route_seen:
+                    train_data.add_route_stop(route_id, stop_codes)
+                    route_seen.add(route_id)
+
+                train_data.add_journey_times(journey_id, arrival_times, departure_times)
+                route_to_journeys[route_id].append(journey_id)
 
                 route_idx = train_data.map_routes.get_int(route_id)
-                journey_idx = train_data.map_journeys.get_int(route_id)
+                journey_idx = train_data.map_journeys.get_int(journey_id)
                 origin_code = stop_codes[0]
                 destination_code = stop_codes[-1]
                 origin_name = atco_to_label.get(origin_code, origin_code)
@@ -737,12 +786,18 @@ class TrainLoader:
                     'stp_indicator': payload.get('CIF_stp_indicator'),
                     'owner': payload.get('atoc_code'),
                 }
-                train_data.route_metadata[route_idx] = dict(segment_data)
+                route_meta_by_id.setdefault(route_id, dict(segment_data))
                 train_data.journey_metadata[journey_idx] = dict(segment_data)
                 journey_count += 1
 
+        for route_id, journey_ids in route_to_journeys.items():
+            train_data.add_route_journeys(route_id, journey_ids)
+            route_idx = train_data.map_routes.get_int(route_id)
+            if route_idx < len(train_data.route_metadata):
+                train_data.route_metadata[route_idx] = route_meta_by_id.get(route_id)
+
         print('  [train] (schedule) Unzipped')
-        print(f'  [train] (schedule) Loaded {route_count} routes / {journey_count} journeys')
+        print(f'  [train] (schedule) Loaded {len(route_to_journeys)} routes / {journey_count} journeys')
 
         return train_data
 

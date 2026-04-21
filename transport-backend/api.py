@@ -2226,237 +2226,6 @@ def _query_osrm_for_coords_profile(osrm_base: str, coords_lonlat: list, profile:
         return None
 
 
-# --- OSM rail geometry (best-effort) ------------------------------------------
-_OSM_RAIL_CACHE_LOCK = threading.Lock()
-_OSM_RAIL_CACHE: dict[str, tuple[float, list[list[float]]]] = {}
-
-
-def _query_overpass_rail_path(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> list[list[float]] | None:
-    """Best-effort rail-following polyline using OpenStreetMap Overpass data.
-
-    This fetches railway ways in a bbox around the endpoints, builds a simple
-    node graph, snaps endpoints to nearest rail nodes, and runs shortest path.
-    Returns [[lat, lon], ...] or None on any failure.
-    """
-    try:
-        enabled = str(os.environ.get('OSM_RAIL_GEOMETRY_ENABLED', '1')).lower() in ('1', 'true', 'yes')
-        if not enabled:
-            return None
-
-        # Rounded key keeps cache compact while stable for nearby repeats.
-        key = f"{round(float(from_lat),4)},{round(float(from_lon),4)}->{round(float(to_lat),4)},{round(float(to_lon),4)}"
-        now = time.time()
-        try:
-            ttl_s = int(os.environ.get('OSM_RAIL_CACHE_TTL_S', '1800'))
-        except Exception:
-            ttl_s = 1800
-        ttl_s = max(60, min(ttl_s, 24 * 3600))
-
-        with _OSM_RAIL_CACHE_LOCK:
-            hit = _OSM_RAIL_CACHE.get(key)
-            if hit and (now - float(hit[0])) <= float(ttl_s):
-                return hit[1]
-
-        # Query bbox around endpoints.
-        try:
-            pad = float(os.environ.get('OSM_RAIL_BBOX_PAD_DEG', '0.06'))
-        except Exception:
-            pad = 0.06
-        pad = max(0.01, min(pad, 0.5))
-
-        south = min(float(from_lat), float(to_lat)) - pad
-        north = max(float(from_lat), float(to_lat)) + pad
-        west = min(float(from_lon), float(to_lon)) - pad
-        east = max(float(from_lon), float(to_lon)) + pad
-
-        overpass_url = str(os.environ.get('OVERPASS_URL', 'https://overpass-api.de/api/interpreter')).strip()
-        query = (
-            "[out:json][timeout:12];"
-            f"(way[\"railway\"~\"rail|light_rail|subway|tram\"]({south},{west},{north},{east});>;);"
-            "out body;"
-        )
-
-        data = urlencode({'data': query}).encode('utf-8')
-        req = UrllibRequest(
-            overpass_url,
-            data=data,
-            headers={
-                'User-Agent': 'transport-backend/1.0',
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            method='POST',
-        )
-        try:
-            timeout_s = float(os.environ.get('OSM_RAIL_TIMEOUT_S', '8'))
-        except Exception:
-            timeout_s = 8.0
-        timeout_s = max(2.0, min(timeout_s, 20.0))
-
-        with urlopen(req, timeout=timeout_s) as resp:
-            payload = json.loads(resp.read().decode('utf-8', errors='ignore'))
-
-        elems = payload.get('elements') or []
-        if not elems:
-            return None
-
-        nodes: dict[int, tuple[float, float]] = {}
-        ways: list[list[int]] = []
-        for e in elems:
-            t = e.get('type')
-            if t == 'node':
-                try:
-                    nid = int(e.get('id'))
-                    nodes[nid] = (float(e.get('lat')), float(e.get('lon')))
-                except Exception:
-                    continue
-            elif t == 'way':
-                nlist = e.get('nodes') or []
-                if isinstance(nlist, list) and len(nlist) >= 2:
-                    try:
-                        ways.append([int(x) for x in nlist])
-                    except Exception:
-                        continue
-
-        if not nodes or not ways:
-            return None
-
-        # Build undirected graph along way sequences.
-        graph: dict[int, list[tuple[int, float]]] = {}
-        for wn in ways:
-            for a, b in zip(wn, wn[1:]):
-                ca = nodes.get(a)
-                cb = nodes.get(b)
-                if not ca or not cb:
-                    continue
-                try:
-                    w = float(_haversine_m(ca[0], ca[1], cb[0], cb[1]))
-                except Exception:
-                    continue
-                graph.setdefault(a, []).append((b, w))
-                graph.setdefault(b, []).append((a, w))
-
-        if not graph:
-            return None
-
-        try:
-            snap_max_m = float(os.environ.get('OSM_RAIL_SNAP_MAX_M', '2500'))
-        except Exception:
-            snap_max_m = 2500.0
-        snap_max_m = max(100.0, min(snap_max_m, 15000.0))
-
-        def _nearest_graph_node(lat: float, lon: float) -> int | None:
-            best = None
-            for nid in graph.keys():
-                c = nodes.get(nid)
-                if not c:
-                    continue
-                try:
-                    d = float(_haversine_m(lat, lon, c[0], c[1]))
-                except Exception:
-                    continue
-                if best is None or d < best[0]:
-                    best = (d, nid)
-            if best is None:
-                return None
-            if best[0] > snap_max_m:
-                return None
-            return best[1]
-
-        s = _nearest_graph_node(float(from_lat), float(from_lon))
-        t = _nearest_graph_node(float(to_lat), float(to_lon))
-        if s is None or t is None:
-            return None
-
-        # Dijkstra shortest path.
-        import heapq
-
-        pq: list[tuple[float, int]] = [(0.0, s)]
-        dist: dict[int, float] = {s: 0.0}
-        prev: dict[int, int] = {}
-        seen: set[int] = set()
-
-        while pq:
-            dcur, u = heapq.heappop(pq)
-            if u in seen:
-                continue
-            seen.add(u)
-            if u == t:
-                break
-            for v, w in graph.get(u, []):
-                nd = dcur + float(w)
-                if nd < dist.get(v, float('inf')):
-                    dist[v] = nd
-                    prev[v] = u
-                    heapq.heappush(pq, (nd, v))
-
-        if t not in dist:
-            return None
-
-        path_nodes: list[int] = []
-        cur = t
-        path_nodes.append(cur)
-        while cur != s:
-            cur = prev.get(cur)
-            if cur is None:
-                return None
-            path_nodes.append(cur)
-        path_nodes.reverse()
-
-        coords = []
-        for nid in path_nodes:
-            c = nodes.get(nid)
-            if c:
-                coords.append([c[0], c[1]])
-
-        if len(coords) < 2:
-            return None
-
-        with _OSM_RAIL_CACHE_LOCK:
-            _OSM_RAIL_CACHE[key] = (now, coords)
-
-        return coords
-    except Exception:
-        return None
-
-
-def _query_overpass_rail_path_via(points_latlon: list[list[float]] | tuple[tuple[float, float], ...]) -> list[list[float]] | None:
-    """Best-effort rail polyline that passes through intermediate waypoints.
-
-    Args:
-        points_latlon: Ordered list of [lat, lon] waypoints.
-
-    Returns:
-        Stitched rail-following geometry [[lat, lon], ...] or None when any
-        segment cannot be resolved.
-    """
-    try:
-        pts = []
-        for p in (points_latlon or []):
-            if not isinstance(p, (list, tuple)) or len(p) < 2:
-                continue
-            pts.append([float(p[0]), float(p[1])])
-        if len(pts) < 2:
-            return None
-
-        stitched: list[list[float]] = []
-        for i in range(len(pts) - 1):
-            a = pts[i]
-            b = pts[i + 1]
-            seg = _query_overpass_rail_path(a[0], a[1], b[0], b[1])
-            if not seg or len(seg) < 2:
-                return None
-            if stitched and stitched[-1] == seg[0]:
-                stitched.extend(seg[1:])
-            else:
-                stitched.extend(seg)
-
-        if len(stitched) < 2:
-            return None
-        return stitched
-    except Exception:
-        return None
-
-
 @app.get("/route/walking")
 def route_walking(from_lat: float, from_lon: float, to_lat: float, to_lon: float):
     """Return walking geometry between two points by proxying OSRM foot profile.
@@ -2996,36 +2765,10 @@ def route_leg_geometry(from_lat: float, from_lon: float,
         pass
 
     # Fallback policy:
-    # - train legs: best-effort OSM rail path (Overpass)
     # - walking legs may use OSRM foot routing
     # - if caller provided a full stop sequence (stop_ids) and we couldn't stitch
     #   tracks, return those stop coordinates unsmoothed.
     # - all other non-walking cases return a straight line between endpoints.
-    if norm_mode == 'train':
-        try:
-            rail_coords = None
-            via_points = []
-            try:
-                if 'stop_fallback_coords' in locals() and isinstance(stop_fallback_coords, list) and len(stop_fallback_coords) >= 2:
-                    via_points = [[float(c[0]), float(c[1])] for c in stop_fallback_coords if isinstance(c, (list, tuple)) and len(c) >= 2]
-            except Exception:
-                via_points = []
-
-            if len(via_points) >= 2:
-                rail_coords = _query_overpass_rail_path_via(via_points)
-
-            if not rail_coords:
-                rail_coords = _query_overpass_rail_path(from_lat, from_lon, to_lat, to_lon)
-
-            if rail_coords and len(rail_coords) >= 2:
-                diag['ok'] = True
-                diag['stitch_kind'] = 'osm_rail_via_stops' if len(via_points) >= 3 else 'osm_rail'
-                if via_points:
-                    diag['via_points_count'] = len(via_points)
-                diag['coords_len'] = len(rail_coords)
-                return {"coords": rail_coords, "source": "osm_rail", "diag": diag}
-        except Exception:
-            pass
 
     if norm_mode == 'walking':
         osrm_base = os.environ.get('OSRM_URL', 'http://localhost:5012')
@@ -3034,6 +2777,29 @@ def route_leg_geometry(from_lat: float, from_lon: float,
             coords = _query_osrm_for_coords_profile(osrm_base, coords_lonlat,
                                                      profile='foot')
             if coords and len(coords) >= 2:
+                # Guard against badly snapped OSRM results (e.g. when the
+                # local OSRM extract does not fully cover the requested area).
+                # If either endpoint is too far from the requested points,
+                # reject OSRM and fall back to linear/stops logic below.
+                try:
+                    max_snap_m = float(os.environ.get('WALKING_OSRM_MAX_ENDPOINT_ERROR_M', '1500'))
+                except Exception:
+                    max_snap_m = 1500.0
+                try:
+                    start_err = _haversine_m(float(from_lat), float(from_lon), float(coords[0][0]), float(coords[0][1]))
+                    end_err = _haversine_m(float(to_lat), float(to_lon), float(coords[-1][0]), float(coords[-1][1]))
+                    diag['osrm_start_error_m'] = float(start_err)
+                    diag['osrm_end_error_m'] = float(end_err)
+                    if start_err > max_snap_m or end_err > max_snap_m:
+                        diag['osrm_rejected'] = 'endpoint_too_far'
+                        diag['osrm_max_endpoint_error_m'] = float(max_snap_m)
+                        raise ValueError('osrm endpoint snap too far')
+                except Exception:
+                    # If distance checks fail for any reason, continue to
+                    # fallback logic rather than returning suspicious geometry.
+                    pass
+                if diag.get('osrm_rejected'):
+                    raise ValueError('osrm endpoint rejected')
                 diag['ok'] = True
                 diag['stitch_kind'] = 'osrm'
                 diag['coords_len'] = len(coords)
@@ -8886,17 +8652,16 @@ def get_router_for_date(date_str, start_time=None, apply_delay: bool = True):
                         best_old_ver = ver
                         best_old_key = k
             if best_old_key is not None:
-                # Use the best older adjusted router as fallback
+                # Use the best older adjusted router as fallback.
+                # Do NOT force a background rebuild for the latest delay
+                # version here; if an adjusted router isn't present, prefer
+                # serving the existing (possibly unadjusted) router so
+                # requests remain non-blocking.
                 fallback = _router_cache.get(best_old_key)
-                # Also schedule a background build for the current version
-                if cache_key not in _background_builds:
-                    _background_builds.add(cache_key)
-                    schedule_bg = True
             elif fallback_key in _router_cache:
                 # No adjusted router exists; use the unadjusted router as fallback
-                if cache_key not in _background_builds:
-                    _background_builds.add(cache_key)
-                    schedule_bg = True
+                # and do not start an automatic background build. This keeps
+                # the first request fast by avoiding delay-pull rebuilds.
                 fallback = _router_cache[fallback_key]
             else:
                 # No fallback available; fall back to synchronous behaviour
@@ -9778,7 +9543,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             except Exception:
                 initial_departure_secs = None
 
-        legs.append({
+        start_leg = {
             "mode": "walking",
             "from_stop": {"name": "Start", "lat": start_point[0],
                           "lon": start_point[1]},
@@ -9789,10 +9554,39 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             # integer day offsets (0 = same day, 1 = next day, ...)
             "departure_day_offset": (int(initial_departure_secs) // 86400) if initial_departure_secs is not None else 0,
             "arrival_day_offset": (int(first_arrival_secs) // 86400) if first_arrival_secs is not None else 0,
-        })
+        }
         wc = [[start_point[0], start_point[1]]]
+        geom_source = "linear"
         if first_coord:
-            wc.append([first_coord[0], first_coord[1]])
+            try:
+                lg = route_leg_geometry(
+                    start_point[0], start_point[1],
+                    first_coord[0], first_coord[1],
+                    mode='walking',
+                    route_id=None,
+                    route_int=None,
+                    merged_key=(
+                        f"{_date_str}|{_bucket}"
+                        if _date_str and _bucket in ('AM', 'PM')
+                        else None
+                    ),
+                    merged=merged,
+                    from_stop_id=None,
+                    to_stop_id=(to_loc.get('id') if isinstance(to_loc, dict) else None),
+                    stop_ids=None,
+                )
+                if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
+                    wc = lg.get('coords')
+                    geom_source = lg.get('source') or 'linear'
+            except Exception:
+                wc = [[start_point[0], start_point[1]], [first_coord[0], first_coord[1]]]
+        if include_geometry and _coords_has_segment(wc):
+            start_leg["geometry"] = {
+                "coords": wc,
+                "source": geom_source,
+            }
+            start_leg["geometry_source"] = geom_source
+        legs.append(start_leg)
         geometries.append({
             "id": f"walk-{geo_idx}",
             "name": f"Walk to {first_name}",
@@ -10328,11 +10122,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             # single missing track doesn't degrade the whole route.
             try:
                 if prev_coord and curr_coord:
-                    mode_hint = (
-                        "walking"
-                        if transport == "walking"
-                        else ("train" if transport == "train" else "driving")
-                    )
+                    mode_hint = "walking" if transport == "walking" else "driving"
 
                     # If this is a transit leg (bus/train), prefer passing the
                     # journey's own stop subsequence (hop-on -> hop-off) so
@@ -10577,7 +10367,7 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         except Exception:
             pass
         dep_secs = ordered[-1][1]["arrival_time"] if ordered and ordered[-1][1].get("arrival_time") is not None else None
-        legs.append({
+        end_leg = {
             "mode": "walking",
             "from_stop": from_loc,
             "to_stop": {"name": "Destination",
@@ -10588,11 +10378,42 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "arrival_time": _time_str(total_arrival),
             "departure_day_offset": (int(dep_secs) // 86400) if dep_secs is not None else 0,
             "arrival_day_offset": (int(total_arrival) // 86400) if total_arrival is not None else 0,
-        })
+        }
         wc = []
+        geom_source = "linear"
         if last_coord:
-            wc.append([last_coord[0], last_coord[1]])
-        wc.append([destination_point[0], destination_point[1]])
+            try:
+                lg = route_leg_geometry(
+                    last_coord[0], last_coord[1],
+                    destination_point[0], destination_point[1],
+                    mode='walking',
+                    route_id=None,
+                    route_int=None,
+                    merged_key=(
+                        f"{_date_str}|{_bucket}"
+                        if _date_str and _bucket in ('AM', 'PM')
+                        else None
+                    ),
+                    merged=merged,
+                    from_stop_id=(from_loc.get('id') if isinstance(from_loc, dict) else None),
+                    to_stop_id=None,
+                    stop_ids=None,
+                )
+                if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
+                    wc = lg.get('coords')
+                    geom_source = lg.get('source') or 'linear'
+            except Exception:
+                wc = [[last_coord[0], last_coord[1]], [destination_point[0], destination_point[1]]]
+        else:
+            wc = [[destination_point[0], destination_point[1]]]
+
+        if include_geometry and _coords_has_segment(wc):
+            end_leg["geometry"] = {
+                "coords": wc,
+                "source": geom_source,
+            }
+            end_leg["geometry_source"] = geom_source
+        legs.append(end_leg)
         if _coords_has_segment(wc):
             geometries.append({
                 "id": f"walk-{geo_idx}",

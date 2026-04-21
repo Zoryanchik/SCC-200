@@ -8,21 +8,16 @@ def test_resolve_tiploc_prefers_train_station_over_taxi_rank():
 
     tiploc_info = {
         "LANCASTR": {
-            "tps_description": "Lancaster Railway Station",
-            "description": "Lancaster Railway Station",
+            "atco_code": "2500LAN",
         }
     }
 
     label_to_atcos = {
-        "lancaster railway": [
+        "2500LAN": [
             "2500TRAIN",
             "2500TAXI",
             "2500BUS",
-        ],
-        "lancaster railway station": [
-            "2500TRAIN",
-            "2500TAXI",
-        ],
+        ]
     }
 
     atco_meta = {
@@ -40,13 +35,12 @@ def test_resolve_tiploc_penalizes_taxi_rank_when_no_train_type():
 
     tiploc_info = {
         "PRESTON": {
-            "tps_description": "Preston Railway Station",
-            "description": "Preston Railway Station",
+            "atco_code": "2500PRE",
         }
     }
 
     label_to_atcos = {
-        "preston railway": [
+        "2500PRE": [
             "2500TAXI",
             "2500OTHER",
         ]
@@ -61,7 +55,7 @@ def test_resolve_tiploc_penalizes_taxi_rank_when_no_train_type():
     assert atco == "2500OTHER"
 
 
-def test_load_atco_lookup_does_not_index_town_alias(monkeypatch):
+def test_load_atco_lookup_indexes_atco_only(monkeypatch):
     class _FakeCursor:
         def execute(self, *_args, **_kwargs):
             return None
@@ -83,13 +77,13 @@ def test_load_atco_lookup_does_not_index_town_alias(monkeypatch):
     loader = TrainLoader("postgresql://unused", atco_db_path="postgresql://unused")
     label_to_atcos, _atco_to_label, _atco_meta = loader._load_atco_lookup()
 
-    # Stop name remains indexed...
-    assert "penny street" in label_to_atcos
-    # ...but town alias should not be indexed for train stop resolution.
+    assert "2500PENNY" in label_to_atcos
+    assert "2500penny" in label_to_atcos
+    assert "penny street" not in label_to_atcos
     assert "lancaster" not in label_to_atcos
 
 
-def test_load_atco_lookup_adds_relaxed_alias_for_rail_station_only(monkeypatch):
+def test_resolve_tiploc_does_not_fallback_to_name_matching(monkeypatch):
     class _FakeCursor:
         def execute(self, *_args, **_kwargs):
             return None
@@ -112,10 +106,6 @@ def test_load_atco_lookup_adds_relaxed_alias_for_rail_station_only(monkeypatch):
     loader = TrainLoader("postgresql://unused", atco_db_path="postgresql://unused")
     label_to_atcos, _atco_to_label, atco_meta = loader._load_atco_lookup()
 
-    assert "lancaster" in label_to_atcos
-    assert "2500LANR" in label_to_atcos["lancaster"]
-    assert "2500LANB" not in label_to_atcos["lancaster"]
-
     tiploc_info = {
         "LANCASTR": {
             "tps_description": "Lancaster",
@@ -123,7 +113,7 @@ def test_load_atco_lookup_adds_relaxed_alias_for_rail_station_only(monkeypatch):
         }
     }
     atco = loader._resolve_tiploc_to_atco(tiploc_info, "LANCASTR", label_to_atcos, atco_meta)
-    assert atco == "2500LANR"
+    assert atco is None
 
 
 def test_download_schedule_today_skips_404(monkeypatch):
