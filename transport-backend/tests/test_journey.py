@@ -289,6 +289,80 @@ class TestJourneyPlanMultiLeg:
         },
     }
 
+
+class TestJourneyPlanStationPreference:
+    """Ensure station-to-station requests can surface train routes in both mode."""
+
+    def test_both_mode_prefers_train_for_station_to_station(self, client):
+        bus_route = {
+            0: {"arrival_time": 36000, "prev_stop": None, "mode": None, "journey": None, "day": None},
+            1: {
+                "arrival_time": 36600,
+                "prev_stop": 0,
+                "mode": "bus",
+                "journey": 11,
+                "day": None,
+                "journey_info": {"line_name": "NW:41"},
+                "journey_origin": "Bus Station",
+                "journey_destination": "Bus Station",
+                "board_departure": 36120,
+            },
+            "_meta": {},
+        }
+        train_route = {
+            0: {"arrival_time": 36000, "prev_stop": None, "mode": None, "journey": None, "day": None},
+            1: {
+                "arrival_time": 37200,
+                "prev_stop": 0,
+                "mode": "train",
+                "journey": 22,
+                "day": None,
+                "journey_info": {"line_name": "Lancaster to Morecambe"},
+                "journey_origin": "Lancaster Rail Station",
+                "journey_destination": "Morecambe Rail Station",
+                "board_departure": 36180,
+            },
+            "_meta": {},
+        }
+
+        mock_router = MagicMock()
+        mock_router.route.side_effect = [bus_route, train_route]
+
+        merged = MagicMock()
+        merged.stop_to_routes = [[], []]
+        merged.stop_type.side_effect = lambda _i: api_module.TRAIN
+        merged.get_atco_code.side_effect = lambda i: "STN_A" if i == 0 else "STN_B"
+        merged.stop_metadata = ["Lancaster Rail Station", "Morecambe Rail Station"]
+
+        walking = MagicMock()
+        walking._coords = {}
+
+        atco_loader = MagicMock()
+        atco_loader.get_all_stop_coords.return_value = {
+            "STN_A": (54.0, -2.8),
+            "STN_B": (54.1, -2.9),
+        }
+
+        payload = {
+            "fromStop": {"lat": 54.0, "lon": -2.8},
+            "toStop": {"lat": 54.1, "lon": -2.9},
+            "departureTime": "10:00:00",
+            "date": "2026-02-16",
+            "maxTransfers": 3,
+            "mode": "both",
+        }
+
+        with patch.object(api_module, "get_router_for_date", return_value=(merged, mock_router, walking)):
+            with patch.object(api_module, "_base_cache", {"atco_loader": atco_loader}):
+                resp = client.post("/journey/plan", json=payload)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        transit_legs = [l for l in data.get("legs", []) if l.get("mode") in ("bus", "train")]
+        assert transit_legs
+        assert transit_legs[0]["mode"] == "train"
+        assert mock_router.route.call_count == 2
+
     def _post(self, client):
         mock_router = MagicMock()
         mock_router.route.return_value = dict(self.MULTI_LEG_RESULT)
@@ -573,44 +647,205 @@ class TestBuildJourneyPlanResponse:
         result = build_journey_plan_response(route, merged, {})
         assert result["success"] is True
 
-    def test_train_leg_geometry_uses_intermediate_stations_for_path(self, monkeypatch):
-        """Train leg geometry should route via intermediate station waypoints when present."""
+    def test_transit_mode_uses_journey_type_over_info_mode(self):
+        """Bus journey id should remain bus even if info['mode'] is stale/wrong."""
+        merged = MagicMock()
+        merged.stop_metadata = ["Start", "Station"]
+        merged.journey_type.return_value = api_module.BUS
 
-        class _AtcoLoader:
-            def get_all_stop_coords(self):
-                return {
-                    "ATCO_A": (54.0000, -2.8000),
-                    "ATCO_B": (54.0500, -2.8500),
-                    "ATCO_C": (54.1000, -2.9000),
-                }
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            1: {
+                "arrival_time": 36600,
+                "prev_stop": 0,
+                # Simulate an incorrect per-stop mode label.
+                "mode": "train",
+                "journey": 123,
+                "day": None,
+                "journey_info": {"line_name": "NW:5"},
+                "journey_origin": "Town Centre",
+                "journey_destination": "Railway Station",
+                "board_departure": 36100,
+            },
+            "_meta": {},
+        }
 
-        calls = []
+        result = build_journey_plan_response(route, merged, {})
+        transit_legs = [l for l in result["legs"] if l.get("line_name")]
+        assert transit_legs, "Expected at least one transit leg"
+        assert transit_legs[0]["mode"] == "bus"
 
-        def _fake_overpass(from_lat, from_lon, to_lat, to_lon):
-            calls.append((from_lat, from_lon, to_lat, to_lon))
-            return [[from_lat, from_lon], [to_lat, to_lon]]
+    def test_leg_geometry_prefers_journey_stop_sequence_for_stop_ids(self):
+        """When route-level stops don't map, use journey stop sequence for stop_ids fallback."""
+        merged = MagicMock()
+        merged.stop_metadata = ["A", "B", "C"]
+        merged.bucket = "AM"
+        merged.journey_type.return_value = api_module.BUS
 
-        monkeypatch.setattr(api_module, "_query_overpass_rail_path", _fake_overpass)
-        monkeypatch.setattr(api_module, "_base_cache", {"atco_loader": _AtcoLoader()}, raising=False)
-
-        out = api_module.route_leg_geometry(
-            54.0,
-            -2.8,
-            54.1,
-            -2.9,
-            mode="train",
-            merged=MagicMock(),
-            stop_ids="ATCO_A,ATCO_B,ATCO_C",
-        )
-
-        assert out.get("source") == "osm_rail"
-        assert out.get("diag", {}).get("stitch_kind") == "osm_rail_via_stops"
-        assert out.get("coords") == [
-            [54.0000, -2.8000],
-            [54.0500, -2.8500],
-            [54.1000, -2.9000],
+        # Journey 5 serves stops 0 -> 1 -> 2
+        merged.journey_times = [None] * 6
+        merged.journey_stop_index = [None] * 6
+        merged.journey_to_route = [None] * 6
+        merged.journey_times[5] = [
+            (0, 36010, 36000),
+            (1, 36120, 36110),
+            (2, 36230, 36220),
         ]
-        assert calls == [
-            (54.0000, -2.8000, 54.0500, -2.8500),
-            (54.0500, -2.8500, 54.1000, -2.9000),
-        ]
+        merged.journey_stop_index[5] = {0: 0, 1: 1, 2: 2}
+        merged.journey_to_route[5] = 0
+
+        # Route-level stops intentionally do not include endpoints 0/2.
+        merged.route_stops = [[9, 10]]
+
+        atco_map = {
+            0: "ATCO_A",
+            1: "ATCO_B",
+            2: "ATCO_C",
+            9: "ATCO_X",
+            10: "ATCO_Y",
+        }
+        merged.get_atco_code.side_effect = lambda s: atco_map.get(s)
+
+        stop_coords = {
+            0: (54.00, -2.80),
+            1: (54.01, -2.81),
+            2: (54.02, -2.82),
+            9: (54.10, -2.90),
+            10: (54.11, -2.91),
+        }
+
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            2: {
+                "arrival_time": 36230,
+                "prev_stop": 0,
+                "mode": "bus",
+                "journey": 5,
+                "day": None,
+                "journey_info": {"line_name": "OP:14", "route_id": "R14"},
+                "journey_origin": "A",
+                "journey_destination": "C",
+                "board_departure": 36000,
+            },
+            "_meta": {
+                "start_point": (),
+                "destination": (),
+                "start_walk_seconds": 0,
+                "end_walk_seconds": 0,
+                "total_arrival": 36230,
+            },
+        }
+
+        with patch.object(
+            api_module,
+            "route_leg_geometry",
+            return_value={
+                "coords": [[54.00, -2.80], [54.02, -2.82]],
+                "source": "stops",
+                "diag": {},
+            },
+        ) as mock_leg_geom:
+            result = build_journey_plan_response(route, merged, stop_coords)
+
+        assert result["success"] is True
+        assert mock_leg_geom.called
+        assert mock_leg_geom.call_args.kwargs.get("stop_ids") == "ATCO_A,ATCO_B,ATCO_C"
+
+    def test_degenerate_same_point_geometry_is_omitted(self):
+        """Point-only geometry (same start/end coord) should not be emitted."""
+        merged = MagicMock()
+        merged.stop_metadata = ["A", "B"]
+        merged.get_atco_code.return_value = None
+
+        # Walking leg between two stop-ints that share identical coordinates.
+        route = {
+            0: {
+                "arrival_time": 36000,
+                "prev_stop": None,
+                "mode": None,
+                "journey": None,
+                "day": None,
+            },
+            1: {
+                "arrival_time": 36100,
+                "prev_stop": 0,
+                "mode": "walking",
+                "journey": None,
+                "day": None,
+            },
+            "_meta": {
+                "start_point": (),
+                "destination": (),
+                "start_walk_seconds": 0,
+                "end_walk_seconds": 0,
+                "total_arrival": 36100,
+            },
+        }
+
+        stop_coords = {
+            0: (54.0000, -2.8000),
+            1: (54.0000, -2.8000),
+        }
+
+        result = build_journey_plan_response(route, merged, stop_coords, include_geometry=True)
+        assert result["success"] is True
+        # The walking leg still exists as itinerary data.
+        assert len(result["legs"]) == 1
+        assert result["legs"][0]["mode"] == "walking"
+        # But no point-only polyline should be emitted.
+        assert result["routeGeometries"] == []
+
+
+def test_train_leg_geometry_uses_intermediate_stations_for_path(monkeypatch):
+    """Train leg geometry should route via intermediate station waypoints when present."""
+
+    class _AtcoLoader:
+        def get_all_stop_coords(self):
+            return {
+                "ATCO_A": (54.0000, -2.8000),
+                "ATCO_B": (54.0500, -2.8500),
+                "ATCO_C": (54.1000, -2.9000),
+            }
+
+    calls = []
+
+    def _fake_overpass(from_lat, from_lon, to_lat, to_lon):
+        calls.append((from_lat, from_lon, to_lat, to_lon))
+        return [[from_lat, from_lon], [to_lat, to_lon]]
+
+    monkeypatch.setattr(api_module, "_query_overpass_rail_path", _fake_overpass)
+    monkeypatch.setattr(api_module, "_base_cache", {"atco_loader": _AtcoLoader()}, raising=False)
+
+    out = api_module.route_leg_geometry(
+        54.0,
+        -2.8,
+        54.1,
+        -2.9,
+        mode="train",
+        merged=MagicMock(),
+        stop_ids="ATCO_A,ATCO_B,ATCO_C",
+    )
+
+    assert out.get("source") == "osm_rail"
+    assert out.get("diag", {}).get("stitch_kind") == "osm_rail_via_stops"
+    assert out.get("coords") == [
+        [54.0000, -2.8000],
+        [54.0500, -2.8500],
+        [54.1000, -2.9000],
+    ]
+    assert calls == [
+        (54.0000, -2.8000, 54.0500, -2.8500),
+        (54.0500, -2.8500, 54.1000, -2.9000),
+    ]
