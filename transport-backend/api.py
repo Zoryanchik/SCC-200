@@ -10650,16 +10650,35 @@ async def journey_plan(request: JourneyPlanRequest):
             merged, router, walking = await asyncio.to_thread(
                 get_router_for_date, date_str, start_time=start_seconds
             )
-            result = await asyncio.to_thread(
-                router.route,
-                # pass the same keyword args through to the threaded call
-                n_transfer_limit=max_transfers,
-                walking=walking,
-                start_time=start_seconds,
-                start_point=start_point,
-                destination=destination,
-                allowed_modes=allowed_modes,
-            )
+            # Optionally time the router.call to help diagnose slow queries.
+            if str(os.environ.get('ROUTER_CALL_TIMING') or '').lower() in ('1', 'true', 'yes'):
+                t0 = time.time()
+                result = await asyncio.to_thread(
+                    router.route,
+                    # pass the same keyword args through to the threaded call
+                    n_transfer_limit=max_transfers,
+                    walking=walking,
+                    start_time=start_seconds,
+                    start_point=start_point,
+                    destination=destination,
+                    allowed_modes=allowed_modes,
+                )
+                t1 = time.time()
+                try:
+                    logger.info('[router] route call time: %.3fs (date=%s)', (t1 - t0), date_str)
+                except Exception:
+                    pass
+            else:
+                result = await asyncio.to_thread(
+                    router.route,
+                    # pass the same keyword args through to the threaded call
+                    n_transfer_limit=max_transfers,
+                    walking=walking,
+                    start_time=start_seconds,
+                    start_point=start_point,
+                    destination=destination,
+                    allowed_modes=allowed_modes,
+                )
             
             # If the request is station-to-station and mixed-mode routing found no
             # train leg, try train-only routing so obvious rail options are not
@@ -10673,15 +10692,32 @@ async def journey_plan(request: JourneyPlanRequest):
                     atco_coords = {}
 
                 if atco_coords and _is_near_train_stop(start_point, merged, atco_coords) and _is_near_train_stop(destination, merged, atco_coords):
-                    train_result = await asyncio.to_thread(
-                        router.route,
-                        n_transfer_limit=max_transfers,
-                        walking=walking,
-                        start_time=start_seconds,
-                        start_point=start_point,
-                        destination=destination,
-                        allowed_modes={"train"},
-                    )
+                    if str(os.environ.get('ROUTER_CALL_TIMING') or '').lower() in ('1', 'true', 'yes'):
+                        t0 = time.time()
+                        train_result = await asyncio.to_thread(
+                            router.route,
+                            n_transfer_limit=max_transfers,
+                            walking=walking,
+                            start_time=start_seconds,
+                            start_point=start_point,
+                            destination=destination,
+                            allowed_modes={"train"},
+                        )
+                        t1 = time.time()
+                        try:
+                            logger.info('[router] train-only route call time: %.3fs (date=%s)', (t1 - t0), date_str)
+                        except Exception:
+                            pass
+                    else:
+                        train_result = await asyncio.to_thread(
+                            router.route,
+                            n_transfer_limit=max_transfers,
+                            walking=walking,
+                            start_time=start_seconds,
+                            start_point=start_point,
+                            destination=destination,
+                            allowed_modes={"train"},
+                        )
                     if train_result and set(train_result.keys()) != {"_meta"}:
                         result = train_result
 
@@ -10858,15 +10894,33 @@ async def get_route(request: RouteRequest):
         merged, router, walking = await asyncio.to_thread(
             get_router_for_date, date_str, start_time=start_seconds
         )
-        result = await asyncio.to_thread(
-            router.route,
-            n_transfer_limit=max_transfers,
-            walking=walking,
-            start_time=start_seconds,
-            start_point=start_point,
-            destination=destination,
-            allowed_modes=allowed_modes,
-        )
+        # Optionally time the router.call to help diagnose slow queries.
+        if str(os.environ.get('ROUTER_CALL_TIMING') or '').lower() in ('1', 'true', 'yes'):
+            t0 = time.time()
+            result = await asyncio.to_thread(
+                router.route,
+                n_transfer_limit=max_transfers,
+                walking=walking,
+                start_time=start_seconds,
+                start_point=start_point,
+                destination=destination,
+                allowed_modes=allowed_modes,
+            )
+            t1 = time.time()
+            try:
+                logger.info('[router] route call time: %.3fs (date=%s)', (t1 - t0), date_str)
+            except Exception:
+                pass
+        else:
+            result = await asyncio.to_thread(
+                router.route,
+                n_transfer_limit=max_transfers,
+                walking=walking,
+                start_time=start_seconds,
+                start_point=start_point,
+                destination=destination,
+                allowed_modes=allowed_modes,
+            )
         stop_coords = getattr(walking, "_coords", {})
         return build_journey_plan_response(result, merged, stop_coords, request_start_seconds=start_seconds)
     except Exception as e:

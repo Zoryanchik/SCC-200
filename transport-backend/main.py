@@ -496,6 +496,25 @@ def initialize_base():
     }
     print(f"  [merged] ✓ Today's timetable ready (AM + PM)")
 
+    # Optional: pre-warm per-route stop-departure caches for the prebuilt
+    # merged networks. This can reduce first-request latency at the cost of
+    # higher startup CPU/memory. Enable with PREWARM_ROUTE_STOP_DEPARTURES=1.
+    try:
+        if os.environ.get('PREWARM_ROUTE_STOP_DEPARTURES') == '1':
+            print('  [merged] Pre-warming route_stop_departures for prebuilt networks...')
+            import time as _t
+            t0 = _t.perf_counter()
+            for k, (m, _r, _w) in prebuilt_cache.items():
+                try:
+                    # Access the property to force materialization of all routes
+                    _ = m.route_stop_departures
+                except Exception:
+                    pass
+            dt = _t.perf_counter() - t0
+            print(f'  [merged] Pre-warm complete in {dt:.3f}s')
+    except Exception:
+        pass
+
     print("\n" + "=" * 60)
     print("Base Initialization Complete!")
     print("=" * 60)

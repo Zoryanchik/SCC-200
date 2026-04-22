@@ -137,18 +137,12 @@ class MergedData:
 
             # --- route_stops: remap stop ids (avoid intermediate list objects where possible) ---
             for route in data.route_stops:
-                out = list(route)
-                # in-place offset
-                for i in range(len(out)):
-                    out[i] += stop_offset
-                route_stops_local.append(out)
+                # list comprehension is faster than a Python-level loop for simple numeric remapping
+                route_stops_local.append([r + stop_offset for r in route])
 
             # --- route_journeys: remap journey ids ---
             for rj in data.route_journeys:
-                out = list(rj)
-                for i in range(len(out)):
-                    out[i] += journey_offset
-                route_journeys_local.append(out)
+                route_journeys_local.append([jid + journey_offset for jid in rj])
 
             # --- journey_times: remap stop ids + shift times ---
             # This can dominate runtime due to tuple allocations.
@@ -158,12 +152,8 @@ class MergedData:
                 so = int(stop_offset)
                 to = int(time_offset)
                 for jt in data.journey_times:
-                    # Inline shifting (same representation), but minimize
-                    # repeated global/name lookups.
-                    out = [None] * len(jt)
-                    for i, (sid, atime, dtime) in enumerate(jt):
-                        out[i] = (sid + so, atime + to, dtime + to)
-                    jt_append(out)
+                    # Use a list comprehension (C-optimized) to remap and shift triplets.
+                    jt_append([(sid + so, atime + to, dtime + to) for (sid, atime, dtime) in jt])
             else:
                 # Parallel path: shift each journey in workers.
                 # Note: this pickles each journey list; enable only when beneficial.
@@ -176,10 +166,7 @@ class MergedData:
 
             # --- stop_to_routes: remap route ids ---
             for routes_for_stop in data.stop_to_routes:
-                out = list(routes_for_stop)
-                for i in range(len(out)):
-                    out[i] += route_offset
-                stop_to_routes_local.append(out)
+                stop_to_routes_local.append([r + route_offset for r in routes_for_stop])
 
             # --- journey_to_route: remap route ids ---
             for r in data.journey_to_route:
