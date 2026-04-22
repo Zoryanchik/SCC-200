@@ -11,7 +11,7 @@ import Skeleton from "@mui/material/Skeleton";
 import Autocomplete from "@mui/material/Autocomplete";
 import TextField from "@mui/material/TextField";
 import InputAdornment from "@mui/material/InputAdornment";
-import { MapPin, Bus, Train, Search } from "lucide-react";
+import { MapPin, Bus, Train, Search, Crosshair } from "lucide-react";
 import { lazy, Suspense, useMemo, useState, useEffect, useCallback } from "react";
 import { useLiveBusLocations, useLiveDepartures, useLiveUpdates, useStopSearch } from "../hooks/useTransportData";
 import { useBusStops } from "../hooks/useBusStops";
@@ -786,10 +786,27 @@ Off-lines
 {!userLocation && (
     <Button
         variant="outlined"
-        size="small"
+        size="medium"
         onClick={requestLocation}
         disabled={locationStatus === 'loading'}
-        sx={{ borderRadius: '10px', textTransform: 'none', width: { xs: '100%', sm: 'auto' } }}
+        sx={{
+          textTransform: 'none',
+          borderRadius: '12px',
+          borderWidth: '1px',
+          borderColor: (theme) =>
+            theme.palette.mode === 'light' ? '#CBD5E1' : '#475569',
+          color: (theme) =>
+            theme.palette.mode === 'light' ? '#475569' : '#FFFFFF',
+          '&:hover': {
+            borderColor: (theme) =>
+              theme.palette.mode === 'light' ? '#64748B' : '#FFFFFF',
+            backgroundColor: (theme) =>
+              theme.palette.mode === 'light'
+                ? '#F1F5F9'
+                : 'rgba(255,255,255,0.14)',
+          },
+          width: { xs: '100%', sm: 'auto' },
+        }}
     >
         {locationStatus === 'loading' ? (
             <Stack direction="row" spacing={1} alignItems="center">
@@ -797,7 +814,10 @@ Off-lines
                 <Typography variant="caption">Locating</Typography>
             </Stack>
         ) : (
-            'Use my location'
+            <Stack direction="row" spacing={1} alignItems="center">
+                <Crosshair size={16} />
+                <span>Use current location</span>
+            </Stack>
         )}
     </Button>
 )}
