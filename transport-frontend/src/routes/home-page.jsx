@@ -853,8 +853,11 @@ export default function HomePage() {
   );
 
   const { alerts: serviceAlerts, loading: alertsLoading } = useServiceAlerts();
-  const { data: liveAlertUpdate, isConnected: alertsConnected } =
-    useLiveUpdates("alerts");
+  const {
+    data: liveAlertUpdate,
+    isConnected: alertsConnected,
+    error: alertsConnectionError,
+  } = useLiveUpdates("alerts");
   const [liveAlerts, setLiveAlerts] = useState([]);
   // Array of { card, routeGeometries } — one entry per alternative route
   const [routeOptions, setRouteOptions] = useState([]);
@@ -1542,6 +1545,36 @@ export default function HomePage() {
     loading: trainLoading,
     error: trainError,
   } = useLiveDepartures(["LAN", "PRE", "MCM", "BPS", "BPB"], 180000);
+
+  const dashboardLiveStatus = useMemo(() => {
+    const hasLiveError = Boolean(alertsConnectionError || busError || trainError);
+    const isRefreshing = Boolean(
+      alertsLoading || busLoading || busRefreshing || trainLoading,
+    );
+
+    if (alertsConnected && !hasLiveError) {
+      return { label: "Connected", tone: "connected" };
+    }
+    if (!alertsConnected && !alertsConnectionError) {
+      return { label: "Reconnecting", tone: "reconnecting" };
+    }
+    if (alertsConnected && hasLiveError) {
+      return { label: "Reconnecting", tone: "reconnecting" };
+    }
+    if (isRefreshing) {
+      return { label: "Reconnecting", tone: "reconnecting" };
+    }
+    return { label: "Offline", tone: "offline" };
+  }, [
+    alertsConnected,
+    alertsConnectionError,
+    alertsLoading,
+    busError,
+    busLoading,
+    busRefreshing,
+    trainError,
+    trainLoading,
+  ]);
 
   // Update markers when real bus API data arrives
   useEffect(() => {
@@ -3325,11 +3358,17 @@ export default function HomePage() {
               Dashboard
             </Typography>
             <Chip
-              label="Live"
+              label={dashboardLiveStatus.label}
               sx={{
                 fontWeight: 550,
-                backgroundColor: "rgba(255,255,255,0.25)",
+                backgroundColor:
+                  dashboardLiveStatus.tone === "connected"
+                    ? "rgba(16,185,129,0.35)"
+                    : dashboardLiveStatus.tone === "reconnecting"
+                      ? "rgba(245,158,11,0.36)"
+                      : "rgba(239,68,68,0.38)",
                 color: "white",
+                border: "1px solid rgba(255,255,255,0.38)",
               }}
               size="small"
             />
