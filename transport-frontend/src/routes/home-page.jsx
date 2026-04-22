@@ -3388,12 +3388,23 @@ export default function HomePage() {
                     textTransform: "none",
                     fontWeight: 600,
                     whiteSpace: "nowrap",
-                    color: "#FFFFFF",
-                    borderColor: "rgba(255,255,255,0.62)",
-                    backgroundColor: "rgba(255,255,255,0.06)",
+                    color: (theme) =>
+                      theme.palette.mode === "light" ? "#334155" : "#FFFFFF",
+                    borderColor: (theme) =>
+                      theme.palette.mode === "light"
+                        ? "#94A3B8"
+                        : "rgba(255,255,255,0.62)",
+                    backgroundColor: (theme) =>
+                      theme.palette.mode === "light"
+                        ? "#FFFFFF"
+                        : "rgba(255,255,255,0.06)",
                     "&:hover": {
-                      borderColor: "#FFFFFF",
-                      backgroundColor: "rgba(255,255,255,0.14)",
+                      borderColor: (theme) =>
+                        theme.palette.mode === "light" ? "#64748B" : "#FFFFFF",
+                      backgroundColor: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#F1F5F9"
+                          : "rgba(255,255,255,0.14)",
                     },
                   }}
                 >
@@ -3943,15 +3954,21 @@ export default function HomePage() {
                     px: 1,
                     flexShrink: 0,
                     gridColumn: { xs: "1 / -1", sm: "auto" },
-                    color: "#fff",
-                    borderColor: "#fff",
+                    color: (theme) =>
+                      theme.palette.mode === "light" ? "#334155" : "#FFFFFF",
+                    borderColor: (theme) =>
+                      theme.palette.mode === "light" ? "#94A3B8" : "#FFFFFF",
                     borderWidth: 1.5,
                     fontWeight: 700,
                     fontSize: { xs: "1rem", sm: "0.95rem" },
                     textTransform: "none",
                     "&:hover": {
-                      borderColor: "#fff",
-                      backgroundColor: "rgba(255,255,255,0.08)",
+                      borderColor: (theme) =>
+                        theme.palette.mode === "light" ? "#64748B" : "#FFFFFF",
+                      backgroundColor: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#F1F5F9"
+                          : "rgba(255,255,255,0.08)",
                     },
                   }}
                 >
@@ -3993,11 +4010,17 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.82)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.82)",
                       fontWeight: 500,
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >
@@ -4061,11 +4084,17 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.82)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.82)",
                       fontWeight: 500,
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >
@@ -4130,11 +4159,17 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.82)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.82)",
                       fontWeight: 500,
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >
@@ -4200,11 +4235,17 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.82)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.82)",
                       fontWeight: 500,
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >
@@ -4288,12 +4329,18 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.74)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.74)",
                       fontWeight: 500,
                       fontSize: "0.92rem",
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >
@@ -4354,12 +4401,18 @@ export default function HomePage() {
                       right: 10,
                     },
                     "& .MuiInputLabel-root": {
-                      color: "rgba(255,255,255,0.74)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.74)",
                       fontWeight: 500,
                       fontSize: "0.92rem",
                     },
                     "& .MuiSvgIcon-root": {
-                      color: "rgba(255,255,255,0.92)",
+                      color: (theme) =>
+                        theme.palette.mode === "light"
+                          ? "#475569"
+                          : "rgba(255,255,255,0.92)",
                     },
                   }}
                 >

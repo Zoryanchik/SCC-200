@@ -60,8 +60,18 @@ export default function AppLayout({ children }) {
 					main: '#EC4899',
 				},
 				background: {
-					default: '#F8FAFC',
+					default: '#F3F6FB',
 					paper: '#FFFFFF',
+				},
+				text: {
+					primary: '#0F172A',
+					secondary: '#334155',
+				},
+				divider: '#CBD5E1',
+				action: {
+					disabled: '#64748B',
+					disabledBackground: '#E2E8F0',
+					disabledOpacity: 1,
 				},
 			} : {
 				primary: {
@@ -93,6 +103,11 @@ export default function AppLayout({ children }) {
 			MuiAppBar: {
 				styleOverrides: {
 					root: {
+						'&.Mui-disabled': {
+							color: mode === 'light' ? '#64748B' : undefined,
+						},
+					},
+					root: {
 						background: mode === 'light' 
 							? 'linear-gradient(135deg, #FFFFFF 0%, #F8FAFC 100%)'
 							: 'linear-gradient(135deg, #1E293B 0%, #0F172A 100%)',
@@ -100,6 +115,10 @@ export default function AppLayout({ children }) {
 							? '0 1px 3px rgba(0,0,0,0.08)'
 							: '0 1px 3px rgba(0,0,0,0.3)',
 						borderBottom: mode === 'light' ? '1px solid #E2E8F0' : '1px solid #334155',
+						'&.Mui-disabled': {
+							backgroundColor: mode === 'light' ? '#CBD5E1' : undefined,
+							color: mode === 'light' ? '#475569' : undefined,
+						},
 					}
 				}
 			},
@@ -107,9 +126,16 @@ export default function AppLayout({ children }) {
 				styleOverrides: {
 					contained: {
 						borderRadius: '8px',
+						'&.Mui-disabled': {
+							borderColor: mode === 'light' ? '#94A3B8' : undefined,
+							color: mode === 'light' ? '#475569' : undefined,
+						},
 						boxShadow: 'none',
 						transition: 'all 0.3s ease',
 						'&:hover': {
+						'&.Mui-disabled': {
+							color: mode === 'light' ? '#475569' : undefined,
+						},
 							boxShadow: '0 4px 12px rgba(99,102,241,0.3)',
 							transform: 'translateY(-2px)',
 						}
@@ -117,12 +143,47 @@ export default function AppLayout({ children }) {
 					outlined: {
 						borderRadius: '8px',
 						transition: 'all 0.3s ease',
+						...(highContrast && mode === 'light' ? {
+							borderColor: '#666666',
+							color: '#000000',
+							'&:hover': {
+								backgroundColor: '#DDDDDD',
+								borderColor: '#000000',
+							}
+						} : {}),
 						'&:hover': {
+						backgroundImage: 'none',
+						...(mode === 'light' ? {
+							backgroundColor: '#F1F5F9',
+							borderColor: '#94A3B8',
+						} : {
+							backgroundColor: 'rgba(255, 255, 255, 0.05)',
+						}),
 							boxShadow: '0 4px 12px rgba(99,102,241,0.15)',
 						}
 					},
 					text: {
 						transition: 'all 0.3s ease',
+						...(mode === 'light' ? {
+							color: '#475569',
+							'&:hover': {
+								color: '#0F172A',
+								backgroundColor: '#F1F5F9',
+							}
+						} : {}),
+					}
+				}
+			},
+			MuiIconButton: {
+				styleOverrides: {
+					root: {
+						...(mode === 'light' ? {
+							color: '#475569',
+							'&:hover': {
+								backgroundColor: '#F1F5F9',
+								color: '#0F172A',
+							}
+						} : {}),
 					}
 				}
 			},
@@ -131,6 +192,9 @@ export default function AppLayout({ children }) {
 					root: {
 						borderRadius: '12px',
 						transition: 'all 0.3s ease',
+						...(mode === 'light' ? {
+							border: '1px solid #E2E8F0',
+						} : {}),
 					}
 				}
 			},
@@ -140,7 +204,44 @@ export default function AppLayout({ children }) {
 						'& .MuiOutlinedInput-root': {
 							borderRadius: '8px',
 							transition: 'all 0.3s ease',
-						}
+							...(mode === 'light' ? {
+								backgroundColor: '#FFFFFF',
+								'& .MuiOutlinedInput-notchedOutline': {
+									borderColor: '#CBD5E1',
+								},
+								'&:hover .MuiOutlinedInput-notchedOutline': {
+									borderColor: '#94A3B8',
+								},
+								'&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+									borderColor: '#4F46E5',
+								},
+								'& input': {
+									color: '#0F172A',
+								},
+								// For select dropdown text
+								'& .MuiSelect-select': {
+									color: '#0F172A',
+								}
+							} : {}),
+						},
+						'& .MuiInputLabel-root': {
+							...(mode === 'light' ? {
+								color: '#475569',
+								'&.Mui-focused': {
+									color: '#4F46E5',
+								},
+							} : {}),
+						},
+					}
+				}
+			},
+			MuiChip: {
+				styleOverrides: {
+					root: {
+						...(mode === 'light' ? {
+							backgroundColor: '#E2E8F0',
+							color: '#334155',
+						} : {}),
 					}
 				}
 			}
