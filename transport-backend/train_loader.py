@@ -89,6 +89,52 @@ class TrainLoader:
         conn.close()
 
     @staticmethod
+    def _normalize_station_text(text):
+        """Normalize free-text station labels for dictionary matching.
+
+        Args:
+            text: Raw station-like label value.
+
+        Returns:
+            Normalized lowercase label with extra whitespace removed and
+            the word station stripped, or empty string when text is empty.
+        """
+        if not text:
+            return ''
+        normalized = str(text).strip().lower()
+        normalized = re.sub(r'\bstation\b', '', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _rail_place_alias(text):
+        """Return a place-name alias for rail-station labels.
+
+        Example: "Lancaster Railway Station" -> "lancaster".
+        Returns empty string for non-rail labels so broad town aliases are not
+        generated for unrelated stops.
+
+        Args:
+            text: Raw stop/station label.
+
+        Returns:
+            Relaxed place alias for rail labels, otherwise empty string.
+        """
+        normalized = TrainLoader._normalize_station_text(text)
+        if not normalized:
+            return ''
+
+        if not re.search(r'\b(rail|railway|train|station)\b', normalized):
+            return ''
+
+        alias = re.sub(r'\b(rail|railway|train|station)\b', ' ', normalized)
+        alias = re.sub(r'\s+', ' ', alias).strip()
+        if len(alias) < 3:
+            return ''
+        return alias
+
+
+    @staticmethod
     def _is_allowed_atco(atco_code):
         """Check whether an ATCO code belongs to allowed regional prefixes.
 
@@ -109,7 +155,7 @@ class TrainLoader:
 
         Returns:
             Tuple of:
-            - label_to_atcos: mapping of ATCO-like identifiers to candidate ATCOs
+            - label_to_atcos: mapping of normalized labels to candidate ATCOs
             - atco_to_label: mapping of ATCO code to display label
             - atco_meta: mapping of ATCO code to metadata dict
         """
@@ -141,12 +187,17 @@ class TrainLoader:
                 'town': town or '',
                 'stop_type': (stop_type or '').strip().lower(),
             }
-            # ATCO-only lookup keys. Do not index by stop names.
-            candidates = {
-                str(atco_code),
-                str(atco_code).upper(),
-                str(atco_code).lower(),
-            }
+            candidates = {atco_code}
+            # Match train TIPLOCs by stop-specific labels only.
+            # Including town-level aliases (e.g. "Lancaster") can map a
+            # rail TIPLOC to unrelated same-town stops such as bus stands.
+            for candidate in (name,):
+                normalized = self._normalize_station_text(candidate)
+                if normalized:
+                    candidates.add(normalized)
+                relaxed = self._rail_place_alias(candidate)
+                if relaxed:
+                    candidates.add(relaxed)
             for candidate in candidates:
                 if atco_code not in label_to_atcos[candidate]:
                     label_to_atcos[candidate].append(atco_code)
@@ -184,35 +235,30 @@ class TrainLoader:
         return score
 
     def _resolve_tiploc_to_atco(self, tiploc_info, tiploc_code, label_to_atcos, atco_meta):
-        """Resolve a TIPLOC code to an ATCO stop using ATCO-coded fields only.
+        """Resolve a TIPLOC code to the best ATCO stop candidate.
 
         Args:
             tiploc_info: Mapping of TIPLOC code to TIPLOC metadata.
             tiploc_code: TIPLOC code to resolve.
-            label_to_atcos: ATCO-keyed candidate ATCO list map.
+            label_to_atcos: Normalized label to candidate ATCO list map.
             atco_meta: Candidate ATCO metadata for scoring.
 
         Returns:
             Selected ATCO code string, or None when no candidate is found.
         """
         info = tiploc_info.get(tiploc_code) or {}
-        direct_candidates = [
-            info.get('atco_code'),
-            info.get('atco'),
-            info.get('naptan_atco'),
-            info.get('naptan_code'),
-            info.get('NaPTANAtcoCode'),
+        candidates = [
+            info.get('tps_description'),
+            info.get('description'),
+            info.get('crs_code'),
             tiploc_code,
         ]
-        for candidate in direct_candidates:
-            token = str(candidate or '').strip()
-            if not token:
+        for candidate in candidates:
+            normalized = self._normalize_station_text(candidate)
+            if not normalized:
                 continue
-            keys = (token, token.upper(), token.lower())
-            for key in keys:
-                matches = label_to_atcos.get(key)
-                if not matches:
-                    continue
+            matches = label_to_atcos.get(normalized)
+            if matches:
                 allowed = [code for code in matches if self._is_allowed_atco(code)]
                 if allowed:
                     return max(allowed, key=lambda code: self._train_stop_score(code, atco_meta))
@@ -226,8 +272,8 @@ class TrainLoader:
             route_stops: Ordered list of ATCO stop codes for one route.
 
         Returns:
-            True when the route has at least one stop and at least one stop
-            is in the allowed region; otherwise False.
+            True when the route has at least one stop and at least one stop is
+            in the allowed region; otherwise False.
         """
         return bool(route_stops) and any(self._is_allowed_atco(code) for code in route_stops)
 
