@@ -462,7 +462,12 @@ class TrainLoader:
             print(f"  [train]: Cache miss for {date_str}; no non-today download")
             return TrainData(num_routes=0, num_journeys=0, num_stops=0)
 
-        loaded = self.download_schedule_today()
+        # When we need to download/update today's schedule, pass the
+        # requested service date into the download/parse path so the
+        # parser applies service-date filtering (schedule start/end and
+        # day-mask). Without this the parser would include every record
+        # in the feed and produce many unrelated journeys.
+        loaded = self.download_schedule_today(target_date=date_str)
 
         self._save_cached_traindata(date_str, loaded)
         return loaded
