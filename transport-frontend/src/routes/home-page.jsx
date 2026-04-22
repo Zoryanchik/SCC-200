@@ -118,6 +118,12 @@ function journeyToRouteCard(journey) {
       delay_seconds: leg.delay_seconds ?? null,
       status: leg.status ?? null,
       stops: leg.intermediate_stops || [],
+      // Train pricing (added by backend). price is numeric (e.g. 2.79) and
+      // price_currency is the currency code (e.g. 'GBP'). Keep both so the
+      // UI can format safely and fall back when missing.
+      price: leg.price ?? null,
+      price_currency: leg.price_currency ?? null,
+      price_distance_km: leg.price_distance_km ?? null,
     };
   });
 
@@ -271,7 +277,7 @@ function journeyToRouteCard(journey) {
     finalArrivalSecs = null;
   }
 
-  return {
+      return {
     id: 1,
     duration,
     totalSeconds: totalSec,
@@ -284,9 +290,39 @@ function journeyToRouteCard(journey) {
     steps,
     walkMinutes,
     finalArrivalWithOffset,
-    // Pricing: £2/£3 per bus leg (single ticket), train legs are not priced here
+    // Pricing: compute bus cost (legacy) and include train total when backend provides it
     busLegs: steps.filter((s) => s.type === "bus").length,
+    // route-level price (combined). Also expose breakdowns as price_bus and price_train
     price: (() => {
+      const busSteps = steps.filter((s) => s.type === "bus");
+      let busTotal = 0;
+      if (busSteps.length > 0) {
+        for (const busStep of busSteps) {
+          const stopsCount = (
+            busStep.stops ||
+            busStep.path_stops ||
+            busStep.pathStops ||
+            busStep.intermediate_stops ||
+            busStep.intermediateStops ||
+            []
+          ).length;
+          if (stopsCount > 25) busTotal += 3.0;
+          else busTotal += 2.0;
+        }
+      }
+      // Compute train price as sum of per-train-leg rounded-up prices when available
+      // Steps were constructed above and include `price` for train legs (numeric)
+      const trainSteps = steps.filter((s) => s.type === 'train');
+      const trainParts = (trainSteps || []).map((s) => {
+        const p = s.price ?? null;
+        return Number.isFinite(p) ? Math.ceil(Number(p)) : null;
+      }).filter((v) => Number.isFinite(v));
+      const trainRounded = trainParts.length > 0 ? trainParts.reduce((a, b) => a + b, 0) : 0;
+      const combined = (Number.isFinite(busTotal) ? busTotal : 0) + trainRounded;
+      if (combined > 0) return `£${combined}`;
+      return null;
+    })(),
+    price_bus: (() => {
       const busSteps = steps.filter((s) => s.type === "bus");
       if (busSteps.length === 0) return null;
       let total = 0;
@@ -299,14 +335,33 @@ function journeyToRouteCard(journey) {
           busStep.intermediateStops ||
           []
         ).length;
-        if (stopsCount > 25) {
-          total += 3.0;
-        } else {
-          total += 2.0;
-        }
+        total += stopsCount > 25 ? 3.0 : 2.0;
       }
-      return `£${total.toFixed(2)}`;
+      return total;
     })(),
+    // price_train holds the rounded-up train total used for display and totals
+    // price_train_parts is an array of rounded integers for each train leg
+    price_train: (() => {
+      try {
+        const trainSteps = steps.filter((s) => s.type === 'train');
+        const parts = (trainSteps || []).map((s) => {
+          const p = s.price ?? null;
+          return Number.isFinite(p) ? Math.ceil(Number(p)) : null;
+        }).filter((v) => Number.isFinite(v));
+        return parts.length > 0 ? parts.reduce((a, b) => a + b, 0) : null;
+      } catch (e) { return null; }
+    })(),
+    price_train_parts: (() => {
+      try {
+        const trainSteps = steps.filter((s) => s.type === 'train');
+        return (trainSteps || []).map((s) => {
+          const p = s.price ?? null;
+          return Number.isFinite(p) ? Math.ceil(Number(p)) : null;
+        }).filter((v) => Number.isFinite(v));
+      } catch (e) { return []; }
+    })(),
+  // Currency for train price if backend provides it (e.g. 'GBP')
+  price_currency: meta.price_currency ?? null,
     finalArrivalSecs,
   };
 }

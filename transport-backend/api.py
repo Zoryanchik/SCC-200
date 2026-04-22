@@ -9498,6 +9498,17 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
     # we compute it for the start walking leg. Initialise to None so
     # it's available later when computing total duration.
     initial_departure_secs = None
+    # Accumulate train pricing for the route (base + rate*km per train leg)
+    try:
+        TRAIN_PRICE_BASE = float(os.environ.get('TRAIN_PRICE_BASE_GBP', '1.50'))
+    except Exception:
+        TRAIN_PRICE_BASE = 1.50
+    try:
+        TRAIN_PRICE_PER_KM = float(os.environ.get('TRAIN_PRICE_PER_KM_GBP', '0.20'))
+    except Exception:
+        TRAIN_PRICE_PER_KM = 0.20
+    total_train_price = 0.0
+    price_currency = os.environ.get('PRICE_CURRENCY', 'GBP')
 
     # -- Start walking leg --
     if start_point and len(start_point) >= 2 and start_walk > 0 and ordered:
@@ -9719,6 +9730,43 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                 leg["arrival_day_offset"] = (int(arr_secs) // 86400) if arr_secs is not None and arr_secs != float("inf") else 0
             except Exception:
                 leg["arrival_day_offset"] = 0
+
+        # --- Train pricing (base + per-km rate) ---
+        try:
+            if transport == 'train':
+                # Use coordinates when available on from/to stops
+                fcoord = from_loc.get('lat'), from_loc.get('lon') if isinstance(from_loc, dict) else (None, None)
+                tcoord = to_loc.get('lat'), to_loc.get('lon') if isinstance(to_loc, dict) else (None, None)
+                fl = None
+                tl = None
+                try:
+                    fl = float(fcoord[0]) if fcoord and fcoord[0] is not None else None
+                    fl_lon = float(fcoord[1]) if fcoord and fcoord[1] is not None else None
+                    tl = float(tcoord[0]) if tcoord and tcoord[0] is not None else None
+                    tl_lon = float(tcoord[1]) if tcoord and tcoord[1] is not None else None
+                except Exception:
+                    fl = tl = None
+
+                if fl is not None and tl is not None:
+                    # Haversine distance (km)
+                    try:
+                        import math as _math
+                        dlat = _math.radians(tl - fl)
+                        dlon = _math.radians(tl_lon - fl_lon)
+                        a = (_math.sin(dlat / 2) ** 2
+                             + _math.cos(_math.radians(fl)) * _math.cos(_math.radians(tl))
+                             * _math.sin(dlon / 2) ** 2)
+                        km = 6371 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1 - a))
+                        price = round(TRAIN_PRICE_BASE + TRAIN_PRICE_PER_KM * float(km), 2)
+                        leg['price'] = price
+                        leg['price_currency'] = price_currency
+                        leg['price_distance_km'] = round(km, 2)
+                        # accumulate
+                        total_train_price = total_train_price + float(price)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         legs.append(leg)
 
@@ -10515,6 +10563,9 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
             "route_int": (route_result.get("_route_int") if isinstance(route_result, dict) else None),
             "initial_departure_time": _time_str(initial_departure_secs) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else None,
             "initial_departure_day_offset": (int(initial_departure_secs) // 86400) if 'initial_departure_secs' in locals() and initial_departure_secs is not None else 0,
+            # Price summary for train legs
+            "total_train_price": round(total_train_price, 2) if total_train_price else 0.0,
+            "price_currency": price_currency,
         },
         "routeGeometries": geometries,
     }

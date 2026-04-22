@@ -116,7 +116,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
               whiteSpace: 'nowrap',
             })}
           >
-            Cost
+            Est. Cost
           </Typography>
 
           {/* Row 2: values (arrival / transfer / price) */}
@@ -213,8 +213,8 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
             });
             
             const parts = [];
-            if (standardCount > 0) parts.push(`£2/Single${standardCount > 1 ? `*${standardCount}` : ''}`);
-            if (extendedCount > 0) parts.push(`£3/Single${extendedCount > 1 ? `*${extendedCount}` : ''}`);
+            if (standardCount > 0) parts.push(`£2 / Single${standardCount > 1 ? `*${standardCount}` : ''}`);
+            if (extendedCount > 0) parts.push(`£3 / Single${extendedCount > 1 ? `*${extendedCount}` : ''}`);
             
             const text = parts.length > 0 ? `Bus ` + parts.join(' + ') : 'bus single ticket';
             
@@ -256,7 +256,30 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
             );
           })()}
 
-          <Box />
+          <Box sx={{ minWidth: 72, textAlign: 'right', ml: 1 }}>
+            {(() => {
+              // Use per-train-leg parts if provided by the card model
+              const partsArr = Array.isArray(route.price_train_parts) ? route.price_train_parts : [];
+              if (!partsArr || partsArr.length === 0) return <Box />;
+              const symbol = route.price_currency === 'GBP' ? '£' : (route.price_currency ? `${route.price_currency} ` : '');
+              const parts = partsArr.map((p) => `${symbol}${p}`);
+              const joined = parts.join(' + ');
+              const disp = `Train ${joined} / Advance`;
+              return (
+                <Typography
+                  variant="caption"
+                  sx={(theme) => ({
+                    color: isSelected ? (theme.palette.mode === 'light' ? theme.palette.text.primary : '#ffffff') : (theme.palette.mode === 'light' ? theme.palette.grey[800] : theme.palette.text.secondary),
+                    whiteSpace: 'nowrap',
+                    justifySelf: 'end',
+                    fontStyle: 'italic',
+                  })}
+                >
+                  {disp}
+                </Typography>
+              );
+            })()}
+          </Box>
 
           {/* Row 5: actions */}
           <Box />
@@ -367,6 +390,7 @@ export const RouteCard = memo(function RouteCard({ route, onSave, isSaved = fals
                       >
                         {step.duration}
                       </Typography>
+                      {/* per-leg train price removed — consolidated under header next to bus price */}
                     </Box>
                   </Stack>
 
