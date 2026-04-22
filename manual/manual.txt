@@ -1,0 +1,46 @@
+In home page:
+
+
+For rouing:
+
+To do routing from current location starting now, simply input destination into the "To" bar,
+choose the right one from the prompts, and click "Search routes".
+
+To view results, scroll down and see results in "Suggested routes" card.
+
+Scroll in "Suggest routes" card to compare results, click on one result to view its track.
+
+Click on "Fold" to temporarily hide the routes card, or click on "Close" to close it.
+
+For different routing, click on "use current location" to auto fill "From" location.
+
+Click on the switch button between "From" location bar and "To" location bar to switch locations in them.
+
+Adjust start time, mode limit and transfer limit using the drag down boxes below.
+
+Click the "Now" button to quickly set start time to now.
+
+
+For map and live vehicles:
+
+Hover over buses to see info, click on the bus to show its route track.
+
+Hover over or click on a train station to see its departures.
+
+Use "Buses", "Trains" filters to filter out buses or train.
+
+Click "Off-line" button to show or hide off-line buses.
+
+Click "Centre on me" to zoom the map to current location
+
+Click weather button to show weather details
+
+Scroll down to bottom of page to see service alerts at tarin stations and upcoming departure at train stations.
+
+Set different font size, to light/dark mode, or to contrast mode by clicking the buttons at right top of page
+
+Click "Map" at right top of page to visit the map page.
+
+Click "use current location" to zoom to current location, and display nearby stops
+
+Input a location in the search bar to zoom to and inspect the location on map
