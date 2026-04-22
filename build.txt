@@ -1,0 +1,21 @@
+1. Start pgsql server, run:
+    ./transport-backend/run_pgsql.sh
+Wait until you see "Postgres is ready and listening on localhost:5011"
+
+2. Start OSRM server, run:
+    ./transport-backend/osrm/run_osrm.sh
+Wait until you see "[info] Listening on: 0.0.0.0:5012
+                    [info] running and waiting for requests"
+
+OPEN A NEW TERMINAL
+
+3. Start backend server, run:
+    ./transport-backend/run_backend.sh
+Wait until you see "Backend is ready at http://localhost:5050"
+
+4. Start frontend server, run:
+    ./transport-frontend/run_frontend.sh
+Wait until you see "--------------- Frontend is ready. ---------------
+                    --------------- URL: http://localhost:5075 ---------------"
+
+Click or go to http://localhost:5075 to visit the app
