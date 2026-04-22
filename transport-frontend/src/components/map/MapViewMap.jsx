@@ -606,6 +606,7 @@ const JourneyRouteLayer = ({ segments }) => {
     import.meta.env.VITE_API_BASE_URL || "http://localhost:5050"
   ).replace(/\/$/, "");
   const DEBUG_JOURNEY_ROUTE =
+    import.meta.env.DEV ||
     String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || "").toLowerCase() ===
       "1" ||
     String(import.meta.env.VITE_DEBUG_JOURNEY_ROUTE || "").toLowerCase() ===
@@ -623,7 +624,7 @@ const JourneyRouteLayer = ({ segments }) => {
         window.localStorage &&
         window.localStorage.getItem("HOVER_INTENT_DEBUG_UI") === "1"
       );
-      return qsEnabled || lsEnabled;
+      return qsEnabled || lsEnabled || import.meta.env.DEV;
     } catch (e) {
       return false;
     }
@@ -1779,6 +1780,7 @@ export default function MapViewMap({
   // - `activeHoverId` is the marker that "won" the 0.7s dwell and is allowed to
   //   trigger requests / show richer UI.
   const debugHoverIntent =
+    import.meta.env.DEV ||
     typeof window !== "undefined" &&
     window.localStorage &&
     window.localStorage.getItem("HOVER_INTENT_DEBUG") === "1";
@@ -1787,6 +1789,7 @@ export default function MapViewMap({
       if (typeof window === "undefined") return false;
       const qs = new URLSearchParams(window.location.search || "");
       return (
+        import.meta.env.DEV ||
         qs.get("hoverFlow") === "1" ||
         (window.localStorage &&
           window.localStorage.getItem("HOVER_FLOW_DEBUG") === "1")
@@ -2528,10 +2531,12 @@ export default function MapViewMap({
   // SHOW_ALL_BUSES_DEBUG, allow the UI to fall back to nearest-geometry variant
   // selection for debugging. Default is false in normal operation.
   const debugShowAllBuses =
+    import.meta.env.DEV ||
     typeof window !== "undefined" &&
     window.localStorage &&
     window.localStorage.getItem("SHOW_ALL_BUSES_DEBUG") === "1";
   const debugTrackClickFlow =
+    import.meta.env.DEV ||
     typeof window !== "undefined" &&
     window.localStorage &&
     window.localStorage.getItem("SHOW_TRACK_DEBUG") === "1";
