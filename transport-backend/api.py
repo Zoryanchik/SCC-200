@@ -1692,6 +1692,109 @@ def route_geometry(route_id: str):
     return {"coords": coords, "source": "route_link_tracks"}
 
 
+@app.get('/journey/geometry/{logged_journey_id}')
+def journey_geometry(logged_journey_id: str):
+    """Return per-leg geometries for a previously-logged journey id.
+
+    This is a convenience endpoint used by the frontend when a user
+    selects a route from search results. It locates the in-memory
+    `MergedData.logged_journeys` entry and computes per-leg geometry
+    using the same `route_leg_geometry` helper used for inline
+    embedding — but performed on-demand so we only load route fragments
+    for the selected route(s).
+    """
+    if not logged_journey_id:
+        raise HTTPException(status_code=400, detail='logged_journey_id required')
+
+    # Look through prebuilt cache and router cache for a merged instance
+    merged = None
+    try:
+        # Check base prebuilt cache first
+        if globals().get('_base_cache'):
+            prebuilt = _base_cache.get('prebuilt_cache') if _base_cache else None
+            if prebuilt:
+                for k, v in prebuilt.items():
+                    try:
+                        m = v[0]
+                    except Exception:
+                        m = None
+                    if m and isinstance(getattr(m, 'logged_journeys', None), dict) and logged_journey_id in m.logged_journeys:
+                        merged = m
+                        break
+
+        # Fall back to router cache
+        if merged is None:
+            with _router_cache_lock:
+                for k, v in _router_cache.items():
+                    try:
+                        m = v[0]
+                    except Exception:
+                        m = None
+                    if m and isinstance(getattr(m, 'logged_journeys', None), dict) and logged_journey_id in m.logged_journeys:
+                        merged = m
+                        break
+    except Exception:
+        merged = None
+
+    if merged is None:
+        # We only support on-demand geometry for journeys currently held in-memory
+        # (i.e. those that were produced by a recent routing request). If the
+        # logged_journey is not present in any in-memory merged instance we
+        # cannot stitch fragments efficiently here.
+        raise HTTPException(status_code=404, detail='logged_journey not found')
+    lj = merged.logged_journeys.get(logged_journey_id)
+
+    if not isinstance(lj, dict):
+        raise HTTPException(status_code=404, detail='logged_journey not found')
+
+    # Build per-leg geometries on-demand. Use merged when available to allow
+    # fragment stitching, otherwise fall back to stop coords in the logged journey.
+    geoms = []
+    try:
+        legs = lj.get('legs') or []
+        for idx, leg in enumerate(legs):
+            try:
+                from_loc = leg.get('from_stop') or {}
+                to_loc = leg.get('to_stop') or {}
+                from_lat = from_loc.get('lat')
+                from_lon = from_loc.get('lon')
+                to_lat = to_loc.get('lat')
+                to_lon = to_loc.get('lon')
+                if from_lat is None or from_lon is None or to_lat is None or to_lon is None:
+                    # Skip legs with missing coordinates
+                    continue
+                route_int = None
+                try:
+                    route_int = int(lj.get('_route_int')) if lj.get('_route_int') is not None else None
+                except Exception:
+                    route_int = None
+
+                # Use the existing helper which prefers fragment tracks when provided
+                lg = route_leg_geometry(
+                    float(from_lat), float(from_lon), float(to_lat), float(to_lon),
+                    mode=(leg.get('mode') or 'driving'),
+                    route_id=None,
+                    route_int=route_int,
+                    merged_key=None,
+                    merged=merged,
+                    from_stop_id=(from_loc.get('atco_code') or from_loc.get('id')),
+                    to_stop_id=(to_loc.get('atco_code') or to_loc.get('id')),
+                    stop_ids=None,
+                )
+                if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
+                    geoms.append({
+                        'leg_idx': idx,
+                        'coords': lg.get('coords'),
+                        'source': lg.get('source') or 'linear',
+                    })
+            except Exception:
+                continue
+    except Exception:
+        raise HTTPException(status_code=500, detail='failed to compute geometries')
+
+    return {'logged_journey_id': logged_journey_id, 'geometries': geoms}
+
+
 # --- Geometry assembly endpoint helpers -------------------------------
 # NOTE: Live matching and geometry resolution are intentionally in-memory only.
 # DB helpers for fetching logged journeys / journey_times are removed to avoid
@@ -9569,27 +9672,33 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         wc = [[start_point[0], start_point[1]]]
         geom_source = "linear"
         if first_coord:
-            try:
-                lg = route_leg_geometry(
-                    start_point[0], start_point[1],
-                    first_coord[0], first_coord[1],
-                    mode='walking',
-                    route_id=None,
-                    route_int=None,
-                    merged_key=(
-                        f"{_date_str}|{_bucket}"
-                        if _date_str and _bucket in ('AM', 'PM')
-                        else None
-                    ),
-                    merged=merged,
-                    from_stop_id=None,
-                    to_stop_id=(to_loc.get('id') if isinstance(to_loc, dict) else None),
-                    stop_ids=None,
-                )
-                if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
-                    wc = lg.get('coords')
-                    geom_source = lg.get('source') or 'linear'
-            except Exception:
+            # Only compute per-leg geometry when the caller explicitly
+            # requested embedded geometry. Otherwise avoid triggering
+            # lazy track fetches which can be expensive.
+            if include_geometry:
+                try:
+                    lg = route_leg_geometry(
+                        start_point[0], start_point[1],
+                        first_coord[0], first_coord[1],
+                        mode='walking',
+                        route_id=None,
+                        route_int=None,
+                        merged_key=(
+                            f"{_date_str}|{_bucket}"
+                            if _date_str and _bucket in ('AM', 'PM')
+                            else None
+                        ),
+                        merged=merged,
+                        from_stop_id=None,
+                        to_stop_id=(to_loc.get('id') if isinstance(to_loc, dict) else None),
+                        stop_ids=None,
+                    )
+                    if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
+                        wc = lg.get('coords')
+                        geom_source = lg.get('source') or 'linear'
+                except Exception:
+                    wc = [[start_point[0], start_point[1]], [first_coord[0], first_coord[1]]]
+            else:
                 wc = [[start_point[0], start_point[1]], [first_coord[0], first_coord[1]]]
         if include_geometry and _coords_has_segment(wc):
             start_leg["geometry"] = {
@@ -10305,32 +10414,36 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
                     except Exception:
                         stop_seq_atcos = None
 
-                    lg = route_leg_geometry(
-                        prev_coord[0], prev_coord[1],
-                        curr_coord[0], curr_coord[1],
-                        mode=mode_hint,
-                        route_id=route_id,
-                        route_int=route_int,
-                        merged_key=(
-                            f"{_date_str}|{(getattr(merged, 'bucket', None) or _bucket)}"
-                            if _date_str and (getattr(merged, 'bucket', None) or _bucket) in ('AM', 'PM')
-                            else None
-                        ),
-                        merged=merged,
-                        from_stop_id=prev_atco if 'prev_atco' in locals() else None,
-                        to_stop_id=curr_atco if 'curr_atco' in locals() else None,
-                        stop_ids=stop_seq_atcos,
-                    )
-                    if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
-                        coords = lg.get("coords")
-                        geom_source = lg.get("source")
-                        try:
-                            if isinstance(lg.get('diag'), dict):
-                                # Stash on the leg; we'll copy it into the final
-                                # leg['geometry'] payload when we embed geometry.
-                                leg['_geometry_diag'] = lg.get('diag')
-                        except Exception:
-                            pass
+                    # Only compute per-leg geometry when requested. Avoid
+                    # triggering lazy DB fragment fetches when the client
+                    # doesn't need embedded geometry.
+                    if include_geometry:
+                        lg = route_leg_geometry(
+                            prev_coord[0], prev_coord[1],
+                            curr_coord[0], curr_coord[1],
+                            mode=mode_hint,
+                            route_id=route_id,
+                            route_int=route_int,
+                            merged_key=(
+                                f"{_date_str}|{(getattr(merged, 'bucket', None) or _bucket)}"
+                                if _date_str and (getattr(merged, 'bucket', None) or _bucket) in ('AM', 'PM')
+                                else None
+                            ),
+                            merged=merged,
+                            from_stop_id=prev_atco if 'prev_atco' in locals() else None,
+                            to_stop_id=curr_atco if 'curr_atco' in locals() else None,
+                            stop_ids=stop_seq_atcos,
+                        )
+                        if isinstance(lg, dict) and isinstance(lg.get("coords"), list) and len(lg.get("coords")) >= 2:
+                            coords = lg.get("coords")
+                            geom_source = lg.get("source")
+                            try:
+                                if isinstance(lg.get('diag'), dict):
+                                    # Stash on the leg; we'll copy it into the final
+                                    # leg['geometry'] payload when we embed geometry.
+                                    leg['_geometry_diag'] = lg.get('diag')
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -10430,27 +10543,30 @@ def build_journey_plan_response(route_result, merged, stop_coords, request_start
         wc = []
         geom_source = "linear"
         if last_coord:
-            try:
-                lg = route_leg_geometry(
-                    last_coord[0], last_coord[1],
-                    destination_point[0], destination_point[1],
-                    mode='walking',
-                    route_id=None,
-                    route_int=None,
-                    merged_key=(
-                        f"{_date_str}|{_bucket}"
-                        if _date_str and _bucket in ('AM', 'PM')
-                        else None
-                    ),
-                    merged=merged,
-                    from_stop_id=(from_loc.get('id') if isinstance(from_loc, dict) else None),
-                    to_stop_id=None,
-                    stop_ids=None,
-                )
-                if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
-                    wc = lg.get('coords')
-                    geom_source = lg.get('source') or 'linear'
-            except Exception:
+            if include_geometry:
+                try:
+                    lg = route_leg_geometry(
+                        last_coord[0], last_coord[1],
+                        destination_point[0], destination_point[1],
+                        mode='walking',
+                        route_id=None,
+                        route_int=None,
+                        merged_key=(
+                            f"{_date_str}|{_bucket}"
+                            if _date_str and _bucket in ('AM', 'PM')
+                            else None
+                        ),
+                        merged=merged,
+                        from_stop_id=(from_loc.get('id') if isinstance(from_loc, dict) else None),
+                        to_stop_id=None,
+                        stop_ids=None,
+                    )
+                    if isinstance(lg, dict) and isinstance(lg.get('coords'), list) and len(lg.get('coords')) >= 2:
+                        wc = lg.get('coords')
+                        geom_source = lg.get('source') or 'linear'
+                except Exception:
+                    wc = [[last_coord[0], last_coord[1]], [destination_point[0], destination_point[1]]]
+            else:
                 wc = [[last_coord[0], last_coord[1]], [destination_point[0], destination_point[1]]]
         else:
             wc = [[destination_point[0], destination_point[1]]]
