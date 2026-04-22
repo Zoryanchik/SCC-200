@@ -2893,6 +2893,16 @@ export default function MapViewMap({
           {/* Developer debug overlay removed - rely on JourneyRouteLayer smoothing and styling */}
           {filteredMarkers.map((marker) => {
             try {
+              // Defensive: skip any markers that do not have a valid [lat, lon] position.
+              // Leaflet throws "Invalid LatLng object: (undefined, undefined)" when
+              // given a marker with missing coordinates — guard here to avoid that.
+              const posValid =
+                marker &&
+                Array.isArray(marker.position) &&
+                marker.position.length >= 2 &&
+                Number.isFinite(Number(marker.position[0])) &&
+                Number.isFinite(Number(marker.position[1]));
+              if (!posValid) return null;
               let tooltipText = "";
               if (marker.type === "bus") {
                 const dm = marker.delayMinutes;
