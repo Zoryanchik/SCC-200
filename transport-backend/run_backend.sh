@@ -58,8 +58,8 @@ export NETWORK_NAME
 
 "$HERE/start_container.sh"
 
-echo "Waiting for /health to respond (timeout ~300s)..."
-for i in {1..100}; do
+echo "Waiting for /health to respond (timeout ~1200s)..."
+for i in {1..400}; do
   if curl -sS http://localhost:5050/health >/dev/null 2>&1; then
     echo
     echo "Backend is ready at http://localhost:5050"

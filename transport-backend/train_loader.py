@@ -374,6 +374,14 @@ class TrainLoader:
                        VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)''',
                     rows
                 )
+            today = date.today().isoformat()
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            tomorrow = (date.today() + timedelta(days=1)).isoformat()
+            cur.execute(
+                '''DELETE FROM train_journey_cache
+                   WHERE service_date NOT IN (%s, %s, %s)''',
+                (today, yesterday, tomorrow)
+            )
             conn.commit()
             conn.close()
             print(f"  [train] Cache saved for {service_date}: {len(rows)} journeys")
@@ -408,16 +416,7 @@ class TrainLoader:
             print(f"  [train]: Cache miss for {date_str}; no non-today download")
             return TrainData(num_routes=0, num_journeys=0, num_stops=0)
 
-        data = self.download_schedule_raw()
-        if data is None:
-            return TrainData(num_routes=0, num_journeys=0, num_stops=0)
-        loaded = self.load_schedule_file(data, target_date=date_str)
-        if len(getattr(loaded, 'journey_times', []) or []) == 0:
-            print(
-                f"  [train] ⚠ Download returned empty timetable for {date_str}; "
-                "skipping cache overwrite"
-            )
-            return loaded
+        loaded = self.download_schedule_today()
 
         self._save_cached_traindata(date_str, loaded)
         return loaded
