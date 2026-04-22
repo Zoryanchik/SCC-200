@@ -1827,83 +1827,96 @@ class BusLoader:
         build_link_fragments = True
 
         _t_tracks = _time.perf_counter() if timing_enabled else None
-        try:
-            assert_seq = str(_os.environ.get('BUS_TRACKS_ASSERT_SEQ') or '').lower() in ('1', 'true', 'yes')
+        # Building per-route link fragments can dominate the date-filtered
+        # bus-data load time (many small rows). For date-filtered loads we
+        # prefer to skip this and let `MergedData.get_route_link_tracks`
+        # lazily fetch per-route fragments when needed. Control with
+        # BUS_DAILY_LOAD_TRACK_FRAGMENTS=1 to enable the old eager path.
+        load_fragments = str(_os.environ.get('BUS_DAILY_LOAD_TRACK_FRAGMENTS') or '').lower() in ('1', 'true', 'yes')
+        if load_fragments:
+            try:
+                assert_seq = str(_os.environ.get('BUS_TRACKS_ASSERT_SEQ') or '').lower() in ('1', 'true', 'yes')
 
-            cur.execute(
-                "SELECT st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
-                "FROM bus_route_section_tracks st "
-                "JOIN _valid_routes vr ON st.route_id = vr.route_id "
-                "ORDER BY st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq"
-            )
+                cur.execute(
+                    "SELECT st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq, st.lat, st.lon "
+                    "FROM bus_route_section_tracks st "
+                    "JOIN _valid_routes vr ON st.route_id = vr.route_id "
+                    "ORDER BY st.route_id, st.section_id, st.from_atco, st.to_atco, st.seq"
+                )
 
-            # Stream rows directly from the cursor (avoid a huge fetchall()) and build
-            # each stop-to-stop fragment as a local list, committing once per group.
-            last_key = None  # (route_id, from_atco, to_atco)
-            last_pts = None  # list[(lat,lon)]
-            last_rint = None
-            last_fs = None
-            last_ts = None
-            last_seq = None
-
-            def _flush_fragment():
-                nonlocal last_key, last_pts, last_rint, last_fs, last_ts, last_seq
-                if last_key is None or not last_pts:
-                    return
-                try:
-                    frag_map = bd.route_link_tracks[last_rint]
-                    frag_map[(last_fs, last_ts)] = last_pts
-                except Exception:
-                    pass
+                # Stream rows directly from the cursor (avoid a huge fetchall()) and build
+                # each stop-to-stop fragment as a local list, committing once per group.
+                last_key = None  # (route_id, from_atco, to_atco)
+                last_pts = None  # list[(lat,lon)]
+                last_rint = None
+                last_fs = None
+                last_ts = None
                 last_seq = None
 
-            for route_id, _section_id, from_atco, to_atco, _seq, lat, lon in cur:
-                if not (build_link_fragments and from_atco and to_atco):
-                    continue
-
-                key = (route_id, from_atco, to_atco)
-                if key != last_key:
-                    _flush_fragment()
-                    last_key = key
-                    last_pts = []
-                    last_rint = None
-                    last_fs = None
-                    last_ts = None
+                def _flush_fragment():
+                    nonlocal last_key, last_pts, last_rint, last_fs, last_ts, last_seq
+                    if last_key is None or not last_pts:
+                        return
+                    try:
+                        frag_map = bd.route_link_tracks[last_rint]
+                        frag_map[(last_fs, last_ts)] = last_pts
+                    except Exception:
+                        pass
                     last_seq = None
 
-                    try:
-                        r_int = bd.map_routes.code_to_int.get(route_id)
-                        if r_int is None:
-                            r_int = bd.map_routes.get_int(route_id)
-                            bd._ensure_route_capacity(r_int)
-                        fs = bd.map_stops.get_int(from_atco)
-                        ts = bd.map_stops.get_int(to_atco)
-                        bd._ensure_stop_capacity(fs)
-                        bd._ensure_stop_capacity(ts)
-                        last_rint, last_fs, last_ts = r_int, fs, ts
-                    except Exception:
-                        last_key = None
-                        last_pts = None
+                for route_id, _section_id, from_atco, to_atco, _seq, lat, lon in cur:
+                    if not (build_link_fragments and from_atco and to_atco):
                         continue
 
-                pt = (lat, lon)
-                if last_pts and pt == last_pts[-1]:
-                    continue
+                    key = (route_id, from_atco, to_atco)
+                    if key != last_key:
+                        _flush_fragment()
+                        last_key = key
+                        last_pts = []
+                        last_rint = None
+                        last_fs = None
+                        last_ts = None
+                        last_seq = None
 
-                if assert_seq and last_seq is not None and _seq < last_seq:
-                    raise ValueError(
-                        f"tracks seq decreased for {route_id} {from_atco}->{to_atco}: {_seq} < {last_seq}"
-                    )
-                last_seq = _seq
-                last_pts.append(pt)
+                        try:
+                            r_int = bd.map_routes.code_to_int.get(route_id)
+                            if r_int is None:
+                                r_int = bd.map_routes.get_int(route_id)
+                                bd._ensure_route_capacity(r_int)
+                            fs = bd.map_stops.get_int(from_atco)
+                            ts = bd.map_stops.get_int(to_atco)
+                            bd._ensure_stop_capacity(fs)
+                            bd._ensure_stop_capacity(ts)
+                            last_rint, last_fs, last_ts = r_int, fs, ts
+                        except Exception:
+                            last_key = None
+                            last_pts = None
+                            continue
 
-            _flush_fragment()
-        except Exception:
-            # As per policy A, this is allowed (DB used for ingest/load),
-            # but if it fails we still want routing to work (without tracks).
-            import traceback
-            print("[bus_loader] WARNING: failed to load section tracks for date-filtered BusData")
-            traceback.print_exc()
+                    pt = (lat, lon)
+                    if last_pts and pt == last_pts[-1]:
+                        continue
+
+                    if assert_seq and last_seq is not None and _seq < last_seq:
+                        raise ValueError(
+                            f"tracks seq decreased for {route_id} {from_atco}->{to_atco}: {_seq} < {last_seq}"
+                        )
+                    last_seq = _seq
+                    last_pts.append(pt)
+
+                _flush_fragment()
+            except Exception:
+                # As per policy A, this is allowed (DB used for ingest/load),
+                # but if it fails we still want routing to work (without tracks).
+                import traceback
+                print("[bus_loader] WARNING: failed to load section tracks for date-filtered BusData")
+                traceback.print_exc()
+        else:
+            # Skip expensive geometry fragment load for date-filtered BusData.
+            # `MergedData` attaches the loader and will fetch fragments lazily
+            # per-route when needed via `get_route_link_tracks_for_route`.
+            if timing_enabled:
+                print(f"[bus_dayload] {date_str} phase_geometry: skipped (BUS_DAILY_LOAD_TRACK_FRAGMENTS=0)")
 
         _log('phase_geometry', _t_tracks)
 
